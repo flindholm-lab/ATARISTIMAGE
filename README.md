@@ -1,6 +1,6 @@
 # Atari .ST File Manager
 
-![Atari .ST File Manager GUI](https://via.placeholder.com/400x250?text=Atari+.ST+File+Manager+GUI)
+![Atari .ST File Manager GUI](screenshot.JPG)
 
 ## Overview
 A Lazarus/Free Pascal tool for managing files and directories on Atari ST disk images (`.st` files). It allows you to add, remove, create, and extract files and directories from FAT12-formatted disk images, commonly used for Atari ST emulation.
