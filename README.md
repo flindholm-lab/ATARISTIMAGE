@@ -18,7 +18,7 @@ A Lazarus/Free Pascal tool for managing files and directories on Atari ST disk i
 ---
 
 ## Requirements
-- Lazarus 4 (or Free Pascal with LCL).
+- Lazarus 4 (or Free Pascal with LCL). For building.
 - Tested on Windows.
 
 ---
@@ -113,7 +113,6 @@ A Lazarus/Free Pascal tool for managing files and directories on Atari ST disk i
 ---
 
 ## Future Improvements
-- Support for larger disk images (e.g., 1.44MB).
 - Drag-and-drop support for adding files.
 - Undo/redo functionality for pending operations.
 - Improved error handling and user feedback.
