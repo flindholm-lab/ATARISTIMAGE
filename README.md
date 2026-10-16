@@ -1,123 +1,117 @@
-# Atari .ST File Manager
+# Atari .ST & MSA File Manager
 
 ![Atari .ST File Manager GUI](screenshot.JPG)
 
-## Overview
-A Lazarus/Free Pascal tool for managing files and directories on Atari ST disk images (`.st` files). It allows you to add, remove, create, and extract files and directories from FAT12-formatted disk images, commonly used for Atari ST emulation.
+A Lazarus / Free Pascal project for managing and browsing Atari ST disk image files (`.st`, `.msa`).
+
+## Build & Run Chain (Linux + Wine)
+
+This project has been set up with an automated toolchain to compile for Windows Win32 and run under Wine on Linux without needing `sudo` or modifying system packages.
+
+### Prerequisites
+- **Wine** (installed at `/usr/bin/wine`)
+- **Lazarus 32-bit for Windows** (installed at `~/.wine/drive_c/lazarus/`, configured with FPC 3.2.2 and Win32 LCL)
+
+### Available Commands
+
+#### 1. Compile the Windows Executable
+```bash
+./build.sh
+# or
+make
+# or
+make release
+```
+Builds `stimage.exe` (Release mode, optimized, symbols stripped).
+
+#### 2. Compile in Debug Mode
+```bash
+./build.sh --debug
+# or
+make debug
+```
+
+#### 3. Run under Wine
+```bash
+./run.sh
+```
+Runs `wine stimage.exe` using your current X11 display session.
+
+#### 4. Compile and Run in One Step
+```bash
+./compile_and_run.sh
+# or
+make run
+```
+
+#### 5. Clean Build Artifacts
+```bash
+./build.sh --clean
+# or
+make clean
+```
+
+### File List Indicators
+- `*h*` — **Hidden File**: File has the FAT12 hidden attribute bit set (e.g. `R1PP3R.PRG *h*`).
+- `*d*` — **Deleted File**: Existing deleted entry on disk (e.g. `_EADME.DOC *d*`). Can be restored using the **Undelete** button.
+- `*A*` — **Pending Addition**: Staged file/directory to be written upon clicking "Write Image".
+- `*D*` — **Pending Deletion**: File/directory marked for deletion upon clicking "Write Image".
+
+### Atari ST Packer Detection & Depacking
+STIMAGE includes a built-in Atari ST packer detection and decompression engine supporting 32+ packer formats and variants:
+- **Pack-Ice** (v2.11, v2.31, v2.40, v3.0, etc.)
+- **Atomik Cruncher** (v3.3, v3.4, v3.5, v3.6, ATM5)
+- **Automation Packer** (v5.01, AU5!)
+- **JAM Packer** (v4.0)
+- **Rob Northen Compression / RNC ProPack** (Methods 1 & 2)
+- **Thunder Packer** (v1.0 & v2.0)
+- **JEK Packer / Bytekiller**
+- **Degas Elite RLE Compressed Images** (`.PC1`, `.PC2`, `.PC3`)
+- **Heuristic Signature Scanner** for embedded compressed streams
+
+#### How to Use:
+1. **In File Viewer / Hex Inspector**:
+   - Double-click any file (or select and click **View File**).
+   - If the file is compressed with a supported packer, the packer name and status are shown in the header.
+   - Click **View Depacked** to decompress and inspect the depacked data in Hex or Text view (with automatic GEMDOS `$601A` executable header decoding).
+   - Click **View Packed** to toggle back to the raw packed bytes.
+   - Click **Save Depacked...** to save the decompressed file directly to host disk.
+2. **From the Main Window**:
+   - Select any file in the list and click **File -> Extract Depacked File...** to automatically detect, depack, and save to your computer in one step.
+
+### Atari ST Picture Viewer
+STIMAGE includes a built-in image viewer that detects and renders the most common Atari ST graphic formats:
+- **DEGAS / DEGAS Elite**:
+  - `.PI1` — Low Resolution (320x200, 16 colors from 512 palette)
+  - `.PI2` — Medium Resolution (640x200, 4 colors, aspect-ratio corrected)
+  - `.PI3` — High Resolution (640x400, monochrome)
+  - `.PC1`, `.PC2`, `.PC3` — DEGAS Elite RLE Compressed images (automatically uncompressed on the fly)
+- **NeoChrome**:
+  - `.NEO` — 320x200 16-color images with animation palettes
+- **Spectrum 512**:
+  - `.SPU` — 320x200 512-color images rendered with dynamic per-scanline palettes
+- **Raw Atari ST Screen Dumps**:
+  - 32,000 / 32,032 bytes raw screens with embedded or default Atari ST system palette
+- **Depacked Graphics**:
+  - Files compressed with Pack-Ice, Atomik, JAM, etc. can be depacked with the **View Depacked** button and immediately inspected in Picture View!
+
+#### Picture Viewer Features:
+- **Instant Preview**: Double-clicking any recognized picture automatically opens it in **Picture View**.
+- **Zoom Modes**: Click the **Zoom** button to toggle between:
+  - `Zoom: 2x` (640x400 authentic display scaling)
+  - `Zoom: 1x` (1:1 native pixel resolution)
+  - `Zoom: Fit` (scale to window)
+- **Export to Modern Formats**: Click **Save File...** while in Picture View to export the picture directly as a standard Windows 24-bit **`.BMP`** bitmap file or raw image.
+
+### Undelete Feature
+To recover a deleted file:
+1. Select any file marked with `*d*` in the file list.
+2. Click the **Undelete** button.
+3. Enter the restored filename or missing first character in the dialog prompt.
+4. The tool validates cluster availability in the FAT table, re-links the cluster chain, restores the directory entry, and refreshes the display.
 
 ---
 
-## Features
-- **Open and Create Disk Images**: Open existing `.st` images or create new 720KB images.
-- **File Operations**: Add, remove, and save files to/from the disk image.
-- **Directory Operations**: Create and remove directories within the image.
-- **Navigation**: Browse directories, go back to parent directories, and double-click to enter subdirectories.
-- **Free Space Display**: Visual feedback on utilized and free space in the image.
-- **Pending Operations**: Preview changes before writing them to the image.
-
----
-
-## Requirements
-- Lazarus 4 (or Free Pascal with LCL). For building.
-- Tested on Windows.
-
----
-
-## Usage
-
-### 1. Open or Create an Image
-- Click **"Open Image"** to load an existing `.st` file.
-- Click **"Create 720KB Image"** to create a new blank 720KB disk image.
-
-### 2. Navigate the Disk Image
-- The current directory path is displayed at the top.
-- Double-click a directory to enter it.
-- Click **"Back"** to return to the parent directory.
-
-### 3. Add Files
-- Click **"Add File"** to select files from your computer.
-- Added files are marked with `*A*` in the list and will be written to the image when you click **"Write Image"**.
-
-### 4. Create Directories
-- Click **"Create Directory"** and enter a name (max 8 characters).
-- New directories are marked with `*A*` in the list.
-
-### 5. Remove Files or Directories
-- Select a file or directory and click **"Remove File"** or **"Remove Directory"**.
-- Removed items are marked with `*D*` in the list.
-
-### 6. Save Files to Your Computer
-- Select a file and click **"Save File"** to extract it from the image.
-
-### 7. Write Changes to the Image
-- Click **"Write Image"** to apply all pending changes (additions, deletions, and new directories) to the disk image.
-- You will be prompted to save the modified image.
-
----
-
-## How It Works
-
-### FAT12 Filesystem Support
-- The tool reads and writes FAT12-formatted disk images, including:
-  - Boot sector parsing.
-  - FAT table management.
-  - Directory entry handling.
-  - Cluster allocation and deallocation.
-
-### File Operations
-- **Adding Files**: Files are written to the image, and the FAT is updated to allocate clusters.
-- **Removing Files**: Files are marked as deleted in the directory entry, and their clusters are freed in the FAT.
-- **Creating Directories**: New directories are created with `.` and `..` entries, and the FAT is updated.
-
-### Free Space Calculation
-- The tool calculates free space based on the image size (360KB, 720KB, or 800KB) and displays the utilized space percentage.
-
----
-
-## Example Workflow
-
-### Adding Files to an Image
-1. Open an existing `.st` image or create a new one.
-2. Click **"Add File"** and select files from your computer.
-3. Click **"Write Image"** to save the changes.
-
-### Creating a Directory
-1. Navigate to the desired directory.
-2. Click **"Create Directory"** and enter a name.
-3. Click **"Write Image"** to create the directory.
-
-### Extracting a File
-1. Navigate to the file you want to extract.
-2. Select the file and click **"Save File"**.
-3. Choose a location on your computer to save the file.
-
----
-
-## Notes
-- **Backup Your Images**: Always back up your disk images before making changes.
-- **File Size Limits**: The tool enforces the original image size to prevent expansion.
-- **FAT12 Limitations**: File and directory names are limited to 8 characters (plus 3-character extension).
-
----
-
-## Troubleshooting
-
-| Issue                          | Solution                                                                 |
-|--------------------------------|--------------------------------------------------------------------------|
-| "Directory not found"          | Ensure the directory path is correct and the image is valid.            |
-| "File not found"               | Verify the file exists in the current directory.                        |
-| "No free directory entry"      | The directory is full; try removing files or creating a subdirectory.  |
-| "Not enough free clusters"     | The image is full; delete files or use a larger image.                  |
-| "Invalid directory name"       | Directory names must be 8 characters or less.                          |
-
----
-
-## Future Improvements
-- Drag-and-drop support for adding files.
-- Undo/redo functionality for pending operations.
-- Improved error handling and user feedback.
-
----
-
-## License
-MIT
+### How the Toolchain Works
+- **Wine Lazarus (`lazbuild.exe`)**: Builds the project using Free Pascal 3.2.2 with native Win32 LCL bindings.
+- **GVFS / SMB Compatibility Layer**: Because GVFS SMB mounts don't support POSIX file locking required by Wine's intermediate compiler passes (e.g. `.res` resource writing), `build.sh` stages Pascal sources to a local temporary workspace (`/tmp/stimage_build_$USER`), maps it as Wine drive `T:`, compiles in ~1.5s, and syncs `stimage.exe` directly back to the project root.
