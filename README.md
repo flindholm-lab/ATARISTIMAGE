@@ -1,6 +1,9 @@
 # Atari .ST & MSA File Manager
 
-![Atari .ST File Manager GUI](screenshot.JPG)
+<img width="560" height="511" alt="image" src="https://github.com/user-attachments/assets/38affcb0-6b13-47d7-9baa-0cdf371e748f" />
+
+<img width="766" height="655" alt="image" src="https://github.com/user-attachments/assets/4a273ff5-2dec-4a98-8f0d-ff9a1556e247" />
+
 
 A Lazarus / Free Pascal project for managing and browsing Atari ST disk image files (`.st`, `.msa`).
 
@@ -80,6 +83,7 @@ STIMAGE includes a built-in Atari ST packer detection and decompression engine s
    - Select any file in the list and click **File -> Extract Depacked File...** to automatically detect, depack, and save to your computer in one step.
 
 ### Atari ST Picture Viewer
+<img width="844" height="584" alt="image" src="https://github.com/user-attachments/assets/9cac56de-b7d2-4591-97bb-ae890696207c" />
 STIMAGE includes a built-in image viewer that detects and renders the most common Atari ST graphic formats:
 - **DEGAS / DEGAS Elite**:
   - `.PI1` — Low Resolution (320x200, 16 colors from 512 palette)
