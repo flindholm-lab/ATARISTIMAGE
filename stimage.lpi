@@ -119,6 +119,52 @@
         <IsPartOfProject Value="True"/>
         <HasResources Value="True"/>
       </Unit>
+      <Unit>
+        <Filename Value="unit_clustermap.pas"/>
+        <IsPartOfProject Value="True"/>
+        <ComponentName Value="FormClusterMap"/>
+        <HasResources Value="True"/>
+        <ResourceBaseClass Value="Form"/>
+        <UnitName Value="unit_clustermap"/>
+      </Unit>
+      <Unit>
+        <Filename Value="unit_clustermap.lfm"/>
+        <IsPartOfProject Value="True"/>
+        <HasResources Value="True"/>
+      </Unit>
+      <Unit>
+        <Filename Value="unit_msa.pas"/>
+        <IsPartOfProject Value="True"/>
+        <UnitName Value="unit_msa"/>
+      </Unit>
+      <Unit>
+        <Filename Value="unit_fileviewer.pas"/>
+        <IsPartOfProject Value="True"/>
+        <ComponentName Value="FormFileViewer"/>
+        <HasResources Value="True"/>
+        <ResourceBaseClass Value="Form"/>
+        <UnitName Value="unit_fileviewer"/>
+      </Unit>
+      <Unit>
+        <Filename Value="unit_fileviewer.lfm"/>
+        <IsPartOfProject Value="True"/>
+        <HasResources Value="True"/>
+      </Unit>
+      <Unit>
+        <Filename Value="unit_depacker.pas"/>
+        <IsPartOfProject Value="True"/>
+        <UnitName Value="unit_depacker"/>
+      </Unit>
+      <Unit>
+        <Filename Value="unit_dragout.pas"/>
+        <IsPartOfProject Value="True"/>
+        <UnitName Value="unit_dragout"/>
+      </Unit>
+      <Unit>
+        <Filename Value="unit_ataripic.pas"/>
+        <IsPartOfProject Value="True"/>
+        <UnitName Value="unit_ataripic"/>
+      </Unit>
     </Units>
   </ProjectOptions>
   <CompilerOptions>

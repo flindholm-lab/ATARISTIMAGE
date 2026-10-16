@@ -1,0 +1,157 @@
+object FormFileViewer: TFormFileViewer
+  Left = 260
+  Height = 560
+  Top = 140
+  Width = 840
+  Caption = 'File Viewer / Hex Inspector'
+  ClientHeight = 560
+  ClientWidth = 840
+  Color = clBtnFace
+  Font.Color = clWindowText
+  Font.Height = -11
+  Font.Name = 'Tahoma'
+  Position = poScreenCenter
+  OnCreate = FormCreate
+  OnDestroy = FormDestroy
+  object PanelTop: TPanel
+    Left = 0
+    Height = 78
+    Top = 0
+    Width = 840
+    Align = alTop
+    BevelOuter = bvNone
+    ClientHeight = 78
+    ClientWidth = 840
+    TabOrder = 0
+    object LabelFileName: TLabel
+      Left = 12
+      Height = 18
+      Top = 10
+      Width = 63
+      Caption = 'File: [None]'
+      Font.Height = -13
+      Font.Name = 'Tahoma'
+      Font.Style = [fsBold]
+      ParentFont = False
+    end
+    object LabelFileInfo: TLabel
+      Left = 12
+      Height = 14
+      Top = 46
+      Width = 148
+      Caption = 'Size: 0 bytes | Cluster: 0'
+      ParentFont = False
+    end
+    object ButtonHexMode: TButton
+      Left = 246
+      Height = 25
+      Top = 8
+      Width = 66
+      Anchors = [akTop, akRight]
+      Caption = 'Hex View'
+      TabOrder = 0
+      OnClick = ButtonHexModeClick
+    end
+    object ButtonTextMode: TButton
+      Left = 316
+      Height = 25
+      Top = 8
+      Width = 66
+      Anchors = [akTop, akRight]
+      Caption = 'Text View'
+      TabOrder = 1
+      OnClick = ButtonTextModeClick
+    end
+    object ButtonImageMode: TButton
+      Left = 386
+      Height = 25
+      Top = 8
+      Width = 82
+      Anchors = [akTop, akRight]
+      Caption = 'Picture View'
+      TabOrder = 2
+      OnClick = ButtonImageModeClick
+    end
+    object ButtonZoom: TButton
+      Left = 472
+      Height = 25
+      Top = 8
+      Width = 68
+      Anchors = [akTop, akRight]
+      Caption = 'Zoom: 2x'
+      TabOrder = 3
+      Visible = False
+      OnClick = ButtonZoomClick
+    end
+    object ButtonDepack: TButton
+      Left = 544
+      Height = 25
+      Top = 8
+      Width = 96
+      Anchors = [akTop, akRight]
+      Caption = 'View Depacked'
+      TabOrder = 4
+      OnClick = ButtonDepackClick
+    end
+    object ButtonSaveCopy: TButton
+      Left = 644
+      Height = 25
+      Top = 8
+      Width = 80
+      Anchors = [akTop, akRight]
+      Caption = 'Save File...'
+      TabOrder = 5
+      OnClick = ButtonSaveCopyClick
+    end
+    object ButtonSaveDepacked: TButton
+      Left = 728
+      Height = 25
+      Top = 8
+      Width = 104
+      Anchors = [akTop, akRight]
+      Caption = 'Save Depacked...'
+      TabOrder = 6
+      OnClick = ButtonSaveDepackedClick
+    end
+  end
+  object MemoContent: TMemo
+    Left = 8
+    Height = 472
+    Top = 80
+    Width = 824
+    Anchors = [akTop, akLeft, akRight, akBottom]
+    Font.Color = clWindowText
+    Font.Height = -12
+    Font.Name = 'Courier New'
+    ParentFont = False
+    ReadOnly = True
+    ScrollBars = ssBoth
+    TabOrder = 1
+    WordWrap = False
+  end
+  object ScrollBoxImage: TScrollBox
+    Left = 8
+    Height = 472
+    Top = 80
+    Width = 824
+    Anchors = [akTop, akLeft, akRight, akBottom]
+    Color = 2763306
+    ParentColor = False
+    TabOrder = 2
+    Visible = False
+    object ImagePicture: TImage
+      Left = 0
+      Height = 400
+      Top = 0
+      Width = 640
+      Center = True
+      Proportional = True
+      Stretch = True
+    end
+  end
+  object SaveDialogExport: TSaveDialog
+    Title = 'Save Extracted File As...'
+    Left = 280
+    Top = 15
+  end
+end

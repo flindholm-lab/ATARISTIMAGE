@@ -1,0 +1,552 @@
+object FormClusterMap: TFormClusterMap
+  Left = 280
+  Height = 630
+  Top = 120
+  Width = 760
+  Caption = 'STIMAGE - Cluster Map & Sector Hex Editor'
+  ClientHeight = 630
+  ClientWidth = 760
+  Color = clBtnFace
+  Font.Color = clWindowText
+  Font.Height = -11
+  Font.Name = 'Tahoma'
+  Position = poOwnerFormCenter
+  OnCreate = FormCreate
+  OnDestroy = FormDestroy
+  OnShow = FormShow
+  object PageControlMain: TPageControl
+    Left = 0
+    Height = 630
+    Top = 0
+    Width = 760
+    ActivePage = TabSheetClusterMap
+    Align = alClient
+    TabIndex = 0
+    TabOrder = 0
+    OnChange = PageControlMainChange
+    object TabSheetClusterMap: TTabSheet
+      Caption = 'Cluster Allocation Map'
+      object PanelClusterHeader: TPanel
+        Left = 0
+        Height = 68
+        Top = 0
+        Width = 752
+        Align = alTop
+        BevelOuter = bvNone
+        ClientHeight = 68
+        ClientWidth = 752
+        TabOrder = 0
+        object LabelUtilizedTitle: TLabel
+          Left = 16
+          Height = 13
+          Top = 8
+          Width = 145
+          Caption = 'Floppy Space Utilized: 0.0%'
+          Font.Color = clWindowText
+          Font.Height = -11
+          Font.Name = 'Tahoma'
+          Font.Style = [fsBold]
+          ParentColor = False
+          ParentFont = False
+        end
+        object ProgressBarCluster: TProgressBar
+          Left = 16
+          Height = 16
+          Top = 26
+          Width = 720
+          Anchors = [akTop, akLeft, akRight]
+          Smooth = True
+          Step = 1
+          TabOrder = 0
+        end
+        object LabelUsedCount: TLabel
+          Left = 16
+          Height = 13
+          Top = 46
+          Width = 63
+          Caption = '0 / 713 used'
+          ParentColor = False
+        end
+        object LabelFreeCount: TLabel
+          Left = 680
+          Height = 13
+          Top = 46
+          Width = 56
+          Alignment = taRightJustify
+          Anchors = [akTop, akRight]
+          Caption = '713 free'
+          ParentColor = False
+        end
+      end
+      object PanelInspector: TPanel
+        Left = 536
+        Height = 534
+        Top = 68
+        Width = 216
+        Align = alRight
+        BevelOuter = bvLowered
+        ClientHeight = 534
+        ClientWidth = 216
+        TabOrder = 1
+        object LabelInspTitle: TLabel
+          Left = 12
+          Height = 13
+          Top = 10
+          Width = 97
+          Caption = 'CLUSTER DETAILS'
+          Font.Style = [fsBold]
+          ParentColor = False
+        end
+        object LabelInspCluster: TLabel
+          Left = 12
+          Height = 13
+          Top = 32
+          Width = 83
+          Caption = 'Cluster: #--'
+          ParentColor = False
+        end
+        object LabelInspStatus: TLabel
+          Left = 12
+          Height = 13
+          Top = 52
+          Width = 51
+          Caption = 'Status: --'
+          ParentColor = False
+        end
+        object LabelInspFAT: TLabel
+          Left = 12
+          Height = 13
+          Top = 72
+          Width = 71
+          Caption = 'FAT Value: --'
+          ParentColor = False
+        end
+        object LabelInspFile: TLabel
+          Left = 12
+          Height = 26
+          Top = 92
+          Width = 190
+          AutoSize = False
+          Caption = 'File: --'
+          ParentColor = False
+          WordWrap = True
+        end
+        object LabelInspSectors: TLabel
+          Left = 12
+          Height = 13
+          Top = 122
+          Width = 60
+          Caption = 'Sectors: --'
+          ParentColor = False
+        end
+        object LabelInspOffset: TLabel
+          Left = 12
+          Height = 13
+          Top = 142
+          Width = 52
+          Caption = 'Offset: --'
+          ParentColor = False
+        end
+        object Bevel1: TBevel
+          Left = 12
+          Height = 2
+          Top = 165
+          Width = 190
+        end
+        object ButtonViewInHex: TButton
+          Left = 12
+          Height = 28
+          Top = 175
+          Width = 190
+          Caption = 'View Sector in Hex'
+          OnClick = ButtonViewInHexClick
+          TabOrder = 0
+        end
+        object ButtonSetFree: TButton
+          Left = 12
+          Height = 25
+          Top = 210
+          Width = 190
+          Caption = 'Mark Free ($000)'
+          OnClick = ButtonSetFreeClick
+          TabOrder = 1
+        end
+        object ButtonSetEOC: TButton
+          Left = 12
+          Height = 25
+          Top = 240
+          Width = 190
+          Caption = 'Mark End of File ($FFF)'
+          OnClick = ButtonSetEOCClick
+          TabOrder = 2
+        end
+        object ButtonSetBad: TButton
+          Left = 12
+          Height = 25
+          Top = 270
+          Width = 190
+          Caption = 'Mark / Unmark Bad ($FF7)'
+          OnClick = ButtonSetBadClick
+          TabOrder = 3
+        end
+        object ButtonSetCustomFAT: TButton
+          Left = 12
+          Height = 25
+          Top = 300
+          Width = 190
+          Caption = 'Set Custom FAT Value...'
+          OnClick = ButtonSetCustomFATClick
+          TabOrder = 4
+        end
+        object Bevel2: TBevel
+          Left = 12
+          Height = 2
+          Top = 335
+          Width = 190
+        end
+        object ButtonRefreshMap: TButton
+          Left = 12
+          Height = 25
+          Top = 345
+          Width = 190
+          Caption = 'Refresh Map'
+          OnClick = ButtonRefreshMapClick
+          TabOrder = 5
+        end
+        object ButtonClose1: TButton
+          Left = 12
+          Height = 25
+          Top = 495
+          Width = 190
+          Anchors = [akLeft, akBottom]
+          Caption = 'Close'
+          OnClick = ButtonCloseClick
+          TabOrder = 6
+        end
+      end
+      object PanelMapContainer: TPanel
+        Left = 0
+        Height = 534
+        Top = 68
+        Width = 536
+        Align = alClient
+        BevelOuter = bvNone
+        ClientHeight = 534
+        ClientWidth = 536
+        TabOrder = 2
+        object PanelMapTitle: TPanel
+          Left = 0
+          Height = 26
+          Top = 0
+          Width = 536
+          Align = alTop
+          BevelOuter = bvNone
+          ClientHeight = 26
+          ClientWidth = 536
+          TabOrder = 0
+          object LabelMapTitle: TLabel
+            Left = 16
+            Height = 13
+            Top = 6
+            Width = 165
+            Caption = 'CLUSTER ALLOCATION MAP'
+            Font.Style = [fsBold]
+            ParentColor = False
+          end
+          object LabelHoverInfo: TLabel
+            Left = 200
+            Height = 13
+            Top = 6
+            Width = 320
+            Anchors = [akTop, akLeft, akRight]
+            AutoSize = False
+            Caption = 'Hover cell'
+            Font.Color = clGrayText
+            ParentColor = False
+          end
+        end
+        object PanelLegend: TPanel
+          Left = 0
+          Height = 26
+          Top = 508
+          Width = 536
+          Align = alBottom
+          BevelOuter = bvNone
+          ClientHeight = 26
+          ClientWidth = 536
+          TabOrder = 1
+          object LabelLegend: TLabel
+            Left = 16
+            Height = 13
+            Top = 6
+            Width = 500
+            Caption = '[ ] Free   [■ Blue] Allocated   [■ Orange] EOF   [■ Red] Bad   [■ Yellow] Selected File'
+            Font.Color = clGrayText
+            ParentColor = False
+          end
+        end
+        object ScrollBoxMap: TScrollBox
+          Left = 0
+          Height = 482
+          Top = 26
+          Width = 536
+          Align = alClient
+          BorderStyle = bsNone
+          ClientHeight = 482
+          ClientWidth = 536
+          TabOrder = 2
+          object PaintBoxClusters: TPaintBox
+            Left = 12
+            Height = 460
+            Top = 4
+            Width = 510
+            OnDblClick = PaintBoxClustersDblClick
+            OnMouseDown = PaintBoxClustersMouseDown
+            OnMouseMove = PaintBoxClustersMouseMove
+            OnPaint = PaintBoxClustersPaint
+          end
+        end
+      end
+    end
+    object TabSheetSectorEditor: TTabSheet
+      Caption = 'Sector Hex Editor'
+      object PanelSectorNav: TPanel
+        Left = 0
+        Height = 44
+        Top = 0
+        Width = 752
+        Align = alTop
+        BevelOuter = bvNone
+        ClientHeight = 44
+        ClientWidth = 752
+        TabOrder = 0
+        object LabelSectorPrompt: TLabel
+          Left = 12
+          Height = 13
+          Top = 15
+          Width = 51
+          Caption = 'SECTOR:'
+          Font.Style = [fsBold]
+          ParentColor = False
+        end
+        object EditSectorNum: TEdit
+          Left = 68
+          Height = 23
+          Top = 10
+          Width = 52
+          OnKeyDown = EditSectorNumKeyDown
+          TabOrder = 0
+          Text = '0'
+        end
+        object LabelMaxSector: TLabel
+          Left = 124
+          Height = 13
+          Top = 15
+          Width = 41
+          Caption = '/ 1439'
+          ParentColor = False
+        end
+        object ButtonPrevSector: TButton
+          Left = 172
+          Height = 25
+          Top = 9
+          Width = 64
+          Caption = '◄ PREV'
+          OnClick = ButtonPrevSectorClick
+          TabOrder = 1
+        end
+        object ButtonNextSector: TButton
+          Left = 240
+          Height = 25
+          Top = 9
+          Width = 64
+          Caption = 'NEXT ►'
+          OnClick = ButtonNextSectorClick
+          TabOrder = 2
+        end
+        object ButtonBoot: TButton
+          Left = 310
+          Height = 25
+          Top = 9
+          Width = 68
+          Caption = 'BOOT (0)'
+          OnClick = ButtonBootClick
+          TabOrder = 3
+        end
+        object ButtonFAT1: TButton
+          Left = 382
+          Height = 25
+          Top = 9
+          Width = 50
+          Caption = 'FAT 1'
+          OnClick = ButtonFAT1Click
+          TabOrder = 4
+        end
+        object ButtonFAT2: TButton
+          Left = 436
+          Height = 25
+          Top = 9
+          Width = 50
+          Caption = 'FAT 2'
+          OnClick = ButtonFAT2Click
+          TabOrder = 5
+        end
+        object ButtonRootDir: TButton
+          Left = 490
+          Height = 25
+          Top = 9
+          Width = 50
+          Caption = 'ROOT'
+          OnClick = ButtonRootDirClick
+          TabOrder = 6
+        end
+        object ButtonReadOnlyToggle: TButton
+          Left = 548
+          Height = 25
+          Top = 9
+          Width = 100
+          Caption = '🔒 READ ONLY'
+          OnClick = ButtonReadOnlyToggleClick
+          TabOrder = 7
+        end
+        object ButtonSaveSector: TButton
+          Left = 652
+          Height = 25
+          Top = 9
+          Width = 88
+          Caption = '💾 SAVE'
+          Enabled = False
+          OnClick = ButtonSaveSectorClick
+          TabOrder = 8
+        end
+      end
+      object GridHex: TStringGrid
+        Left = 0
+        Height = 474
+        Top = 44
+        Width = 752
+        Align = alClient
+        ColCount = 18
+        DefaultColWidth = 26
+        DefaultRowHeight = 18
+        FixedCols = 1
+        FixedRows = 1
+        Font.Height = -12
+        Font.Name = 'Courier New'
+        Options = [goFixedVertLine, goFixedHorzLine, goVertLine, goHorzLine, goTabs, goSmoothScroll]
+        RowCount = 33
+        ScrollBars = ssAutoBoth
+        TabOrder = 1
+        OnSelectCell = GridHexSelectCell
+        OnSetEditText = GridHexSetEditText
+      end
+      object PanelEditBar: TPanel
+        Left = 0
+        Height = 36
+        Top = 518
+        Width = 752
+        Align = alBottom
+        BevelOuter = bvNone
+        ClientHeight = 36
+        ClientWidth = 752
+        TabOrder = 2
+        Visible = False
+        object LabelSelectedByte: TLabel
+          Left = 12
+          Height = 13
+          Top = 11
+          Width = 110
+          Caption = 'Byte at offset $000:'
+          ParentColor = False
+        end
+        object EditHexByte: TEdit
+          Left = 128
+          Height = 21
+          Top = 7
+          Width = 35
+          Font.Name = 'Courier New'
+          MaxLength = 2
+          OnKeyDown = EditHexByteKeyDown
+          TabOrder = 0
+        end
+        object ButtonApplyByte: TButton
+          Left = 168
+          Height = 23
+          Top = 6
+          Width = 50
+          Caption = 'Set'
+          OnClick = ButtonApplyByteClick
+          TabOrder = 1
+        end
+        object LabelFillPrompt: TLabel
+          Left = 240
+          Height = 13
+          Top = 11
+          Width = 120
+          Caption = 'Fill entire sector with:'
+          ParentColor = False
+        end
+        object EditFillByte: TEdit
+          Left = 365
+          Height = 21
+          Top = 7
+          Width = 35
+          Font.Name = 'Courier New'
+          MaxLength = 2
+          TabOrder = 2
+          Text = '00'
+        end
+        object ButtonFillSector: TButton
+          Left = 405
+          Height = 23
+          Top = 6
+          Width = 45
+          Caption = 'Fill'
+          OnClick = ButtonFillSectorClick
+          TabOrder = 3
+        end
+      end
+      object PanelSectorFooter: TPanel
+        Left = 0
+        Height = 32
+        Top = 554
+        Width = 752
+        Align = alBottom
+        BevelOuter = bvLowered
+        ClientHeight = 32
+        ClientWidth = 752
+        TabOrder = 3
+        object LabelDiskOffset: TLabel
+          Left = 12
+          Height = 13
+          Top = 9
+          Width = 190
+          Caption = 'PHYSICAL DISK OFFSET: 0 BYTES'
+          Font.Style = [fsBold]
+          ParentColor = False
+        end
+        object LabelSectorRegion: TLabel
+          Left = 250
+          Height = 13
+          Top = 9
+          Width = 340
+          Anchors = [akTop, akLeft, akRight]
+          AutoSize = False
+          Caption = 'Region: Boot Sector'
+          ParentColor = False
+        end
+        object LabelEditStatus: TLabel
+          Left = 620
+          Height = 13
+          Top = 9
+          Width = 115
+          Alignment = taRightJustify
+          Anchors = [akTop, akRight]
+          Caption = '🔒 READ ONLY MAP'
+          Font.Style = [fsBold]
+          ParentColor = False
+        end
+      end
+    end
+  end
+end

@@ -1,0 +1,670 @@
+unit unit_fileviewer;
+
+{$mode objfpc}{$H+}
+
+interface
+
+uses
+  Classes, SysUtils, Forms, Controls, Graphics, Dialogs, StdCtrls, ExtCtrls, Math,
+  unit_depacker, unit_ataripic;
+
+type
+  { TFormFileViewer }
+  TFormFileViewer = class(TForm)
+    PanelTop: TPanel;
+    LabelFileName: TLabel;
+    LabelFileInfo: TLabel;
+    ButtonHexMode: TButton;
+    ButtonTextMode: TButton;
+    ButtonImageMode: TButton;
+    ButtonZoom: TButton;
+    ButtonDepack: TButton;
+    ButtonSaveCopy: TButton;
+    ButtonSaveDepacked: TButton;
+    MemoContent: TMemo;
+    ScrollBoxImage: TScrollBox;
+    ImagePicture: TImage;
+    SaveDialogExport: TSaveDialog;
+
+    procedure FormCreate(Sender: TObject);
+    procedure FormDestroy(Sender: TObject);
+    procedure ButtonHexModeClick(Sender: TObject);
+    procedure ButtonTextModeClick(Sender: TObject);
+    procedure ButtonImageModeClick(Sender: TObject);
+    procedure ButtonZoomClick(Sender: TObject);
+    procedure ButtonDepackClick(Sender: TObject);
+    procedure ButtonSaveCopyClick(Sender: TObject);
+    procedure ButtonSaveDepackedClick(Sender: TObject);
+
+  private
+    FData: TBytes;
+    FOriginalData: TBytes;
+    FDepackedData: TBytes;
+    FHasDepacked: Boolean;
+    FIsDepackedView: Boolean;
+    FDetectedPacker: string;
+    FFileName: string;
+    FStartCluster: Word;
+    FCurrentMode: Integer; // 0 = Hex, 1 = Text, 2 = Picture
+
+    FPictureBitmap: Graphics.TBitmap;
+    FPictureFormatDesc: string;
+    FPictureWidth: Integer;
+    FPictureHeight: Integer;
+    FPictureColors: Integer;
+    FHasPicture: Boolean;
+    FZoomMode: Integer; // 0 = 2x, 1 = 1x, 2 = Fit
+
+    procedure RenderHexView;
+    procedure RenderTextView;
+    procedure RenderImageView;
+    procedure CheckAndDecodePicture(const AData: TBytes);
+    function DecodePRGHeader: string;
+    function TryPerformDepack: Boolean;
+
+  public
+    procedure LoadFromStream(AStream: TStream; const ADisplayName: string; ACluster: Word);
+    procedure LoadFromBuffer(const ABytes: TBytes; const ADisplayName: string; ACluster: Word);
+    procedure LoadFromHostFile(const AHostPath, ADisplayName: string; ACluster: Word);
+  end;
+
+var
+  FormFileViewer: TFormFileViewer;
+
+implementation
+
+{$R *.lfm}
+
+function SwapLongBE(AValue: LongWord): LongWord;
+begin
+  Result := ((AValue and $FF) shl 24) or
+            (((AValue shr 8) and $FF) shl 16) or
+            (((AValue shr 16) and $FF) shl 8) or
+            ((AValue shr 24) and $FF);
+end;
+
+{ TFormFileViewer }
+
+procedure TFormFileViewer.FormCreate(Sender: TObject);
+begin
+  FCurrentMode := 0; // Default to Hex View
+  FHasDepacked := False;
+  FIsDepackedView := False;
+  FDetectedPacker := 'None';
+  FPictureBitmap := nil;
+  FHasPicture := False;
+  FZoomMode := 0; // Default to 2x zoom
+end;
+
+procedure TFormFileViewer.FormDestroy(Sender: TObject);
+begin
+  if FPictureBitmap <> nil then
+  begin
+    FPictureBitmap.Free;
+    FPictureBitmap := nil;
+  end;
+end;
+
+procedure TFormFileViewer.ButtonHexModeClick(Sender: TObject);
+begin
+  FCurrentMode := 0;
+  ScrollBoxImage.Visible := False;
+  ButtonZoom.Visible := False;
+  MemoContent.Visible := True;
+  RenderHexView;
+end;
+
+procedure TFormFileViewer.ButtonTextModeClick(Sender: TObject);
+begin
+  FCurrentMode := 1;
+  ScrollBoxImage.Visible := False;
+  ButtonZoom.Visible := False;
+  MemoContent.Visible := True;
+  RenderTextView;
+end;
+
+procedure TFormFileViewer.ButtonImageModeClick(Sender: TObject);
+begin
+  if not FHasPicture then Exit;
+  FCurrentMode := 2;
+  MemoContent.Visible := False;
+  ScrollBoxImage.Visible := True;
+  ButtonZoom.Visible := True;
+  RenderImageView;
+end;
+
+procedure TFormFileViewer.ButtonZoomClick(Sender: TObject);
+begin
+  FZoomMode := (FZoomMode + 1) mod 3;
+  RenderImageView;
+end;
+
+procedure TFormFileViewer.CheckAndDecodePicture(const AData: TBytes);
+begin
+  if FPictureBitmap <> nil then
+  begin
+    FPictureBitmap.Free;
+    FPictureBitmap := nil;
+  end;
+
+  FHasPicture := False;
+  FPictureFormatDesc := '';
+  FPictureWidth := 0;
+  FPictureHeight := 0;
+  FPictureColors := 0;
+
+  if Length(AData) >= 34 then
+  begin
+    if DecodeAtariPicture(@AData[0], Length(AData), FFileName, FPictureBitmap,
+                          FPictureFormatDesc, FPictureWidth, FPictureHeight, FPictureColors) then
+    begin
+      FHasPicture := True;
+    end;
+  end;
+
+  ButtonImageMode.Visible := FHasPicture;
+  ButtonImageMode.Enabled := FHasPicture;
+end;
+
+procedure TFormFileViewer.RenderImageView;
+var
+  TargetW, TargetH: Integer;
+begin
+  if (not FHasPicture) or (FPictureBitmap = nil) then Exit;
+
+  MemoContent.Visible := False;
+  ScrollBoxImage.Visible := True;
+  ButtonZoom.Visible := True;
+
+  ImagePicture.Picture.Assign(FPictureBitmap);
+
+  case FZoomMode of
+    0: // 2x Scaling (Authentic monitor size)
+    begin
+      ButtonZoom.Caption := 'Zoom: 2x';
+      ImagePicture.Align := alNone;
+      TargetW := FPictureWidth * 2;
+      TargetH := FPictureHeight * 2;
+      ImagePicture.Width := TargetW;
+      ImagePicture.Height := TargetH;
+      ImagePicture.Left := Max(0, (ScrollBoxImage.ClientWidth - TargetW) div 2);
+      ImagePicture.Top := Max(0, (ScrollBoxImage.ClientHeight - TargetH) div 2);
+    end;
+
+    1: // 1x Native Pixel Size
+    begin
+      ButtonZoom.Caption := 'Zoom: 1x';
+      ImagePicture.Align := alNone;
+      TargetW := FPictureWidth;
+      TargetH := FPictureHeight;
+      ImagePicture.Width := TargetW;
+      ImagePicture.Height := TargetH;
+      ImagePicture.Left := Max(0, (ScrollBoxImage.ClientWidth - TargetW) div 2);
+      ImagePicture.Top := Max(0, (ScrollBoxImage.ClientHeight - TargetH) div 2);
+    end;
+
+    2: // Fit to Window
+    begin
+      ButtonZoom.Caption := 'Zoom: Fit';
+      ImagePicture.Align := alClient;
+    end;
+  end;
+end;
+
+function TFormFileViewer.TryPerformDepack: Boolean;
+var
+  PackerName: string;
+begin
+  Result := False;
+  if Length(FOriginalData) = 0 then Exit;
+
+  if FHasDepacked and (Length(FDepackedData) > 0) then Exit(True);
+
+  Screen.Cursor := crHourGlass;
+  try
+    if DepackBuffer(@FOriginalData[0], Length(FOriginalData), FDepackedData, PackerName) then
+    begin
+      FHasDepacked := True;
+      if (PackerName <> '') and (PackerName <> 'None') then
+        FDetectedPacker := PackerName;
+      Result := True;
+    end
+    else
+    begin
+      ShowMessage('Decompression failed for: ' + FDetectedPacker + sLineBreak +
+        'The file data may be corrupt or encoded with an unsupported variant.');
+    end;
+  finally
+    Screen.Cursor := crDefault;
+  end;
+end;
+
+procedure TFormFileViewer.ButtonDepackClick(Sender: TObject);
+var
+  InfoStr: string;
+begin
+  if not FIsDepackedView then
+  begin
+    // Switch to depacked view
+    if not TryPerformDepack then Exit;
+
+    FIsDepackedView := True;
+    FData := Copy(FDepackedData);
+    ButtonDepack.Caption := 'View Packed';
+
+    CheckAndDecodePicture(FData);
+
+    InfoStr := Format('DEPACKED [%s] | Size: %s bytes (Packed: %s bytes, Ratio: %.1f%%)',
+      [FDetectedPacker,
+       FormatFloat('#,##0', Length(FDepackedData)),
+       FormatFloat('#,##0', Length(FOriginalData)),
+       (Double(Length(FOriginalData)) / Max(1.0, Double(Length(FDepackedData)))) * 100.0]);
+
+    if FHasPicture then
+      InfoStr := InfoStr + ' | Picture: ' + FPictureFormatDesc;
+
+    LabelFileInfo.Caption := InfoStr;
+
+    // If depacked into a picture and user was in picture view or it's clearly an image, render image
+    if FHasPicture and (FCurrentMode = 2) then
+      RenderImageView
+    else if FCurrentMode = 0 then
+      RenderHexView
+    else if FCurrentMode = 1 then
+      RenderTextView;
+  end
+  else
+  begin
+    // Switch back to packed view
+    FIsDepackedView := False;
+    FData := Copy(FOriginalData);
+    ButtonDepack.Caption := 'View Depacked';
+
+    CheckAndDecodePicture(FData);
+
+    InfoStr := Format('PACKED [%s] | Size: %s bytes', [FDetectedPacker, FormatFloat('#,##0', Length(FOriginalData))]);
+    if FStartCluster > 0 then
+      InfoStr := InfoStr + Format(' | Cluster: #%d ($%.3X)', [FStartCluster, FStartCluster]);
+
+    if FHasPicture then
+      InfoStr := InfoStr + ' | Picture: ' + FPictureFormatDesc;
+
+    LabelFileInfo.Caption := InfoStr;
+
+    if FHasPicture and (FCurrentMode = 2) then
+      RenderImageView
+    else if FCurrentMode = 0 then
+      RenderHexView
+    else if FCurrentMode = 1 then
+      RenderTextView;
+  end;
+end;
+
+procedure TFormFileViewer.ButtonSaveCopyClick(Sender: TObject);
+var
+  FS: TFileStream;
+  OutExt: string;
+begin
+  if Length(FData) = 0 then
+  begin
+    ShowMessage('File is empty.');
+    Exit;
+  end;
+
+  if (FCurrentMode = 2) and FHasPicture and (FPictureBitmap <> nil) then
+  begin
+    SaveDialogExport.Title := 'Save Picture As...';
+    SaveDialogExport.Filter := 'Windows Bitmap (*.bmp)|*.bmp|Original Atari Picture (*.*)|*.*';
+    SaveDialogExport.FileName := ChangeFileExt(FFileName, '.bmp');
+    if SaveDialogExport.Execute then
+    begin
+      OutExt := LowerCase(ExtractFileExt(SaveDialogExport.FileName));
+      if OutExt = '.bmp' then
+      begin
+        FPictureBitmap.SaveToFile(SaveDialogExport.FileName);
+        ShowMessage('Picture successfully exported as Windows Bitmap to:' + sLineBreak + SaveDialogExport.FileName);
+      end
+      else
+      begin
+        FS := TFileStream.Create(SaveDialogExport.FileName, fmCreate);
+        try
+          FS.WriteBuffer(FData[0], Length(FData));
+          ShowMessage('Raw picture successfully saved to:' + sLineBreak + SaveDialogExport.FileName);
+        finally
+          FS.Free;
+        end;
+      end;
+    end;
+    Exit;
+  end;
+
+  SaveDialogExport.Title := 'Save Raw / Extracted File As...';
+  SaveDialogExport.Filter := 'All Files (*.*)|*.*';
+  SaveDialogExport.FileName := FFileName;
+  if SaveDialogExport.Execute then
+  begin
+    FS := TFileStream.Create(SaveDialogExport.FileName, fmCreate);
+    try
+      FS.WriteBuffer(FData[0], Length(FData));
+      ShowMessage('File successfully saved to:' + sLineBreak + SaveDialogExport.FileName);
+    finally
+      FS.Free;
+    end;
+  end;
+end;
+
+procedure TFormFileViewer.ButtonSaveDepackedClick(Sender: TObject);
+var
+  FS: TFileStream;
+  OutName: string;
+begin
+  if Length(FOriginalData) = 0 then
+  begin
+    ShowMessage('File is empty.');
+    Exit;
+  end;
+
+  if not TryPerformDepack then Exit;
+
+  if Length(FDepackedData) = 0 then
+  begin
+    ShowMessage('Decompressed data is empty.');
+    Exit;
+  end;
+
+  SaveDialogExport.Title := 'Save Depacked File As...';
+  OutName := FFileName;
+  SaveDialogExport.FileName := OutName;
+  if SaveDialogExport.Execute then
+  begin
+    FS := TFileStream.Create(SaveDialogExport.FileName, fmCreate);
+    try
+      FS.WriteBuffer(FDepackedData[0], Length(FDepackedData));
+      ShowMessage(Format('Depacked file successfully saved!' + sLineBreak +
+        'Packer: %s' + sLineBreak +
+        'Decompressed Size: %s bytes (Packed: %s bytes)' + sLineBreak +
+        'Destination: %s',
+        [FDetectedPacker,
+         FormatFloat('#,##0', Length(FDepackedData)),
+         FormatFloat('#,##0', Length(FOriginalData)),
+         SaveDialogExport.FileName]));
+    finally
+      FS.Free;
+    end;
+  end;
+end;
+
+function TFormFileViewer.DecodePRGHeader: string;
+var
+  TextSize, DataSize, BssSize, SymsSize, Flags: LongWord;
+  FlagsDesc: string;
+begin
+  Result := '';
+  if Length(FData) < 28 then Exit;
+
+  // Check GEMDOS branch instruction magic: $601A
+  if (FData[0] = $60) and (FData[1] = $1A) then
+  begin
+    TextSize := SwapLongBE(PLongWord(@FData[2])^);
+    DataSize := SwapLongBE(PLongWord(@FData[6])^);
+    BssSize  := SwapLongBE(PLongWord(@FData[10])^);
+    SymsSize := SwapLongBE(PLongWord(@FData[14])^);
+    Flags    := SwapLongBE(PLongWord(@FData[22])^);
+
+    FlagsDesc := '';
+    if (Flags and $01) <> 0 then FlagsDesc := FlagsDesc + 'FastLoad ';
+    if (Flags and $02) <> 0 then FlagsDesc := FlagsDesc + 'TT-RAM-Load ';
+    if (Flags and $04) <> 0 then FlagsDesc := FlagsDesc + 'TT-RAM-Alloc ';
+    if FlagsDesc = '' then FlagsDesc := 'None (Standard ST RAM)';
+
+    Result := '=== ATARI ST GEMDOS EXECUTABLE (.PRG) HEADER ===' + sLineBreak +
+              Format('Magic:          $601A (Atari Executable)' + sLineBreak +
+                     'TEXT Segment:   %s bytes' + sLineBreak +
+                     'DATA Segment:   %s bytes' + sLineBreak +
+                     'BSS Segment:    %s bytes' + sLineBreak +
+                     'Symbol Table:   %s bytes' + sLineBreak +
+                     'TOS Flags:      $%.8X (%s)' + sLineBreak +
+                     '================================================' + sLineBreak + sLineBreak,
+                     [FormatFloat('#,##0', TextSize),
+                      FormatFloat('#,##0', DataSize),
+                      FormatFloat('#,##0', BssSize),
+                      FormatFloat('#,##0', SymsSize),
+                      Flags, Trim(FlagsDesc)]);
+  end;
+end;
+
+procedure TFormFileViewer.RenderHexView;
+var
+  SL: TStringList;
+  I, J, LineStart, LineEnd, TotalBytes: Integer;
+  HexPart, AscPart: string;
+  B: Byte;
+  HeaderInfo: string;
+begin
+  MemoContent.Lines.BeginUpdate;
+  try
+    MemoContent.Clear;
+    HeaderInfo := DecodePRGHeader;
+    if HeaderInfo <> '' then
+      MemoContent.Lines.Text := HeaderInfo;
+
+    TotalBytes := Length(FData);
+    if TotalBytes = 0 then
+    begin
+      MemoContent.Lines.Add('[Empty File - 0 Bytes]');
+      Exit;
+    end;
+
+    SL := TStringList.Create;
+    try
+      // Allow full viewing of floppy image files (safety cap only at 16MB)
+      TotalBytes := Min(TotalBytes, 16777216);
+
+      I := 0;
+      while I < TotalBytes do
+      begin
+        LineStart := I;
+        LineEnd := Min(LineStart + 16, TotalBytes);
+        HexPart := '';
+        AscPart := '';
+
+        for J := LineStart to LineEnd - 1 do
+        begin
+          B := FData[J];
+          HexPart := HexPart + Format('%.2X ', [B]);
+          if (J - LineStart = 7) then
+            HexPart := HexPart + ' ';
+
+          if (B >= 32) and (B <= 126) then
+            AscPart := AscPart + Char(B)
+          else
+            AscPart := AscPart + '.';
+        end;
+
+        // Pad if last line is short
+        while Length(HexPart) < 49 do
+          HexPart := HexPart + ' ';
+
+        SL.Add(Format('%.8X:  %s |%s|', [LineStart, HexPart, AscPart]));
+        Inc(I, 16);
+      end;
+
+      if Length(FData) > TotalBytes then
+        SL.Add(Format(sLineBreak + '... [Display capped at %d MB. Total file size: %s bytes] ...',
+          [TotalBytes div (1024 * 1024), FormatFloat('#,##0', Length(FData))]));
+
+      if HeaderInfo <> '' then
+        MemoContent.Lines.AddStrings(SL)
+      else
+        MemoContent.Lines.Assign(SL);
+    finally
+      SL.Free;
+    end;
+  finally
+    MemoContent.Lines.EndUpdate;
+  end;
+end;
+
+procedure TFormFileViewer.RenderTextView;
+var
+  SL: TStringList;
+  I, TotalBytes: Integer;
+  LineStr: string;
+  B: Byte;
+begin
+  MemoContent.Lines.BeginUpdate;
+  try
+    MemoContent.Clear;
+    TotalBytes := Length(FData);
+    if TotalBytes = 0 then
+    begin
+      MemoContent.Lines.Add('[Empty File - 0 Bytes]');
+      Exit;
+    end;
+
+    SL := TStringList.Create;
+    try
+      // Allow full viewing of floppy image files (safety cap only at 16MB)
+      TotalBytes := Min(TotalBytes, 16777216);
+      LineStr := '';
+      for I := 0 to TotalBytes - 1 do
+      begin
+        B := FData[I];
+        if B = 10 then // LF
+        begin
+          SL.Add(LineStr);
+          LineStr := '';
+        end
+        else if B = 13 then // CR
+        begin
+          // Skip or let LF handle line ending
+        end
+        else if (B >= 32) and (B <= 126) then
+        begin
+          LineStr := LineStr + Char(B);
+        end
+        else if (B = 9) then // Tab
+        begin
+          LineStr := LineStr + '    ';
+        end
+        else if (B >= 128) then
+        begin
+          // Basic Atari ST / Latin-1 mapping
+          LineStr := LineStr + Char(B);
+        end
+        else
+        begin
+          LineStr := LineStr + '.';
+        end;
+      end;
+      if LineStr <> '' then
+        SL.Add(LineStr);
+
+      if Length(FData) > TotalBytes then
+        SL.Add(Format(sLineBreak + '... [Text capped at %d MB] ...', [TotalBytes div (1024 * 1024)]));
+
+      MemoContent.Lines.Assign(SL);
+    finally
+      SL.Free;
+    end;
+  finally
+    MemoContent.Lines.EndUpdate;
+  end;
+end;
+
+procedure TFormFileViewer.LoadFromBuffer(const ABytes: TBytes; const ADisplayName: string; ACluster: Word);
+var
+  InfoStr: string;
+  CanDepack: Boolean;
+  Ext: string;
+begin
+  FOriginalData := Copy(ABytes);
+  SetLength(FDepackedData, 0);
+  FHasDepacked := False;
+  FIsDepackedView := False;
+  FData := Copy(ABytes);
+  FFileName := ADisplayName;
+  FStartCluster := ACluster;
+
+  Caption := 'File Viewer / Hex Inspector - ' + FFileName;
+  LabelFileName.Caption := 'File: ' + FFileName;
+
+  // Check if file is packed
+  if Length(ABytes) > 0 then
+    FDetectedPacker := DetectPackerSignature(@ABytes[0], Length(ABytes))
+  else
+    FDetectedPacker := 'None';
+
+  CanDepack := (FDetectedPacker <> '') and (FDetectedPacker <> 'None') and (Pos('Unknown', FDetectedPacker) = 0);
+
+  ButtonDepack.Caption := 'View Depacked';
+  ButtonDepack.Enabled := CanDepack;
+  ButtonDepack.Visible := CanDepack;
+
+  ButtonSaveDepacked.Enabled := CanDepack;
+  ButtonSaveDepacked.Visible := CanDepack;
+
+  // Check if file is an Atari ST picture
+  CheckAndDecodePicture(ABytes);
+
+  InfoStr := Format('Size: %s bytes', [FormatFloat('#,##0', Length(FData))]);
+  if FStartCluster > 0 then
+    InfoStr := InfoStr + Format(' | Cluster: #%d ($%.3X)', [FStartCluster, FStartCluster]);
+
+  if CanDepack then
+    InfoStr := InfoStr + ' | Packer: ' + FDetectedPacker;
+
+  if FHasPicture then
+    InfoStr := InfoStr + ' | Picture: ' + FPictureFormatDesc;
+
+  LabelFileInfo.Caption := InfoStr;
+
+  // If file is an Atari picture, open directly in Picture View mode
+  Ext := UpperCase(ExtractFileExt(FFileName));
+  if FHasPicture and ((Ext = '.PI1') or (Ext = '.PI2') or (Ext = '.PI3') or
+                      (Ext = '.PC1') or (Ext = '.PC2') or (Ext = '.PC3') or
+                      (Ext = '.NEO') or (Ext = '.SPU') or (Ext = '.PAC')) then
+  begin
+    FCurrentMode := 2; // Picture View
+    RenderImageView;
+  end
+  else
+  begin
+    FCurrentMode := 0; // Hex View
+    ScrollBoxImage.Visible := False;
+    ButtonZoom.Visible := False;
+    MemoContent.Visible := True;
+    RenderHexView;
+  end;
+end;
+
+procedure TFormFileViewer.LoadFromStream(AStream: TStream; const ADisplayName: string; ACluster: Word);
+var
+  Buf: TBytes;
+begin
+  if AStream.Size > 0 then
+  begin
+    SetLength(Buf, AStream.Size);
+    AStream.Position := 0;
+    AStream.ReadBuffer(Buf[0], AStream.Size);
+  end
+  else
+    SetLength(Buf, 0);
+
+  LoadFromBuffer(Buf, ADisplayName, ACluster);
+end;
+
+procedure TFormFileViewer.LoadFromHostFile(const AHostPath, ADisplayName: string; ACluster: Word);
+var
+  FS: TFileStream;
+begin
+  if not FileExists(AHostPath) then Exit;
+  FS := TFileStream.Create(AHostPath, fmOpenRead or fmShareDenyNone);
+  try
+    LoadFromStream(FS, ADisplayName, ACluster);
+  finally
+    FS.Free;
+  end;
+end;
+
+end.
