@@ -85,19 +85,19 @@ STIMAGE includes a built-in Atari ST packer detection and decompression engine s
 ### Atari ST Picture Viewer
 <img width="844" height="584" alt="image" src="https://github.com/user-attachments/assets/9cac56de-b7d2-4591-97bb-ae890696207c" />
 STIMAGE includes a built-in image viewer that detects and renders the most common Atari ST graphic formats:
-- **DEGAS / DEGAS Elite**:
-  - `.PI1` — Low Resolution (320x200, 16 colors from 512 palette)
-  - `.PI2` — Medium Resolution (640x200, 4 colors, aspect-ratio corrected)
-  - `.PI3` — High Resolution (640x400, monochrome)
-  - `.PC1`, `.PC2`, `.PC3` — DEGAS Elite RLE Compressed images (automatically uncompressed on the fly)
-- **NeoChrome**:
+**DEGAS / DEGAS Elite**:
+   `.PI1` — Low Resolution (320x200, 16 colors from 512 palette)
+   `.PI2` — Medium Resolution (640x200, 4 colors, aspect-ratio corrected)
+   `.PI3` — High Resolution (640x400, monochrome)
+   `.PC1`, `.PC2`, `.PC3` — DEGAS Elite RLE Compressed images (automatically uncompressed on the fly)
+ **NeoChrome**:
   - `.NEO` — 320x200 16-color images with animation palettes
-- **Spectrum 512**:
-  - `.SPU` — 320x200 512-color images rendered with dynamic per-scanline palettes
-- **Raw Atari ST Screen Dumps**:
-  - 32,000 / 32,032 bytes raw screens with embedded or default Atari ST system palette
-- **Depacked Graphics**:
-  - Files compressed with Pack-Ice, Atomik, JAM, etc. can be depacked with the **View Depacked** button and immediately inspected in Picture View!
+ **Spectrum 512**:
+   `.SPU` — 320x200 512-color images rendered with dynamic per-scanline palettes
+ **Raw Atari ST Screen Dumps**:
+   32,000 / 32,032 bytes raw screens with embedded or default Atari ST system palette
+ **Depacked Graphics**:
+   Files compressed with Pack-Ice, Atomik, JAM, etc. can be depacked with the **View Depacked** button and immediately inspected in Picture View!
 
 #### Picture Viewer Features:
 - **Instant Preview**: Double-clicking any recognized picture automatically opens it in **Picture View**.
