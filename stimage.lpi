@@ -178,6 +178,24 @@
         <IsPartOfProject Value="True"/>
         <HasResources Value="True"/>
       </Unit>
+      <Unit>
+        <Filename Value="unit_newimage.pas"/>
+        <IsPartOfProject Value="True"/>
+        <ComponentName Value="FormNewImage"/>
+        <HasResources Value="True"/>
+        <ResourceBaseClass Value="Form"/>
+        <UnitName Value="unit_newimage"/>
+      </Unit>
+      <Unit>
+        <Filename Value="unit_newimage.lfm"/>
+        <IsPartOfProject Value="True"/>
+        <HasResources Value="True"/>
+      </Unit>
+      <Unit>
+        <Filename Value="unit_archivevault.pas"/>
+        <IsPartOfProject Value="True"/>
+        <UnitName Value="unit_archivevault"/>
+      </Unit>
     </Units>
   </ProjectOptions>
   <CompilerOptions>

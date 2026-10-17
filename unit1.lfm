@@ -4,14 +4,17 @@ object Form1: TForm1
   Top = 138
   Width = 630
   AllowDropFiles = True
-  BorderStyle = bsDialog
+  BorderStyle = bsSizeable
   Caption = 'Atari .ST Image File Manager'
   ClientHeight = 487
   ClientWidth = 622
+  Constraints.MinHeight = 487
+  Constraints.MinWidth = 630
   Color = clBtnFace
   Font.Color = clWindowText
   KeyPreview = True
   OnKeyDown = FormKeyDown
+  OnResize = FormResize
   Font.Height = -11
   Font.Name = 'Tahoma'
   Icon.Data = {
@@ -414,7 +417,7 @@ object Form1: TForm1
   end
   object ListViewFiles: TListView
     Left = 16
-    Height = 330
+    Height = 424
     Top = 51
     Width = 590
     Columns = <    
@@ -449,6 +452,7 @@ object Form1: TForm1
     RowSelect = True
     TabOrder = 0
     ViewStyle = vsReport
+    PopupMenu = PopupMenuFiles
     OnClick = ListViewFilesClick
     OnDblClick = ListViewFilesDblClick
     OnSelectItem = ListViewFilesSelectItem
@@ -458,158 +462,167 @@ object Form1: TForm1
     OnCustomDrawItem = ListViewFilesCustomDrawItem
     OnCustomDrawSubItem = ListViewFilesCustomDrawSubItem
   end
-  object ButtonOpenImage: TButton
-    Left = 16
-    Height = 25
-    Top = 405
-    Width = 70
-    Caption = 'Open Image'
+  object PanelToolbar: TPanel
+    Left = 0
+    Height = 82
+    Top = 398
+    Width = 622
+    BevelOuter = bvNone
+    ClientHeight = 82
+    ClientWidth = 622
     TabOrder = 1
-    OnClick = ButtonOpenImageClick
-  end
-  object ButtonCreate720: TButton
-    Left = 90
-    Height = 25
-    Top = 405
-    Width = 70
-    Caption = 'Create 720K'
-    TabOrder = 2
-    OnClick = ButtonCreate720Click
-  end
-  object ButtonAddFile: TButton
-    Left = 164
-    Height = 25
-    Top = 405
-    Width = 70
-    Caption = 'Add File(s)'
-    TabOrder = 3
-    OnClick = ButtonAddFileClick
-  end
-  object ButtonAddFolder: TButton
-    Left = 238
-    Height = 25
-    Top = 405
-    Width = 70
-    Caption = 'Add Folder'
-    TabOrder = 4
-    OnClick = ButtonAddFolderClick
-  end
-  object ButtonCreateDir: TButton
-    Left = 312
-    Height = 25
-    Top = 405
-    Width = 70
-    Caption = 'Create Dir'
-    TabOrder = 5
-    OnClick = ButtonCreateDirClick
-  end
-  object ButtonSaveFile: TButton
-    Left = 386
-    Height = 25
-    Top = 405
-    Width = 70
-    Caption = 'Save File'
-    TabOrder = 6
-    OnClick = ButtonSaveFileClick
-  end
-  object ButtonExtractAll: TButton
-    Left = 460
-    Height = 25
-    Top = 405
-    Width = 71
-    Caption = 'Extract All'
-    TabOrder = 7
-    OnClick = ButtonExtractAllClick
-  end
-  object ButtonWriteImage: TButton
-    Left = 16
-    Height = 25
-    Top = 440
-    Width = 70
-    Caption = 'Write Image'
-    TabOrder = 8
-    OnClick = ButtonWriteImageClick
-  end
-  object ButtonClusterMap: TButton
-    Left = 90
-    Height = 25
-    Top = 440
-    Width = 70
-    Caption = 'Cluster Map'
-    TabOrder = 9
-    OnClick = ButtonClusterMapClick
-  end
-  object ButtonViewFile: TButton
-    Left = 164
-    Height = 25
-    Top = 440
-    Width = 70
-    Caption = 'View File'
-    TabOrder = 10
-    OnClick = ButtonViewFileClick
-  end
-  object ButtonVirusScan: TButton
-    Left = 238
-    Height = 25
-    Top = 440
-    Width = 70
-    Caption = 'Virus Scan'
-    TabOrder = 11
-    OnClick = MenuItemVirusScannerClick
-  end
-  object ButtonRemoveFile: TButton
-    Left = 312
-    Height = 25
-    Top = 440
-    Width = 70
-    Caption = 'Delete'
-    TabOrder = 12
-    OnClick = ButtonRemoveFileClick
-  end
-  object ButtonRemoveDir: TButton
-    Left = 386
-    Height = 25
-    Top = 440
-    Width = 70
-    Caption = 'Remove Dir'
-    TabOrder = 13
-    OnClick = ButtonRemoveDirClick
-  end
-  object ButtonBack: TButton
-    Left = 460
-    Height = 25
-    Top = 440
-    Width = 70
-    Caption = 'Back'
-    TabOrder = 14
-    OnClick = ButtonBackClick
-  end
-  object ButtonExit: TButton
-    Left = 534
-    Height = 25
-    Top = 440
-    Width = 72
-    Caption = 'Exit'
-    TabOrder = 15
-    OnClick = ButtonExitClick
+    Visible = False
+    object ButtonOpenImage: TButton
+      Left = 16
+      Height = 25
+      Top = 7
+      Width = 70
+      Caption = 'Open Image'
+      TabOrder = 0
+      OnClick = ButtonOpenImageClick
+    end
+    object ButtonCreate720: TButton
+      Left = 90
+      Height = 25
+      Top = 7
+      Width = 70
+      Caption = 'New Image'
+      TabOrder = 1
+      OnClick = ButtonCreate720Click
+    end
+    object ButtonAddFile: TButton
+      Left = 164
+      Height = 25
+      Top = 7
+      Width = 70
+      Caption = 'Add File(s)'
+      TabOrder = 2
+      OnClick = ButtonAddFileClick
+    end
+    object ButtonAddFolder: TButton
+      Left = 238
+      Height = 25
+      Top = 7
+      Width = 70
+      Caption = 'Add Folder'
+      TabOrder = 3
+      OnClick = ButtonAddFolderClick
+    end
+    object ButtonCreateDir: TButton
+      Left = 312
+      Height = 25
+      Top = 7
+      Width = 70
+      Caption = 'Create Dir'
+      TabOrder = 4
+      OnClick = ButtonCreateDirClick
+    end
+    object ButtonSaveFile: TButton
+      Left = 386
+      Height = 25
+      Top = 7
+      Width = 70
+      Caption = 'Save File'
+      TabOrder = 5
+      OnClick = ButtonSaveFileClick
+    end
+    object ButtonExtractAll: TButton
+      Left = 460
+      Height = 25
+      Top = 7
+      Width = 71
+      Caption = 'Extract All'
+      TabOrder = 6
+      OnClick = ButtonExtractAllClick
+    end
+    object ButtonWriteImage: TButton
+      Left = 16
+      Height = 25
+      Top = 42
+      Width = 70
+      Caption = 'Write Image'
+      TabOrder = 7
+      OnClick = ButtonWriteImageClick
+    end
+    object ButtonClusterMap: TButton
+      Left = 90
+      Height = 25
+      Top = 42
+      Width = 70
+      Caption = 'Cluster Map'
+      TabOrder = 8
+      OnClick = ButtonClusterMapClick
+    end
+    object ButtonViewFile: TButton
+      Left = 164
+      Height = 25
+      Top = 42
+      Width = 70
+      Caption = 'View File'
+      TabOrder = 9
+      OnClick = ButtonViewFileClick
+    end
+    object ButtonVirusScan: TButton
+      Left = 238
+      Height = 25
+      Top = 42
+      Width = 70
+      Caption = 'Virus Scan'
+      TabOrder = 10
+      OnClick = MenuItemVirusScannerClick
+    end
+    object ButtonRemoveFile: TButton
+      Left = 312
+      Height = 25
+      Top = 42
+      Width = 70
+      Caption = 'Delete'
+      TabOrder = 11
+      OnClick = ButtonRemoveFileClick
+    end
+    object ButtonRemoveDir: TButton
+      Left = 386
+      Height = 25
+      Top = 42
+      Width = 70
+      Caption = 'Remove Dir'
+      TabOrder = 12
+      OnClick = ButtonRemoveDirClick
+    end
+    object ButtonBack: TButton
+      Left = 460
+      Height = 25
+      Top = 42
+      Width = 70
+      Caption = 'Back'
+      TabOrder = 13
+      OnClick = ButtonBackClick
+    end
+    object ButtonExit: TButton
+      Left = 534
+      Height = 25
+      Top = 42
+      Width = 72
+      Caption = 'Exit'
+      TabOrder = 14
+      OnClick = ButtonExitClick
+    end
   end
   object ProgressBarFreeSpace: TProgressBar
-    Left = 376
+    Left = 451
     Height = 20
     Top = 25
     Width = 155
-    Anchors = [akTop, akRight]
     Smooth = True
     Step = 5
-    TabOrder = 16
+    TabOrder = 2
   end
   object LabelFreeSpace: TLabel
-    Left = 263
+    Left = 338
     Height = 13
     Top = 6
     Width = 268
     Alignment = taRightJustify
-    Anchors = [akTop, akRight]
     AutoSize = False
     Caption = 'Utilized space: 0%'
   end
@@ -634,25 +647,30 @@ object Form1: TForm1
     object MenuItemFile: TMenuItem
       Caption = '&File'
       object MenuItemOpen: TMenuItem
-        Caption = '&Open Image...'
+        Caption = '&Open Disk Image...'
         ShortCut = 16463
         OnClick = ButtonOpenImageClick
       end
       object MenuItemNew720: TMenuItem
-        Caption = 'Create &720KB Blank Image'
+        Caption = '&New Blank Disk Image...'
         ShortCut = 16462
         OnClick = ButtonCreate720Click
       end
       object MenuItemWrite: TMenuItem
-        Caption = '&Write Image / Save'
+        Caption = '&Write Image / Save Changes'
         ShortCut = 16467
         OnClick = ButtonWriteImageClick
+      end
+      object MenuItemCloseImage: TMenuItem
+        Caption = '&Close Image'
+        OnClick = MenuItemCloseImageClick
       end
       object MenuItemSep1: TMenuItem
         Caption = '-'
       end
       object MenuItemExtractFile: TMenuItem
         Caption = '&Save / Extract Selected File...'
+        ShortCut = 16453
         OnClick = ButtonSaveFileClick
       end
       object MenuItemExtractDepacked: TMenuItem
@@ -675,6 +693,7 @@ object Form1: TForm1
       end
       object MenuItemExit: TMenuItem
         Caption = 'E&xit'
+        ShortCut = 32856
         OnClick = ButtonExitClick
       end
     end
@@ -704,17 +723,47 @@ object Form1: TForm1
         Caption = '&Remove Directory'
         OnClick = ButtonRemoveDirClick
       end
+      object MenuItemSepEdit2: TMenuItem
+        Caption = '-'
+      end
       object MenuItemSetLabel: TMenuItem
         Caption = 'Set &Volume Label...'
         OnClick = ButtonSetLabelClick
       end
     end
-    object MenuItemTools: TMenuItem
-      Caption = '&Tools'
+    object MenuItemView: TMenuItem
+      Caption = '&View'
       object MenuItemViewFile: TMenuItem
         Caption = '&View File / Hex Inspector...'
+        ShortCut = 114
         OnClick = ButtonViewFileClick
       end
+      object MenuItemSepView1: TMenuItem
+        Caption = '-'
+      end
+      object MenuItemBrowseArchive: TMenuItem
+        Caption = '&Browse / Open Archive as Folder'
+        OnClick = MenuItemPopupOpenArchiveClick
+      end
+      object MenuItemCloseArchive: TMenuItem
+        Caption = '&Close Archive (Return to Disk)'
+        OnClick = MenuItemCloseArchiveClick
+      end
+      object MenuItemBack: TMenuItem
+        Caption = '&Parent Directory (Back)'
+        OnClick = ButtonBackClick
+      end
+      object MenuItemSepView2: TMenuItem
+        Caption = '-'
+      end
+      object MenuItemButtonToolbar: TMenuItem
+        AutoCheck = True
+        Caption = 'Classic &Button Toolbar'
+        OnClick = MenuItemButtonToolbarClick
+      end
+    end
+    object MenuItemTools: TMenuItem
+      Caption = '&Tools'
       object MenuItemClusterMap: TMenuItem
         Caption = '&Cluster Map && Sector Editor...'
         ShortCut = 115
@@ -728,6 +777,55 @@ object Form1: TForm1
         ShortCut = 117
         OnClick = MenuItemVirusScannerClick
       end
+    end
+    object MenuItemHelp: TMenuItem
+      Caption = '&Help'
+      object MenuItemAbout: TMenuItem
+        Caption = '&About Atari .ST Image File Manager...'
+        ShortCut = 112
+        OnClick = MenuItemAboutClick
+      end
+    end
+  end
+  object PopupMenuFiles: TPopupMenu
+    OnPopup = PopupMenuFilesPopup
+    Left = 410
+    Top = 480
+    object MenuItemPopupOpenArchive: TMenuItem
+      Caption = '&Browse / Open Archive as Folder'
+      OnClick = MenuItemPopupOpenArchiveClick
+    end
+    object MenuItemPopupSep0: TMenuItem
+      Caption = '-'
+    end
+    object MenuItemPopupView: TMenuItem
+      Caption = '&View File / Hex Inspector...'
+      OnClick = ButtonViewFileClick
+    end
+    object MenuItemPopupSep1: TMenuItem
+      Caption = '-'
+    end
+    object MenuItemPopupExtract: TMenuItem
+      Caption = '&Extract File...'
+      OnClick = ButtonSaveFileClick
+    end
+    object MenuItemPopupExtractDepacked: TMenuItem
+      Caption = 'Extract && &Depack...'
+      OnClick = MenuItemExtractDepackedClick
+    end
+    object MenuItemPopupSep2: TMenuItem
+      Caption = '-'
+    end
+    object MenuItemPopupClusterMap: TMenuItem
+      Caption = '&Locate in Cluster Map'
+      OnClick = ButtonClusterMapClick
+    end
+    object MenuItemPopupSep3: TMenuItem
+      Caption = '-'
+    end
+    object MenuItemPopupDelete: TMenuItem
+      Caption = '&Delete'
+      OnClick = MenuItemPopupDeleteClick
     end
   end
 end

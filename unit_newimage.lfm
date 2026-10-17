@@ -1,0 +1,129 @@
+object FormNewImage: TFormNewImage
+  Left = 350
+  Height = 360
+  Top = 220
+  Width = 500
+  BorderStyle = bsDialog
+  Caption = 'Create Blank Atari ST Disk Image'
+  ClientHeight = 360
+  ClientWidth = 500
+  Color = clBtnFace
+  Font.Color = clWindowText
+  Font.Height = -11
+  Font.Name = 'Tahoma'
+  Position = poScreenCenter
+  OnCreate = FormCreate
+  LCLVersion = '2.2.6.0'
+  object LabelTitle: TLabel
+    Left = 16
+    Height = 18
+    Top = 12
+    Width = 245
+    Caption = 'Select Floppy Format & Geometry:'
+    Font.Color = clWindowText
+    Font.Height = -15
+    Font.Name = 'Tahoma'
+    Font.Style = [fsBold]
+    ParentColor = False
+    ParentFont = False
+  end
+  object RadioGroupFormat: TRadioGroup
+    Left = 16
+    Height = 145
+    Top = 38
+    Width = 468
+    AutoFill = True
+    Caption = ' Target Format '
+    ChildSizing.LeftRightSpacing = 10
+    ChildSizing.TopBottomSpacing = 6
+    ChildSizing.HorizontalSpacing = 6
+    ChildSizing.VerticalSpacing = 4
+    ChildSizing.EnlargeHorizontal = crsHomogenousChildResize
+    ChildSizing.EnlargeVertical = crsHomogenousChildResize
+    ChildSizing.ShrinkHorizontal = crsScaleChilds
+    ChildSizing.ShrinkVertical = crsScaleChilds
+    ChildSizing.Layout = cclLeftToRightThenTopToBottom
+    ChildSizing.ControlsPerLine = 1
+    ClientHeight = 127
+    ClientWidth = 464
+    ItemIndex = 0
+    Items.Strings = (
+      '720 KB — Standard Double-Sided (80 Tracks, 9 SPT, 2 Sides) [Default]'
+      '360 KB — Single-Sided (80 Tracks, 9 SPT, 1 Side, Atari 520ST)'
+      '800 KB — Extended Demos & Games (80 Tracks, 10 SPT, 2 Sides)'
+      '880 KB — High Capacity DD (80 Tracks, 11 SPT, 2 Sides)'
+      '1.44 MB — High Density HD (80 Tracks, 18 SPT, 2 Sides, TT/Falcon)'
+    )
+    OnSelectionChanged = RadioGroupFormatSelectionChanged
+    TabOrder = 0
+  end
+  object GroupBoxDetails: TGroupBox
+    Left = 16
+    Height = 110
+    Top = 192
+    Width = 468
+    Caption = ' Format Specifications '
+    ClientHeight = 92
+    ClientWidth = 464
+    TabOrder = 1
+    object LabelCapacity: TLabel
+      Left = 12
+      Height = 13
+      Top = 6
+      Width = 171
+      Caption = 'Capacity: 720 KB (737,280 bytes)'
+      Font.Color = clWindowText
+      Font.Height = -11
+      Font.Name = 'Tahoma'
+      Font.Style = [fsBold]
+      ParentColor = False
+      ParentFont = False
+    end
+    object LabelGeometry: TLabel
+      Left = 12
+      Height = 13
+      Top = 26
+      Width = 338
+      Caption = 'Geometry: 80 Tracks, 2 Sides, 9 Sectors/Track (1,440 Total Sectors)'
+      ParentColor = False
+    end
+    object LabelFilesystem: TLabel
+      Left = 12
+      Height = 13
+      Top = 46
+      Width = 345
+      Caption = 'Filesystem: FAT12, 112 Root Entries, 2 Sectors/Cluster (1,024 bytes)'
+      ParentColor = False
+    end
+    object LabelCompatibility: TLabel
+      Left = 12
+      Height = 13
+      Top = 66
+      Width = 377
+      Caption = 'Compatibility: Standard format for all Atari ST, STE, and Mega ST models.'
+      Font.Color = clGrayText
+      ParentColor = False
+      ParentFont = False
+    end
+  end
+  object ButtonOK: TButton
+    Left = 288
+    Height = 25
+    Top = 318
+    Width = 104
+    Caption = 'Create Image...'
+    Default = True
+    ModalResult = 1
+    TabOrder = 2
+  end
+  object ButtonCancel: TButton
+    Left = 400
+    Height = 25
+    Top = 318
+    Width = 84
+    Cancel = True
+    Caption = 'Cancel'
+    ModalResult = 2
+    TabOrder = 3
+  end
+end

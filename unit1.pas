@@ -7,7 +7,7 @@ uses
   Classes, SysUtils, Forms, Controls, Graphics, Dialogs, StdCtrls,
   LCLType, ExtCtrls, ComCtrls, StrUtils, Math, DateUtils, LazFileUtils,
   FileUtil, Menus, zipper, unit_clustermap, unit_msa, unit_fileviewer, unit_dragout,
-  unit_depacker, unit_virusscanner;
+  unit_depacker, unit_virusscanner, unit_newimage, unit_archivevault;
 
 type
   { TDiskItemInfo represents a single file or directory in the Atari disk image }
@@ -31,6 +31,7 @@ type
   { TForm1 }
   TForm1 = class(TForm)
     // UI Components
+    PanelToolbar: TPanel;
     ButtonExit: TButton;
     ButtonRemoveDir: TButton;
     ButtonCreateDir: TButton;
@@ -61,7 +62,7 @@ type
     MenuItemOpen: TMenuItem;
     MenuItemNew720: TMenuItem;
     MenuItemWrite: TMenuItem;
-    MenuItemSaveAs: TMenuItem;
+    MenuItemCloseImage: TMenuItem;
     MenuItemSep1: TMenuItem;
     MenuItemExtractFile: TMenuItem;
     MenuItemExtractDepacked: TMenuItem;
@@ -77,12 +78,33 @@ type
     MenuItemSep4: TMenuItem;
     MenuItemDelete: TMenuItem;
     MenuItemRemoveDir: TMenuItem;
+    MenuItemSepEdit2: TMenuItem;
     MenuItemSetLabel: TMenuItem;
-    MenuItemTools: TMenuItem;
+    MenuItemView: TMenuItem;
     MenuItemViewFile: TMenuItem;
+    MenuItemSepView1: TMenuItem;
+    MenuItemBrowseArchive: TMenuItem;
+    MenuItemCloseArchive: TMenuItem;
+    MenuItemBack: TMenuItem;
+    MenuItemSepView2: TMenuItem;
+    MenuItemButtonToolbar: TMenuItem;
+    MenuItemTools: TMenuItem;
     MenuItemClusterMap: TMenuItem;
     MenuItemSepTools: TMenuItem;
     MenuItemVirusScanner: TMenuItem;
+    MenuItemHelp: TMenuItem;
+    MenuItemAbout: TMenuItem;
+    PopupMenuFiles: TPopupMenu;
+    MenuItemPopupOpenArchive: TMenuItem;
+    MenuItemPopupSep0: TMenuItem;
+    MenuItemPopupView: TMenuItem;
+    MenuItemPopupSep1: TMenuItem;
+    MenuItemPopupExtract: TMenuItem;
+    MenuItemPopupExtractDepacked: TMenuItem;
+    MenuItemPopupSep2: TMenuItem;
+    MenuItemPopupClusterMap: TMenuItem;
+    MenuItemPopupSep3: TMenuItem;
+    MenuItemPopupDelete: TMenuItem;
 
     // Event Handlers
     procedure ButtonAddFileClick(Sender: TObject);
@@ -116,6 +138,18 @@ type
     procedure MenuItemVirusScannerClick(Sender: TObject);
     procedure FormDropFiles(Sender: TObject; const FileNames: array of string);
     procedure FormShow(Sender: TObject);
+    procedure PopupMenuFilesPopup(Sender: TObject);
+    procedure MenuItemPopupOpenArchiveClick(Sender: TObject);
+    procedure MenuItemPopupDeleteClick(Sender: TObject);
+    procedure MenuItemCloseImageClick(Sender: TObject);
+    procedure MenuItemCloseArchiveClick(Sender: TObject);
+    procedure MenuItemButtonToolbarClick(Sender: TObject);
+    procedure MenuItemAboutClick(Sender: TObject);
+    procedure FormResize(Sender: TObject);
+
+  public
+    procedure SetButtonToolbarVisible(AVisible: Boolean);
+    procedure UpdateLayout;
 
   private
     // Lists for tracking files, directories, and pending operations
@@ -155,6 +189,18 @@ type
     FDragPending: Boolean;            // Flag indicating left button pressed on an item
     FDragActive: Boolean;             // Flag indicating active outgoing OLE drag operation
     FDragSourcePath: string;          // Full host path of currently dragged-out file
+
+    // Archive navigation state
+    FInArchiveMode: Boolean;          // True when currently browsing inside an archive
+    FArchiveVault: TArchiveVault;     // Archive handler (ZIP, LZH, LHA, ARC, ZOO)
+    FArchiveSourceFileName: string;   // Name of archive file on disk, e.g. "HDDR771C.LZH"
+    FArchiveTempFile: string;         // Host temp file of extracted archive
+    FArchiveInnerPath: string;        // Current path inside archive, e.g. "AUTO/" or ""
+    FArchiveChildren: array of TArchiveItem; // Items currently displayed from archive
+    FArchiveChildCount: Integer;
+    procedure OpenArchiveFromDisk(const AArchiveFileName: string);
+    procedure CloseArchiveMode;
+    procedure UpdateArchiveFileListDisplay;
 
     // Core Procedures and Functions
     function GetSelectedFileName(out AItemText, ACleanName: string; out AIsDir, AIsStaged, AIsDeleted, AIsMarkedDelete: Boolean): Boolean;
@@ -211,6 +257,7 @@ type
       // Sanitizes a name to conform to Atari TOS FAT12 8.3 constraints
     function IsDirectChild(const AParentPath, AFullPath: string; out AChildName: string): Boolean;
       // Checks if AFullPath is a direct child of AParentPath
+    procedure CreateBlankDiskImage(const ATargetFile: string; ASides, ASectorsPerTrack, ATracks, ARootEntries, ASectorsPerCluster: Integer);
     procedure CreateBlank720KBImage(const ATargetFile: string);
       // Creates a clean, standard 720KB Atari ST floppy image
     function LoadDiskImage(const AFileName: string): Boolean;
@@ -472,6 +519,7 @@ end;
  ------------------------------------------------------------------}
 procedure TForm1.ResetState;
 begin
+  CloseArchiveMode;
   FFilePaths.Clear;
   FFileDestDirs.Clear;
   FNewDirectories.Clear;
@@ -1020,6 +1068,12 @@ var
   IsDir, IsStaged, IsDel, IsMarkedDel: Boolean;
   Index, I, SavedIdx: Integer;
 begin
+  if FInArchiveMode then
+  begin
+    CloseArchiveMode;
+    Exit;
+  end;
+
   if not GetSelectedFileName(RawName, FileName, IsDir, IsStaged, IsDel, IsMarkedDel) then
   begin
     ShowMessage('Please select a file first.');
@@ -1091,80 +1145,146 @@ end;
             Writes all pending changes to the image file
  ------------------------------------------------------------------}
 {------------------------------------------------------------------
+  Procedure: CreateBlankDiskImage
+  Purpose:  Generates a clean Atari ST GEMDOS FAT12 floppy disk image
+            supporting 360KB, 720KB, 800KB, 880KB, and 1.44MB formats
+ ------------------------------------------------------------------}
+procedure TForm1.CreateBlankDiskImage(const ATargetFile: string; ASides, ASectorsPerTrack, ATracks, ARootEntries, ASectorsPerCluster: Integer);
+var
+  TotalSectors, ReservedSectors, SectorsPerFAT: Integer;
+  TotalSize, FATBytes, DataAreaSize: Int64;
+  MediaByte: Byte;
+  ImageFile: TFileStream;
+  BootSector: array[0..511] of Byte;
+  FATBuffer: array of Byte;
+  RootDirBuffer: array of Byte;
+  ZeroChunk: array[0..65535] of Byte;
+  BytesRemaining, WriteChunk: Int64;
+  SerialNum: LongWord;
+begin
+  TotalSectors := ASides * ASectorsPerTrack * ATracks;
+  TotalSize := Int64(TotalSectors) * 512;
+  ReservedSectors := 1;
+
+  // Determine media descriptor and Sectors Per FAT based on format
+  if ASides = 1 then
+  begin
+    MediaByte := $F8; // Single-sided 360 KB
+    SectorsPerFAT := 2;
+  end
+  else if ASectorsPerTrack >= 18 then
+  begin
+    MediaByte := $F0; // High Density 1.44 MB
+    SectorsPerFAT := 5;
+  end
+  else
+  begin
+    MediaByte := $F9; // Double-sided (720 KB, 800 KB, 880 KB)
+    if ASectorsPerTrack = 11 then
+      SectorsPerFAT := 4
+    else
+      SectorsPerFAT := 3;
+  end;
+
+  // Generate random 24-bit disk serial number
+  Randomize;
+  SerialNum := Random($1000000);
+
+  // Initialize and populate Boot Sector (512 bytes)
+  FillChar(BootSector[0], 512, 0);
+  // Standard 68000 BRA opcode ($60 $1C) to skip BPB
+  BootSector[$00] := $60;
+  BootSector[$01] := $1C;
+  // OEM / Loader signature (6 bytes)
+  BootSector[$02] := Ord('S');
+  BootSector[$03] := Ord('T');
+  BootSector[$04] := Ord('I');
+  BootSector[$05] := Ord('M');
+  BootSector[$06] := Ord('A');
+  BootSector[$07] := Ord('G');
+  // 24-bit serial number (bytes 8..10)
+  BootSector[$08] := (SerialNum shr 16) and $FF;
+  BootSector[$09] := (SerialNum shr 8) and $FF;
+  BootSector[$0A] := SerialNum and $FF;
+  // BPB - Bytes per sector ($0B..$0C: 512)
+  BootSector[$0B] := $00;
+  BootSector[$0C] := $02;
+  // Sectors per cluster ($0D)
+  BootSector[$0D] := ASectorsPerCluster and $FF;
+  // Reserved sectors ($0E..$0F: 1)
+  BootSector[$0E] := ReservedSectors and $FF;
+  BootSector[$0F] := (ReservedSectors shr 8) and $FF;
+  // Number of FATs ($10: 2)
+  BootSector[$10] := 2;
+  // Root directory entries ($11..$12)
+  BootSector[$11] := ARootEntries and $FF;
+  BootSector[$12] := (ARootEntries shr 8) and $FF;
+  // Total sectors on volume ($13..$14)
+  BootSector[$13] := TotalSectors and $FF;
+  BootSector[$14] := (TotalSectors shr 8) and $FF;
+  // Media descriptor byte ($15)
+  BootSector[$15] := MediaByte;
+  // Sectors per FAT ($16..$17)
+  BootSector[$16] := SectorsPerFAT and $FF;
+  BootSector[$17] := (SectorsPerFAT shr 8) and $FF;
+  // Sectors per track ($18..$19)
+  BootSector[$18] := ASectorsPerTrack and $FF;
+  BootSector[$19] := (ASectorsPerTrack shr 8) and $FF;
+  // Number of sides / heads ($1A..$1B)
+  BootSector[$1A] := ASides and $FF;
+  BootSector[$1B] := (ASides shr 8) and $FF;
+  // Hidden sectors ($1C..$1D: 0)
+  BootSector[$1C] := 0;
+  BootSector[$1D] := 0;
+  // RTS instruction at offset $1E ($4E $75)
+  BootSector[$1E] := $4E;
+  BootSector[$1F] := $75;
+
+  ImageFile := TFileStream.Create(ATargetFile, fmCreate);
+  try
+    // 1. Write Boot Sector
+    ImageFile.WriteBuffer(BootSector[0], 512);
+
+    // 2. Write FAT Copies (FAT 1 and FAT 2)
+    FATBytes := Int64(SectorsPerFAT) * 512;
+    SetLength(FATBuffer, FATBytes);
+    FillChar(FATBuffer[0], FATBytes, 0);
+    // Cluster 0 and 1 initial FAT12 marker:
+    // Cluster 0 = MediaByte | $0F00, Cluster 1 = $0FFF -> [MediaByte, $FF, $FF]
+    FATBuffer[0] := MediaByte;
+    FATBuffer[1] := $FF;
+    FATBuffer[2] := $FF;
+
+    ImageFile.WriteBuffer(FATBuffer[0], FATBytes); // FAT 1
+    ImageFile.WriteBuffer(FATBuffer[0], FATBytes); // FAT 2
+
+    // 3. Write Empty Root Directory
+    SetLength(RootDirBuffer, ARootEntries * 32);
+    FillChar(RootDirBuffer[0], Length(RootDirBuffer), 0);
+    ImageFile.WriteBuffer(RootDirBuffer[0], Length(RootDirBuffer));
+
+    // 4. Fill Data Area with zeroes to reach exact target size
+    FillChar(ZeroChunk[0], SizeOf(ZeroChunk), 0);
+    DataAreaSize := TotalSize - ImageFile.Position;
+    BytesRemaining := DataAreaSize;
+    while BytesRemaining > 0 do
+    begin
+      WriteChunk := Min(BytesRemaining, SizeOf(ZeroChunk));
+      ImageFile.WriteBuffer(ZeroChunk[0], WriteChunk);
+      Dec(BytesRemaining, WriteChunk);
+    end;
+  finally
+    ImageFile.Free;
+  end;
+end;
+
+{------------------------------------------------------------------
   Procedure: CreateBlank720KBImage
   Purpose:  Generates a clean standard 720KB Atari ST disk image
  ------------------------------------------------------------------}
 procedure TForm1.CreateBlank720KBImage(const ATargetFile: string);
-const
-  TOTAL_SIZE = 737280;               // Total size in bytes (720KB)
-  BYTES_PER_SECTOR = 512;            // Bytes per sector
-  SECTORS_PER_CLUSTER = 2;           // Sectors per cluster
-  RESERVED_SECTORS = 1;              // Reserved sectors
-  NUMBER_OF_FATS = 2;                // Number of FAT copies
-  ROOT_ENTRIES = 112;                // Root directory entries
-  TOTAL_SECTORS = 1440;              // Total sectors
-  SECTORS_PER_FAT = 3;               // Sectors per FAT
-var
-  ImageFile: TFileStream;
-  BootSector: TBytes;
-  FAT: array[0..1535] of Byte;
-  RootDir: array[0..3583] of Byte;
-  DataAreaSize: Int64;
-  DataArea: TBytes;
 begin
-  ImageFile := TFileStream.Create(ATargetFile, fmCreate);
-  try
-    // Create boot sector
-    SetLength(BootSector, BYTES_PER_SECTOR);
-    FillChar(BootSector[0], BYTES_PER_SECTOR, 0);
-    BootSector[0] := $E9;
-    BootSector[1] := $00;
-    BootSector[2] := $4E;
-    BootSector[3] := $4E;
-    BootSector[4] := $4E;
-    BootSector[5] := $4E;
-    BootSector[6] := $4E;
-    BootSector[7] := $4E;
-    BootSector[8] := $9C;
-    BootSector[9] := $16;
-    BootSector[10] := $81;
-    BootSector[11] := BYTES_PER_SECTOR and $FF;
-    BootSector[12] := BYTES_PER_SECTOR shr 8;
-    BootSector[13] := SECTORS_PER_CLUSTER;
-    BootSector[14] := RESERVED_SECTORS and $FF;
-    BootSector[15] := RESERVED_SECTORS shr 8;
-    BootSector[16] := NUMBER_OF_FATS;
-    BootSector[17] := ROOT_ENTRIES and $FF;
-    BootSector[18] := ROOT_ENTRIES shr 8;
-    BootSector[19] := TOTAL_SECTORS and $FF;
-    BootSector[20] := TOTAL_SECTORS shr 8;
-    BootSector[21] := $F9;       // Media Descriptor
-    BootSector[22] := SECTORS_PER_FAT and $FF;
-    BootSector[23] := SECTORS_PER_FAT shr 8;
-    BootSector[24] := $09;       // Drive Number
-    BootSector[26] := $02;       // Number of Heads
-    ImageFile.Write(BootSector[0], BYTES_PER_SECTOR);
-
-    // Create FAT tables
-    FillChar(FAT, SizeOf(FAT), 0);
-    FAT[0] := $F9;
-    FAT[1] := $FF;
-    FAT[2] := $FF;
-    ImageFile.Write(FAT, SizeOf(FAT));
-    ImageFile.Write(FAT, SizeOf(FAT)); // Second FAT copy
-
-    // Create empty root directory
-    FillChar(RootDir, SizeOf(RootDir), 0);
-    ImageFile.Write(RootDir, SizeOf(RootDir));
-
-    // Create empty data area
-    DataAreaSize := TOTAL_SIZE - ImageFile.Position;
-    SetLength(DataArea, DataAreaSize);
-    FillChar(DataArea[0], DataAreaSize, 0);
-    ImageFile.Write(DataArea[0], DataAreaSize);
-  finally
-    ImageFile.Free;
-  end;
+  CreateBlankDiskImage(ATargetFile, 2, 9, 80, 112, 2);
 end;
 
 {------------------------------------------------------------------
@@ -1347,48 +1467,61 @@ end;
 
 {------------------------------------------------------------------
   Procedure: ButtonCreate720Click
-  Purpose:  Event handler for the "Create 720KB Image" button
-            Creates a new empty 720KB ST image file
+  Purpose:  Event handler for creating a new Atari ST disk image
+            Prompts user with choice of format (360KB, 720KB, 800KB, 880KB, 1.44MB)
  ------------------------------------------------------------------}
 procedure TForm1.ButtonCreate720Click(Sender: TObject);
 var
-  SaveFileName: string;
-  TempFileName: string;
+  Sides, Spt, Tracks, RootEntries, Spc: Integer;
+  DefFileName, FormatName, SaveFileName, TempFileName: string;
 begin
-  SaveDialog.Filter := 'ST Image Files (*.st)|*.st|All Files (*.*)|*.*';
-  SaveDialog.FileName := 'empty720kb.st';
-  if SaveDialog.Execute then
-  begin
-    SaveFileName := SaveDialog.FileName;
-    TempFileName := GetTempFile(ExtractFilePath(SaveFileName), 'fat-temp-');
-    try
-      CreateBlank720KBImage(TempFileName);
-      // Save the new image
-      if FileExists(SaveFileName) then DeleteFile(SaveFileName);
-      RenameFile(TempFileName, SaveFileName);
-      ShowMessage('720 KB image created successfully!');
-    except
-      on E: Exception do
-        ShowMessage('Error creating image: ' + E.Message);
-    end;
-
-    // Load the new image
-    ResetState;
-    FImagePath := SaveFileName;
-    ReadSTImage(FImagePath, FCurrentPath);
-    UpdateFileListDisplay;
-    UpdateFreeSpaceDisplay;
+  FormNewImage := TFormNewImage.Create(Application);
+  try
+    if FormNewImage.ShowModal <> mrOK then
+      Exit;
+    FormNewImage.GetSelectedFormat(Sides, Spt, Tracks, RootEntries, Spc, DefFileName, FormatName);
+  finally
+    FormNewImage.Free;
+    FormNewImage := nil;
   end;
+
+  SaveDialog.Title := 'Create ' + FormatName + ' Image';
+  SaveDialog.Filter := 'ST Image Files (*.st)|*.st|All Files (*.*)|*.*';
+  SaveDialog.FileName := DefFileName;
+  if not SaveDialog.Execute then Exit;
+
+  SaveFileName := SaveDialog.FileName;
+  if LowerCase(ExtractFileExt(SaveFileName)) <> '.st' then
+    SaveFileName := SaveFileName + '.st';
+
+  TempFileName := GetTempFile(ExtractFilePath(SaveFileName), 'fat-temp-');
+  try
+    CreateBlankDiskImage(TempFileName, Sides, Spt, Tracks, RootEntries, Spc);
+    if FileExists(SaveFileName) then SysUtils.DeleteFile(SaveFileName);
+    RenameFile(TempFileName, SaveFileName);
+    ShowMessage(Format('%s disk image created successfully!' + sLineBreak + '%s', [FormatName, SaveFileName]));
+  except
+    on E: Exception do
+    begin
+      if FileExists(TempFileName) then SysUtils.DeleteFile(TempFileName);
+      ShowMessage('Error creating disk image: ' + E.Message);
+      Exit;
+    end;
+  end;
+
+  // Load the newly created image into the UI
+  ResetState;
+  LoadDiskImage(SaveFileName);
 end;
 
 {------------------------------------------------------------------
   Procedure: ButtonClusterMapClick
-  Purpose:  Event handler for the "Cluster Map" button
-            Opens the Cluster Map and Sector Hex Editor
+  Purpose:  Event handler for the "Cluster Map" button / "Locate in Cluster Map"
+            Opens the Cluster Map and Sector Hex Editor with clusters highlighted
  ------------------------------------------------------------------}
 procedure TForm1.ButtonClusterMapClick(Sender: TObject);
 var
-  RawName, FileName: string;
+  RawName, FileName, CleanItem: string;
   IsDir, IsStaged, IsDel, IsMarkedDel: Boolean;
   ImageFile: TFileStream;
   DirCluster, DirEntryPos: Int64;
@@ -1396,6 +1529,12 @@ var
   StartCluster, CurrCluster: Word;
   ClusterList: array of Word;
 begin
+  if FInArchiveMode then
+  begin
+    ShowMessage('Cluster mapping is only available for floppy disk files, not inside archive containers.');
+    Exit;
+  end;
+
   if (FImagePath = '') or not FileExists(FImagePath) then
   begin
     ShowMessage('Please open or write an image first.');
@@ -1406,8 +1545,12 @@ begin
 
   if GetSelectedFileName(RawName, FileName, IsDir, IsStaged, IsDel, IsMarkedDel) then
   begin
-    if not IsDir and not IsStaged and not FileName.EndsWith('\') then
+    if not IsStaged and (FileName <> '..') and (FileName <> '..\') then
     begin
+      CleanItem := CleanFileName(FileName);
+      if CleanItem.EndsWith('\') then
+        CleanItem := Copy(CleanItem, 1, Length(CleanItem) - 1);
+
       ImageFile := TFileStream.Create(FImagePath, fmOpenRead or fmShareDenyNone);
       try
         GetFATDetails(ImageFile);
@@ -1416,7 +1559,14 @@ begin
         else
           DirCluster := FindDirectoryInPath(ImageFile, FCurrentPath);
 
-        DirEntryPos := FindFileInDirectory(ImageFile, DirCluster, FileName);
+        DirEntryPos := -1;
+        if DirCluster <> -1 then
+        begin
+          DirEntryPos := FindFileInDirectory(ImageFile, DirCluster, CleanItem);
+          if (DirEntryPos = -1) and IsDel then
+            DirEntryPos := FindDeletedFileInDirectory(ImageFile, DirCluster, CleanItem);
+        end;
+
         if DirEntryPos <> -1 then
         begin
           ImageFile.Position := DirEntryPos;
@@ -1647,15 +1797,31 @@ var
   RawName, CleanName: string;
   IsDir, IsStaged, IsDel, IsMarkedDel: Boolean;
 begin
+  if FInArchiveMode then
+  begin
+    ButtonRemoveFile.Caption := 'Close Archive';
+    MenuItemDelete.Caption := 'Close &Archive (Return to Disk)';
+    Exit;
+  end;
+
   if GetSelectedFileName(RawName, CleanName, IsDir, IsStaged, IsDel, IsMarkedDel) then
   begin
     if IsDel or IsMarkedDel then
-      ButtonRemoveFile.Caption := 'Undelete'
+    begin
+      ButtonRemoveFile.Caption := 'Undelete';
+      MenuItemDelete.Caption := '&Undelete File';
+    end
     else
+    begin
       ButtonRemoveFile.Caption := 'Delete';
+      MenuItemDelete.Caption := '&Delete File';
+    end;
   end
   else
+  begin
     ButtonRemoveFile.Caption := 'Delete';
+    MenuItemDelete.Caption := '&Delete / Undelete File';
+  end;
 end;
 
 {------------------------------------------------------------------
@@ -1691,10 +1857,19 @@ begin
   FDragPending := False;
   FDragActive := False;
   FDragSourcePath := '';
+  FArchiveVault := TArchiveVault.Create;
+  FInArchiveMode := False;
+  FArchiveSourceFileName := '';
+  FArchiveTempFile := '';
+  FArchiveInnerPath := '';
+  SetLength(FArchiveChildren, 0);
+  FArchiveChildCount := 0;
   OpenDialog.Title := 'Select Files or Image';
   SelectDirectoryDialog.Title := 'Select Folder to Add (Recursive)';
   SaveDialog.Title := 'Save Image As...';
+  Menu := MainMenu1;
   UpdateDeleteButtonState;
+  SetButtonToolbarVisible(False);
 end;
 
 {------------------------------------------------------------------
@@ -1732,6 +1907,8 @@ begin
   FDisplayItems.Free;
   FNewDirectories.Free;
   FDirsToDelete.Free;
+  CloseArchiveMode;
+  FArchiveVault.Free;
 end;
 
 {------------------------------------------------------------------
@@ -1798,14 +1975,197 @@ begin
 end;
 
 {------------------------------------------------------------------
+  Procedure: OpenArchiveFromDisk
+  Purpose:  Extracts an archive (.zip, .lzh, .lha, .lza, .arc, .pak, .zoo)
+            from the floppy disk to a temporary location and mounts it
+            in TArchiveVault so it can be navigated like a folder
+ ------------------------------------------------------------------}
+procedure TForm1.OpenArchiveFromDisk(const AArchiveFileName: string);
+var
+  CleanName, TempFile: string;
+begin
+  CleanName := CleanFileName(AArchiveFileName);
+  if not IsArchiveFileName(CleanName) then
+  begin
+    ShowMessage('File is not a supported archive format (.zip, .lzh, .lha, .lza, .arc, .pak, .zoo).');
+    Exit;
+  end;
+
+  Screen.Cursor := crHourGlass;
+  try
+    TempFile := ExtractFileToTemp(AArchiveFileName);
+  finally
+    Screen.Cursor := crDefault;
+  end;
+
+  if (TempFile = '') or not FileExists(TempFile) then
+  begin
+    ShowMessage('Failed to extract archive from floppy disk image.');
+    Exit;
+  end;
+
+  if FArchiveVault = nil then
+    FArchiveVault := TArchiveVault.Create;
+
+  Screen.Cursor := crHourGlass;
+  try
+    if not FArchiveVault.LoadArchive(TempFile) then
+    begin
+      ShowMessage('Failed to parse archive: ' + CleanName + sLineBreak +
+        'The archive format was not recognized or the file may be corrupt.');
+      SysUtils.DeleteFile(TempFile);
+      Exit;
+    end;
+  finally
+    Screen.Cursor := crDefault;
+  end;
+
+  if FArchiveVault.ItemCount = 0 then
+  begin
+    ShowMessage('Archive is empty: ' + CleanName);
+    SysUtils.DeleteFile(TempFile);
+    Exit;
+  end;
+
+  FInArchiveMode := True;
+  FArchiveSourceFileName := CleanName;
+  FArchiveTempFile := TempFile;
+  FArchiveInnerPath := '';
+  UpdateArchiveFileListDisplay;
+end;
+
+{------------------------------------------------------------------
+  Procedure: CloseArchiveMode
+  Purpose:  Exits archive folder navigation and returns to the disk image
+ ------------------------------------------------------------------}
+procedure TForm1.CloseArchiveMode;
+begin
+  if not FInArchiveMode then Exit;
+  FInArchiveMode := False;
+  FArchiveInnerPath := '';
+  FArchiveSourceFileName := '';
+  if FArchiveVault <> nil then
+    FArchiveVault.Clear;
+  if (FArchiveTempFile <> '') and FileExists(FArchiveTempFile) then
+  begin
+    SysUtils.DeleteFile(FArchiveTempFile);
+    FArchiveTempFile := '';
+  end;
+  if (FImagePath <> '') and FileExists(FImagePath) then
+    ReadSTImage(FImagePath, FCurrentPath)
+  else
+    FDisplayItems.Clear;
+  UpdateFileListDisplay;
+end;
+
+{------------------------------------------------------------------
+  Procedure: UpdateArchiveFileListDisplay
+  Purpose:  Populates the ListViewFiles with files and subdirectories
+            located inside the currently navigated archive
+ ------------------------------------------------------------------}
+procedure TForm1.UpdateArchiveFileListDisplay;
+var
+  Info: TDiskItemInfo;
+  I, MaxItems: Integer;
+begin
+  if not FInArchiveMode or (FArchiveVault = nil) then Exit;
+
+  ListViewFiles.Items.BeginUpdate;
+  try
+    ListViewFiles.Items.Clear;
+    SetLength(FDiskItems, 0);
+
+    // 1. Parent folder link '..'
+    FillChar(Info, SizeOf(Info), 0);
+    Info.DisplayName := '..';
+    Info.CleanName := '..';
+    Info.IsDir := True;
+    Info.SizeStr := '<DIR>';
+    if FArchiveInnerPath = '' then
+      Info.ClusterStr := '[Disk]'
+    else
+      Info.ClusterStr := '[Up]';
+    Info.DateTimeStr := '-';
+    Info.AttrStr := 'D----';
+    Info.StatusStr := 'Parent';
+    SetLength(FDiskItems, Length(FDiskItems) + 1);
+    FDiskItems[High(FDiskItems)] := Info;
+    AddDiskItemToListView(Info);
+
+    // 2. Query children from vault
+    MaxItems := FArchiveVault.ItemCount * 2 + 32;
+    SetLength(FArchiveChildren, MaxItems);
+    FArchiveChildCount := 0;
+    FArchiveVault.GetChildren(FArchiveInnerPath, FArchiveChildren, FArchiveChildCount);
+
+    for I := 0 to FArchiveChildCount - 1 do
+    begin
+      FillChar(Info, SizeOf(Info), 0);
+      Info.DisplayName := FArchiveChildren[I].DisplayName;
+      Info.CleanName := FArchiveChildren[I].DisplayName;
+      Info.IsDir := FArchiveChildren[I].IsDir;
+      if Info.IsDir then
+      begin
+        Info.Size := 0;
+        Info.SizeStr := '<DIR>';
+        Info.AttrStr := 'D----';
+        Info.ClusterStr := '<DIR>';
+        Info.StatusStr := 'Directory';
+      end
+      else
+      begin
+        Info.Size := FArchiveChildren[I].OriginalSize;
+        Info.SizeStr := FormatSizeStr(Info.Size, False);
+        Info.AttrStr := '-----';
+        Info.ClusterStr := FArchiveChildren[I].MethodStr;
+        Info.StatusStr := 'In Archive';
+      end;
+      Info.DateTimeStr := FArchiveChildren[I].DateTimeStr;
+
+      SetLength(FDiskItems, Length(FDiskItems) + 1);
+      FDiskItems[High(FDiskItems)] := Info;
+      AddDiskItemToListView(Info);
+    end;
+  finally
+    ListViewFiles.Items.EndUpdate;
+  end;
+
+  if FArchiveInnerPath = '' then
+    LabelCurrentPath.Caption := 'Archive: ' + FArchiveSourceFileName + ' [Root]'
+  else
+    LabelCurrentPath.Caption := 'Archive: ' + FArchiveSourceFileName + ' / ' + FArchiveInnerPath;
+
+  LabelVolume.Caption := 'Archive: ' + UpperCase(ExtractFileExt(FArchiveSourceFileName));
+  UpdateDeleteButtonState;
+end;
+
+{------------------------------------------------------------------
   Procedure: ButtonBackClick
   Purpose:  Event handler for the "Back" button
-            Navigates to the parent directory
+            Navigates to the parent directory or exits archive
  ------------------------------------------------------------------}
 procedure TForm1.ButtonBackClick(Sender: TObject);
 var
   P: Integer;
 begin
+  if FInArchiveMode then
+  begin
+    if FArchiveInnerPath = '' then
+      CloseArchiveMode
+    else
+    begin
+      if FArchiveInnerPath.EndsWith('/') then
+        FArchiveInnerPath := Copy(FArchiveInnerPath, 1, Length(FArchiveInnerPath) - 1);
+      P := LastDelimiter('/', FArchiveInnerPath);
+      if P > 0 then
+        FArchiveInnerPath := Copy(FArchiveInnerPath, 1, P)
+      else
+        FArchiveInnerPath := '';
+      UpdateArchiveFileListDisplay;
+    end;
+    Exit;
+  end;
+
   if FCurrentPath = '' then Exit;
   if FCurrentPath.EndsWith('\') then
     FCurrentPath := Copy(FCurrentPath, 1, Length(FCurrentPath) - 1);
@@ -1824,13 +2184,48 @@ end;
 {------------------------------------------------------------------
   Procedure: ListViewFilesDblClick
   Purpose:  Event handler for double-clicking a file in the list
-            Navigates into directories or goes back if ".." is clicked
+            Navigates into directories/archives or goes back if ".." is clicked
  ------------------------------------------------------------------}
 procedure TForm1.ListViewFilesDblClick(Sender: TObject);
 var
   RawItem, SelectedItem: string;
   IsDir, IsStaged, IsDel, IsMarkedDel: Boolean;
+  P: Integer;
 begin
+  if FInArchiveMode then
+  begin
+    if not GetSelectedFileName(RawItem, SelectedItem, IsDir, IsStaged, IsDel, IsMarkedDel) then Exit;
+
+    if (SelectedItem = '..') or (SelectedItem = '..\') then
+    begin
+      if FArchiveInnerPath = '' then
+        CloseArchiveMode
+      else
+      begin
+        if FArchiveInnerPath.EndsWith('/') then
+          FArchiveInnerPath := Copy(FArchiveInnerPath, 1, Length(FArchiveInnerPath) - 1);
+        P := LastDelimiter('/', FArchiveInnerPath);
+        if P > 0 then
+          FArchiveInnerPath := Copy(FArchiveInnerPath, 1, P)
+        else
+          FArchiveInnerPath := '';
+        UpdateArchiveFileListDisplay;
+      end;
+      Exit;
+    end;
+
+    if IsDir then
+    begin
+      FArchiveInnerPath := FArchiveInnerPath + SelectedItem + '/';
+      UpdateArchiveFileListDisplay;
+    end
+    else
+    begin
+      ButtonViewFileClick(Sender);
+    end;
+    Exit;
+  end;
+
   if not GetSelectedFileName(RawItem, SelectedItem, IsDir, IsStaged, IsDel, IsMarkedDel) then Exit;
 
   if (SelectedItem = '..') or (SelectedItem = '..\') then
@@ -1853,7 +2248,14 @@ begin
   end
   else
   begin
-    // Double-clicking a file opens it in the built-in File Viewer / Hex Inspector
+    // If it's an archive file, open it and navigate into it like a folder!
+    if IsArchiveFileName(SelectedItem) and not IsDel and not IsStaged then
+    begin
+      OpenArchiveFromDisk(RawItem);
+      Exit;
+    end;
+
+    // Double-clicking a regular file opens it in the built-in File Viewer / Hex Inspector
     ButtonViewFileClick(Sender);
   end;
 end;
@@ -1869,6 +2271,12 @@ var
   CleanName, ChildName, HostFile: string;
   Info: TDiskItemInfo;
 begin
+  if FInArchiveMode then
+  begin
+    UpdateArchiveFileListDisplay;
+    Exit;
+  end;
+
   ListViewFiles.Items.BeginUpdate;
   try
     ListViewFiles.Items.Clear;
@@ -1912,6 +2320,11 @@ begin
       begin
         Info.StatusStr := 'Hidden';
         Info.DisplayName := CleanName + ' *h*';
+      end
+      else if not Info.IsDir and IsArchiveFileName(CleanName) then
+      begin
+        Info.StatusStr := 'Archive';
+        Info.DisplayName := CleanName;
       end
       else
       begin
@@ -2227,7 +2640,10 @@ begin
         FDiskItemsRaw[High(FDiskItemsRaw)].ClusterStr := IntToStr(EntryStartClust);
         FDiskItemsRaw[High(FDiskItemsRaw)].DateTimeStr := EntryDateStr;
         FDiskItemsRaw[High(FDiskItemsRaw)].AttrStr := EntryAttrStr;
-        FDiskItemsRaw[High(FDiskItemsRaw)].StatusStr := 'OK';
+        if not EntryIsDir and IsArchiveFileName(FileName) then
+          FDiskItemsRaw[High(FDiskItemsRaw)].StatusStr := 'Archive'
+        else
+          FDiskItemsRaw[High(FDiskItemsRaw)].StatusStr := 'OK';
       end;
 
       if DirStartCluster = 0 then Break;
@@ -4030,6 +4446,30 @@ begin
     Exit;
   end;
 
+  // Case 0: Viewing file from inside an archive container
+  if FInArchiveMode then
+  begin
+    MemStream := TMemoryStream.Create;
+    try
+      Screen.Cursor := crHourGlass;
+      try
+        if FArchiveVault.ExtractEntryToStream(FArchiveInnerPath + CleanName, MemStream) then
+        begin
+          MemStream.Position := 0;
+          FormFileViewer.LoadFromStream(MemStream, CleanName, 0);
+          FormFileViewer.ShowModal;
+        end
+        else
+          ShowMessage('Unable to extract file "' + CleanName + '" from archive for viewing.');
+      finally
+        Screen.Cursor := crDefault;
+      end;
+    finally
+      MemStream.Free;
+    end;
+    Exit;
+  end;
+
   // Case 1: Pending staged file (*A*) - load from host disk
   if IsStaged then
   begin
@@ -4093,11 +4533,19 @@ end;
   Purpose:  Captures start coordinate for dragging files out of STIMAGE
  ------------------------------------------------------------------}
 procedure TForm1.ListViewFilesMouseDown(Sender: TObject; Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
+var
+  HitItem: TListItem;
 begin
   if Button = mbLeft then
   begin
     FDragStartPoint := Point(X, Y);
     FDragPending := (ListViewFiles.GetItemAt(X, Y) <> nil);
+  end
+  else if Button = mbRight then
+  begin
+    HitItem := ListViewFiles.GetItemAt(X, Y);
+    if HitItem <> nil then
+      ListViewFiles.Selected := HitItem;
   end;
 end;
 
@@ -4126,7 +4574,14 @@ begin
 
       if FDiskItems[Idx].IsDir or (FDiskItems[Idx].CleanName = '..') then Exit;
 
-      TempHostPath := ExtractFileToTemp(FDiskItems[Idx].DisplayName);
+      if FInArchiveMode then
+      begin
+        if not FArchiveVault.ExtractEntryToTempFile(FArchiveInnerPath + FDiskItems[Idx].CleanName, TempHostPath) then
+          Exit;
+      end
+      else
+        TempHostPath := ExtractFileToTemp(FDiskItems[Idx].DisplayName);
+
       if (TempHostPath <> '') and FileExists(TempHostPath) then
       begin
         FDragActive := True;
@@ -4221,6 +4676,30 @@ begin
     Exit;
   end;
 
+  if FInArchiveMode then
+  begin
+    SaveDialog.Filter := 'All Files (*.*)|*.*';
+    SaveDialog.FileName := CleanName;
+    if not SaveDialog.Execute then Exit;
+    LocalFileName := SaveDialog.FileName;
+
+    Fs := TFileStream.Create(LocalFileName, fmCreate);
+    try
+      Screen.Cursor := crHourGlass;
+      try
+        if FArchiveVault.ExtractEntryToStream(FArchiveInnerPath + CleanName, Fs) then
+          ShowMessage('File extracted successfully from archive:' + sLineBreak + LocalFileName)
+        else
+          ShowMessage('Failed to extract file from archive.');
+      finally
+        Screen.Cursor := crDefault;
+      end;
+    finally
+      Fs.Free;
+    end;
+    Exit;
+  end;
+
   if (FImagePath = '') or not FileExists(FImagePath) then
   begin
     ShowMessage('No image file is open.');
@@ -4272,8 +4751,31 @@ begin
 
   SetLength(InBuf, 0);
 
-  // Load file data (staged from host or from disk image)
-  if IsStaged then
+  if FInArchiveMode then
+  begin
+    MemStream := TMemoryStream.Create;
+    try
+      Screen.Cursor := crHourGlass;
+      try
+        if not FArchiveVault.ExtractEntryToStream(FArchiveInnerPath + CleanName, MemStream) then
+        begin
+          ShowMessage('Failed to extract file from archive.');
+          Exit;
+        end;
+        SetLength(InBuf, MemStream.Size);
+        if MemStream.Size > 0 then
+        begin
+          MemStream.Position := 0;
+          MemStream.ReadBuffer(InBuf[0], MemStream.Size);
+        end;
+      finally
+        Screen.Cursor := crDefault;
+      end;
+    finally
+      MemStream.Free;
+    end;
+  end
+  else if IsStaged then
   begin
     HostPath := '';
     for I := 0 to FFilePaths.Count - 1 do
@@ -4391,6 +4893,34 @@ end;
  ------------------------------------------------------------------}
 procedure TForm1.FormKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
 begin
+  if Key = VK_F1 then
+  begin
+    MenuItemAboutClick(nil);
+    Key := 0;
+    Exit;
+  end;
+
+  if Key = VK_F3 then
+  begin
+    ButtonViewFileClick(nil);
+    Key := 0;
+    Exit;
+  end;
+
+  if Key = VK_F4 then
+  begin
+    ButtonClusterMapClick(nil);
+    Key := 0;
+    Exit;
+  end;
+
+  if Key = VK_F6 then
+  begin
+    MenuItemVirusScannerClick(nil);
+    Key := 0;
+    Exit;
+  end;
+
   if (ssCtrl in Shift) and (Key = VK_O) then
   begin
     ButtonOpenImageClick(nil);
@@ -4412,16 +4942,16 @@ begin
     Exit;
   end;
 
-  if Key = VK_F6 then
+  if (ssCtrl in Shift) and (Key = VK_E) then
   begin
-    MenuItemVirusScannerClick(nil);
+    ButtonSaveFileClick(nil);
     Key := 0;
     Exit;
   end;
 
   if (Key = VK_BACK) or ((ssAlt in Shift) and (Key = VK_UP)) then
   begin
-    if FCurrentPath <> '' then
+    if FInArchiveMode or (FCurrentPath <> '') then
     begin
       ButtonBackClick(nil);
       Key := 0;
@@ -4464,7 +4994,7 @@ begin
 
   if (Key = VK_BACK) or ((ssAlt in Shift) and (Key = VK_UP)) then
   begin
-    if FCurrentPath <> '' then
+    if FInArchiveMode or (FCurrentPath <> '') then
     begin
       ButtonBackClick(nil);
       Key := 0;
@@ -4491,11 +5021,34 @@ begin
   Idx := Item.Index;
   if (Idx < 0) or (Idx > High(FDiskItems)) then Exit;
 
+  if FInArchiveMode then
+  begin
+    if FDiskItems[Idx].IsDir then
+    begin
+      Sender.Canvas.Font.Style := [fsBold];
+      if not (cdsSelected in State) then
+        Sender.Canvas.Font.Color := clBlue;
+    end
+    else
+    begin
+      Sender.Canvas.Font.Style := [];
+      if not (cdsSelected in State) then
+        Sender.Canvas.Font.Color := $00703800; // Deep teal / cyan for archive entries
+    end;
+    Exit;
+  end;
+
   if FDiskItems[Idx].IsDir then
   begin
     Sender.Canvas.Font.Style := [fsBold];
     if not (cdsSelected in State) then
       Sender.Canvas.Font.Color := clBlue;
+  end
+  else if FDiskItems[Idx].StatusStr = 'Archive' then
+  begin
+    Sender.Canvas.Font.Style := [fsBold];
+    if not (cdsSelected in State) then
+      Sender.Canvas.Font.Color := clTeal;
   end
   else if FDiskItems[Idx].IsStagedAdd then
   begin
@@ -4537,6 +5090,260 @@ procedure TForm1.ListViewFilesCustomDrawSubItem(Sender: TCustomListView; Item: T
 begin
   DefaultDraw := True;
   ListViewFilesCustomDrawItem(Sender, Item, State, DefaultDraw);
+end;
+
+{------------------------------------------------------------------
+  Procedure: PopupMenuFilesPopup
+  Purpose:  Dynamically sets menu item captions and availability
+            for the file list right-click context menu
+ ------------------------------------------------------------------}
+procedure TForm1.PopupMenuFilesPopup(Sender: TObject);
+var
+  RawName, CleanName: string;
+  IsDir, IsStaged, IsDel, IsMarkedDel: Boolean;
+  HasSelection: Boolean;
+begin
+  if FInArchiveMode then
+  begin
+    MenuItemPopupOpenArchive.Caption := '&Close Archive (Return to Disk)';
+    MenuItemPopupOpenArchive.Visible := True;
+    MenuItemPopupOpenArchive.Enabled := True;
+    MenuItemPopupSep0.Visible := True;
+
+    HasSelection := GetSelectedFileName(RawName, CleanName, IsDir, IsStaged, IsDel, IsMarkedDel);
+    if not HasSelection or (CleanName = '..') or (CleanName = '..\') then
+    begin
+      MenuItemPopupView.Enabled := False;
+      MenuItemPopupExtract.Enabled := False;
+      MenuItemPopupExtractDepacked.Enabled := False;
+      MenuItemPopupClusterMap.Enabled := False;
+      MenuItemPopupDelete.Enabled := False;
+      MenuItemPopupDelete.Caption := '&Delete';
+      Exit;
+    end;
+
+    MenuItemPopupView.Enabled := not IsDir;
+    MenuItemPopupExtract.Enabled := not IsDir;
+    MenuItemPopupExtractDepacked.Enabled := not IsDir;
+    MenuItemPopupClusterMap.Enabled := False;
+    MenuItemPopupDelete.Enabled := False;
+    MenuItemPopupDelete.Caption := '&Delete';
+    Exit;
+  end;
+
+  HasSelection := GetSelectedFileName(RawName, CleanName, IsDir, IsStaged, IsDel, IsMarkedDel);
+
+  if not HasSelection or (CleanName = '..') or (CleanName = '..\') then
+  begin
+    MenuItemPopupOpenArchive.Visible := False;
+    MenuItemPopupSep0.Visible := False;
+    MenuItemPopupView.Enabled := False;
+    MenuItemPopupExtract.Enabled := False;
+    MenuItemPopupExtractDepacked.Enabled := False;
+    MenuItemPopupClusterMap.Enabled := False;
+    MenuItemPopupDelete.Enabled := False;
+    MenuItemPopupDelete.Caption := '&Delete';
+    Exit;
+  end;
+
+  // Open archive option
+  if not IsDir and not CleanName.EndsWith('\') and IsArchiveFileName(CleanName) and not IsStaged and not IsDel then
+  begin
+    MenuItemPopupOpenArchive.Caption := '&Browse / Open Archive as Folder';
+    MenuItemPopupOpenArchive.Visible := True;
+    MenuItemPopupOpenArchive.Enabled := True;
+    MenuItemPopupSep0.Visible := True;
+  end
+  else
+  begin
+    MenuItemPopupOpenArchive.Visible := False;
+    MenuItemPopupSep0.Visible := False;
+  end;
+
+  // View: Only files
+  MenuItemPopupView.Enabled := not IsDir and not CleanName.EndsWith('\');
+
+  // Extract: Only files (directories cannot be single-extracted with ButtonSaveFile)
+  MenuItemPopupExtract.Enabled := not IsDir and not CleanName.EndsWith('\') and not IsStaged;
+
+  // Extract & Depack: Only files
+  MenuItemPopupExtractDepacked.Enabled := not IsDir and not CleanName.EndsWith('\');
+
+  // Locate in Cluster Map: Files/dirs that reside on disk (not staged)
+  MenuItemPopupClusterMap.Enabled := not IsStaged and (FImagePath <> '') and FileExists(FImagePath);
+
+  // Delete / Undelete
+  MenuItemPopupDelete.Enabled := True;
+  if IsDir or CleanName.EndsWith('\') then
+  begin
+    if IsStaged then
+      MenuItemPopupDelete.Caption := 'Cancel Staged Directory'
+    else
+      MenuItemPopupDelete.Caption := '&Remove Directory';
+  end
+  else
+  begin
+    if IsDel then
+      MenuItemPopupDelete.Caption := '&Undelete File'
+    else if IsMarkedDel then
+      MenuItemPopupDelete.Caption := 'Cancel Deletion'
+    else if IsStaged then
+      MenuItemPopupDelete.Caption := 'Cancel Staged File'
+    else
+      MenuItemPopupDelete.Caption := '&Delete File';
+  end;
+end;
+
+{------------------------------------------------------------------
+  Procedure: MenuItemPopupOpenArchiveClick
+  Purpose:  Context menu handler for opening an archive container as a
+            folder or closing it to return to the disk image
+ ------------------------------------------------------------------}
+procedure TForm1.MenuItemPopupOpenArchiveClick(Sender: TObject);
+var
+  RawName, CleanName: string;
+  IsDir, IsStaged, IsDel, IsMarkedDel: Boolean;
+begin
+  if FInArchiveMode then
+  begin
+    CloseArchiveMode;
+    Exit;
+  end;
+
+  if GetSelectedFileName(RawName, CleanName, IsDir, IsStaged, IsDel, IsMarkedDel) then
+  begin
+    if not IsDir and IsArchiveFileName(CleanName) and not IsStaged and not IsDel then
+      OpenArchiveFromDisk(RawName);
+  end;
+end;
+
+{------------------------------------------------------------------
+  Procedure: MenuItemPopupDeleteClick
+  Purpose:  Context menu delete handler: routes to file delete/undelete
+            or directory removal based on selected item type
+ ------------------------------------------------------------------}
+procedure TForm1.MenuItemPopupDeleteClick(Sender: TObject);
+var
+  RawName, CleanName: string;
+  IsDir, IsStaged, IsDel, IsMarkedDel: Boolean;
+begin
+  if not GetSelectedFileName(RawName, CleanName, IsDir, IsStaged, IsDel, IsMarkedDel) then Exit;
+  if IsDir or CleanName.EndsWith('\') then
+    ButtonRemoveDirClick(Sender)
+  else
+    ButtonRemoveFileClick(Sender);
+end;
+
+{------------------------------------------------------------------
+  Procedure: UpdateLayout
+  Purpose:  Dynamically positions and scales the file list, header indicators,
+            and bottom button toolbar to ensure clean alignment at all window sizes
+ ------------------------------------------------------------------}
+procedure TForm1.UpdateLayout;
+var
+  TargetBottom: Integer;
+  ColWidth: Integer;
+begin
+  if (PanelToolbar = nil) or (ListViewFiles = nil) then Exit;
+
+  // Align free space indicators to the right edge with 16px margin
+  if ProgressBarFreeSpace <> nil then
+    ProgressBarFreeSpace.Left := ClientWidth - 16 - ProgressBarFreeSpace.Width;
+  if LabelFreeSpace <> nil then
+    LabelFreeSpace.Left := ClientWidth - 16 - LabelFreeSpace.Width;
+
+  // Position bottom toolbar when visible
+  if PanelToolbar.Visible then
+  begin
+    PanelToolbar.Top := ClientHeight - PanelToolbar.Height - 7;
+    PanelToolbar.Left := 0;
+    PanelToolbar.Width := ClientWidth;
+    TargetBottom := PanelToolbar.Top - 8;
+  end
+  else
+  begin
+    TargetBottom := ClientHeight - 12;
+  end;
+
+  // Stretch ListViewFiles to fill width and available height
+  ListViewFiles.SetBounds(16, 51, ClientWidth - 32, Max(100, TargetBottom - 51));
+
+  // Dynamically auto-expand the Name column so items fill the list view
+  if ListViewFiles.Columns.Count >= 6 then
+  begin
+    ColWidth := ListViewFiles.ClientWidth - (80 + 55 + 110 + 50 + 75 + 28);
+    if ColWidth < 145 then
+      ColWidth := 145;
+    ListViewFiles.Columns[0].Width := ColWidth;
+  end;
+end;
+
+{------------------------------------------------------------------
+  Procedure: FormResize
+  Purpose:  Event handler triggered when the window is resized or maximized
+ ------------------------------------------------------------------}
+procedure TForm1.FormResize(Sender: TObject);
+begin
+  UpdateLayout;
+end;
+
+{------------------------------------------------------------------
+  Procedure: SetButtonToolbarVisible
+  Purpose:  Toggles visibility of the classic bottom button toolbar
+            and resizes ListViewFiles accordingly (default is OFF)
+ ------------------------------------------------------------------}
+procedure TForm1.SetButtonToolbarVisible(AVisible: Boolean);
+begin
+  PanelToolbar.Visible := AVisible;
+  MenuItemButtonToolbar.Checked := AVisible;
+  UpdateLayout;
+end;
+
+{------------------------------------------------------------------
+  Procedure: MenuItemButtonToolbarClick
+  Purpose:  Toggles the classic bottom button toolbar from View menu
+ ------------------------------------------------------------------}
+procedure TForm1.MenuItemButtonToolbarClick(Sender: TObject);
+begin
+  SetButtonToolbarVisible(MenuItemButtonToolbar.Checked);
+end;
+
+{------------------------------------------------------------------
+  Procedure: MenuItemCloseImageClick
+  Purpose:  Closes the current disk image and returns to empty state
+ ------------------------------------------------------------------}
+procedure TForm1.MenuItemCloseImageClick(Sender: TObject);
+begin
+  ResetState;
+end;
+
+{------------------------------------------------------------------
+  Procedure: MenuItemCloseArchiveClick
+  Purpose:  Exits archive folder navigation and returns to disk root
+ ------------------------------------------------------------------}
+procedure TForm1.MenuItemCloseArchiveClick(Sender: TObject);
+begin
+  if FInArchiveMode then
+    CloseArchiveMode;
+end;
+
+{------------------------------------------------------------------
+  Procedure: MenuItemAboutClick
+  Purpose:  Displays the application information dialog
+ ------------------------------------------------------------------}
+procedure TForm1.MenuItemAboutClick(Sender: TObject);
+begin
+  MessageDlg('About Atari .ST Image File Manager',
+    'Atari .ST Image File Manager v2.0' + LineEnding +
+    'Advanced Atari ST Floppy Disk Image & Archive Utility' + LineEnding + LineEnding +
+    'Features:' + LineEnding +
+    '  * Multi-Format Floppy Disk Creator (360 KB - 1.44 MB)' + LineEnding +
+    '  * FAT12 Disk Image Management (.ST & .MSA formats)' + LineEnding +
+    '  * File Archival, Extraction & Integrated Decompressors' + LineEnding +
+    '  * Archive Vault: Browse compressed files as folders' + LineEnding +
+    '  * Cluster Map & Low-Level Sector Hex Inspector' + LineEnding +
+    '  * Integrated Atari ST Boot-Sector & File Virus Scanner',
+    mtInformation, [mbOK], 0);
 end;
 
 end.
