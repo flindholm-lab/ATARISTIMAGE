@@ -165,6 +165,19 @@
         <IsPartOfProject Value="True"/>
         <UnitName Value="unit_ataripic"/>
       </Unit>
+      <Unit>
+        <Filename Value="unit_virusscanner.pas"/>
+        <IsPartOfProject Value="True"/>
+        <ComponentName Value="FormVirusScanner"/>
+        <HasResources Value="True"/>
+        <ResourceBaseClass Value="Form"/>
+        <UnitName Value="unit_virusscanner"/>
+      </Unit>
+      <Unit>
+        <Filename Value="unit_virusscanner.lfm"/>
+        <IsPartOfProject Value="True"/>
+        <HasResources Value="True"/>
+      </Unit>
     </Units>
   </ProjectOptions>
   <CompilerOptions>

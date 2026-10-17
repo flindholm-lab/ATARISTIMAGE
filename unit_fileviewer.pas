@@ -73,6 +73,9 @@ var
 
 implementation
 
+uses
+  unit_virusscanner;
+
 {$R *.lfm}
 
 function SwapLongBE(AValue: LongWord): LongWord;
@@ -220,6 +223,12 @@ begin
 
   if FHasDepacked and (Length(FDepackedData) > 0) then Exit(True);
 
+  if not IsPackerSupported(FDetectedPacker) then
+  begin
+    ShowMessage('Decompression is not implemented for packer: ' + FDetectedPacker);
+    Exit(False);
+  end;
+
   Screen.Cursor := crHourGlass;
   try
     if DepackBuffer(@FOriginalData[0], Length(FOriginalData), FDepackedData, PackerName) then
@@ -231,6 +240,7 @@ begin
     end
     else
     begin
+      SetLength(FDepackedData, 0);
       ShowMessage('Decompression failed for: ' + FDetectedPacker + sLineBreak +
         'The file data may be corrupt or encoded with an unsupported variant.');
     end;
@@ -397,13 +407,58 @@ end;
 function TFormFileViewer.DecodePRGHeader: string;
 var
   TextSize, DataSize, BssSize, SymsSize, Flags: LongWord;
-  FlagsDesc: string;
+  FlagsDesc, PackerLine, StatusDesc: string;
+  CurPacker: string;
+  IsSupp: Boolean;
+  ThreatRes: TVirusScanResult;
+  ThreatLine: string;
+  BootSum: Word;
+  BootState: string;
 begin
   Result := '';
-  if Length(FData) < 28 then Exit;
+  if Length(FData) < 4 then Exit;
 
-  // Check GEMDOS branch instruction magic: $601A
-  if (FData[0] = $60) and (FData[1] = $1A) then
+  // 0. ATARI ST BOOT SECTOR (512 bytes)
+  if (Length(FData) = 512) and (Pos('BOOT_SECTOR', UpperCase(FFileName)) > 0) then
+  begin
+    BootSum := CalculateBootChecksum(@FData[0], 512);
+    if BootSum = $1234 then
+      BootState := 'Executable (Bootable $1234 Checksum Validated)'
+    else
+      BootState := 'Non-executable (Standard Data Disk)';
+
+    if ScanBootSector(@FData[0], 512, ThreatRes) then
+      ThreatLine := Format('Threat Status:    *** VIRUS DETECTED: %s ***' + sLineBreak +
+                           'Description:      %s' + sLineBreak, [ThreatRes.Name, ThreatRes.Description])
+    else
+      ThreatLine := 'Threat Status:    Clean (No known virus signatures detected)' + sLineBreak;
+
+    Result := '=== ATARI ST BOOT SECTOR (SECTOR 0) ===' + sLineBreak +
+              Format('Boot Checksum:    $%.4X' + sLineBreak +
+                     'Execution State:  %s' + sLineBreak +
+                     '%s' +
+                     '=======================================' + sLineBreak + sLineBreak,
+                     [BootSum, BootState, ThreatLine]);
+    Exit;
+  end;
+
+  // File Virus scan
+  if ScanFileBuffer(@FData[0], Length(FData), FFileName, FStartCluster, ThreatRes) then
+    ThreatLine := Format('Threat Status:    *** VIRUS ALERT: %s ***' + sLineBreak, [ThreatRes.Name])
+  else
+    ThreatLine := '';
+
+  // Determine packer info
+  CurPacker := FDetectedPacker;
+  if ((CurPacker = '') or (CurPacker = 'None')) and (Length(FOriginalData) > 0) then
+    CurPacker := DetectPackerSignature(@FOriginalData[0], Length(FOriginalData));
+  if ((CurPacker = '') or (CurPacker = 'None')) and (Length(FData) > 0) then
+    CurPacker := DetectPackerSignature(@FData[0], Length(FData));
+
+  IsSupp := IsPackerSupported(CurPacker);
+
+  // 1. ATARI ST GEMDOS EXECUTABLE (.PRG)
+  if (Length(FData) >= 28) and (FData[0] = $60) and (FData[1] = $1A) then
   begin
     TextSize := SwapLongBE(PLongWord(@FData[2])^);
     DataSize := SwapLongBE(PLongWord(@FData[6])^);
@@ -417,19 +472,90 @@ begin
     if (Flags and $04) <> 0 then FlagsDesc := FlagsDesc + 'TT-RAM-Alloc ';
     if FlagsDesc = '' then FlagsDesc := 'None (Standard ST RAM)';
 
+    if (CurPacker <> '') and (CurPacker <> 'None') and (Pos('Atari ST Executable', CurPacker) = 0) then
+    begin
+      if FIsDepackedView then
+        StatusDesc := Format('DEPACKED from %s (Original: %s bytes, Ratio: %.1f%%)',
+          [CurPacker,
+           FormatFloat('#,##0', Length(FOriginalData)),
+           (Double(Length(FOriginalData)) / Max(1.0, Double(Length(FDepackedData)))) * 100.0])
+      else if IsSupp then
+        StatusDesc := Format('%s [Decompression Supported]', [CurPacker])
+      else
+        StatusDesc := Format('%s [Decompression Unsupported]', [CurPacker]);
+
+      PackerLine := Format('Packer / Version: %s' + sLineBreak, [StatusDesc]);
+    end
+    else
+    begin
+      PackerLine := 'Packer / Version: None (Standard Uncompressed GEMDOS Executable)' + sLineBreak;
+    end;
+
     Result := '=== ATARI ST GEMDOS EXECUTABLE (.PRG) HEADER ===' + sLineBreak +
-              Format('Magic:          $601A (Atari Executable)' + sLineBreak +
-                     'TEXT Segment:   %s bytes' + sLineBreak +
-                     'DATA Segment:   %s bytes' + sLineBreak +
-                     'BSS Segment:    %s bytes' + sLineBreak +
-                     'Symbol Table:   %s bytes' + sLineBreak +
-                     'TOS Flags:      $%.8X (%s)' + sLineBreak +
+              Format('Magic:            $601A (Atari Executable)' + sLineBreak +
+                     '%s' +
+                     '%s' +
+                     'TEXT Segment:     %s bytes' + sLineBreak +
+                     'DATA Segment:     %s bytes' + sLineBreak +
+                     'BSS Segment:      %s bytes' + sLineBreak +
+                     'Symbol Table:     %s bytes' + sLineBreak +
+                     'TOS Flags:        $%.8X (%s)' + sLineBreak +
                      '================================================' + sLineBreak + sLineBreak,
-                     [FormatFloat('#,##0', TextSize),
+                     [PackerLine,
+                      ThreatLine,
+                      FormatFloat('#,##0', TextSize),
                       FormatFloat('#,##0', DataSize),
                       FormatFloat('#,##0', BssSize),
                       FormatFloat('#,##0', SymsSize),
                       Flags, Trim(FlagsDesc)]);
+  end
+  // 2. ATARI ST PICTURE FILE (Non-PRG picture)
+  else if FHasPicture then
+  begin
+    if (CurPacker <> '') and (CurPacker <> 'None') and (Pos('Atari ST Executable', CurPacker) = 0) then
+    begin
+      if FIsDepackedView then
+        StatusDesc := Format('DEPACKED from %s (Original: %s bytes, Ratio: %.1f%%)',
+          [CurPacker,
+           FormatFloat('#,##0', Length(FOriginalData)),
+           (Double(Length(FOriginalData)) / Max(1.0, Double(Length(FDepackedData)))) * 100.0])
+      else if IsSupp then
+        StatusDesc := Format('%s [Decompression Supported]', [CurPacker])
+      else
+        StatusDesc := Format('%s [Decompression Unsupported]', [CurPacker]);
+
+      PackerLine := Format('Packer / Version: %s' + sLineBreak, [StatusDesc]);
+    end
+    else
+      PackerLine := '';
+
+    Result := '=== ATARI ST PICTURE FILE HEADER ===' + sLineBreak +
+              Format('Format:           %s' + sLineBreak +
+                     '%s' +
+                     'Dimensions:       %d x %d (%d colors)' + sLineBreak +
+                     'File Size:        %s bytes' + sLineBreak +
+                     '====================================' + sLineBreak + sLineBreak,
+                     [FPictureFormatDesc, PackerLine, FPictureWidth, FPictureHeight, FPictureColors, FormatFloat('#,##0', Length(FData))]);
+  end
+  // 3. PACKED DATA FILE (Non-PRG / Raw Data file)
+  else if (CurPacker <> '') and (CurPacker <> 'None') and (Pos('Atari ST Executable', CurPacker) = 0) then
+  begin
+    if FIsDepackedView then
+      StatusDesc := Format('DEPACKED from %s (Original: %s bytes -> Depacked: %s bytes, Ratio: %.1f%%)',
+        [CurPacker,
+         FormatFloat('#,##0', Length(FOriginalData)),
+         FormatFloat('#,##0', Length(FDepackedData)),
+         (Double(Length(FOriginalData)) / Max(1.0, Double(Length(FDepackedData)))) * 100.0])
+    else if IsSupp then
+      StatusDesc := Format('%s [Decompression Supported]', [CurPacker])
+    else
+      StatusDesc := Format('%s [Decompression Unsupported]', [CurPacker]);
+
+    Result := '=== PACKED DATA FILE HEADER ===' + sLineBreak +
+              Format('Packer / Version: %s' + sLineBreak +
+                     'Current Size:     %s bytes' + sLineBreak +
+                     '================================' + sLineBreak + sLineBreak,
+                     [StatusDesc, FormatFloat('#,##0', Length(FData))]);
   end;
 end;
 
@@ -511,10 +637,15 @@ var
   I, TotalBytes: Integer;
   LineStr: string;
   B: Byte;
+  HeaderInfo: string;
 begin
   MemoContent.Lines.BeginUpdate;
   try
     MemoContent.Clear;
+    HeaderInfo := DecodePRGHeader;
+    if HeaderInfo <> '' then
+      MemoContent.Lines.Text := HeaderInfo;
+
     TotalBytes := Length(FData);
     if TotalBytes = 0 then
     begin
@@ -563,7 +694,10 @@ begin
       if Length(FData) > TotalBytes then
         SL.Add(Format(sLineBreak + '... [Text capped at %d MB] ...', [TotalBytes div (1024 * 1024)]));
 
-      MemoContent.Lines.Assign(SL);
+      if HeaderInfo <> '' then
+        MemoContent.Lines.AddStrings(SL)
+      else
+        MemoContent.Lines.Assign(SL);
     finally
       SL.Free;
     end;
@@ -595,7 +729,7 @@ begin
   else
     FDetectedPacker := 'None';
 
-  CanDepack := (FDetectedPacker <> '') and (FDetectedPacker <> 'None') and (Pos('Unknown', FDetectedPacker) = 0);
+  CanDepack := IsPackerSupported(FDetectedPacker);
 
   ButtonDepack.Caption := 'View Depacked';
   ButtonDepack.Enabled := CanDepack;
@@ -612,7 +746,9 @@ begin
     InfoStr := InfoStr + Format(' | Cluster: #%d ($%.3X)', [FStartCluster, FStartCluster]);
 
   if CanDepack then
-    InfoStr := InfoStr + ' | Packer: ' + FDetectedPacker;
+    InfoStr := InfoStr + ' | Packer: ' + FDetectedPacker
+  else if (FDetectedPacker <> '') and (FDetectedPacker <> 'None') then
+    InfoStr := InfoStr + ' | Packer: ' + FDetectedPacker + ' (Depack unsupported)';
 
   if FHasPicture then
     InfoStr := InfoStr + ' | Picture: ' + FPictureFormatDesc;

@@ -7,7 +7,7 @@ uses
   Classes, SysUtils, Forms, Controls, Graphics, Dialogs, StdCtrls,
   LCLType, ExtCtrls, ComCtrls, StrUtils, Math, DateUtils, LazFileUtils,
   FileUtil, Menus, zipper, unit_clustermap, unit_msa, unit_fileviewer, unit_dragout,
-  unit_depacker;
+  unit_depacker, unit_virusscanner;
 
 type
   { TDiskItemInfo represents a single file or directory in the Atari disk image }
@@ -44,6 +44,7 @@ type
     ButtonAddFolder: TButton;
     ButtonExtractAll: TButton;
     ButtonViewFile: TButton;
+    ButtonVirusScan: TButton;
     ButtonBack: TButton;
     ButtonSetLabel: TButton;
     Label1: TLabel;
@@ -80,6 +81,8 @@ type
     MenuItemTools: TMenuItem;
     MenuItemViewFile: TMenuItem;
     MenuItemClusterMap: TMenuItem;
+    MenuItemSepTools: TMenuItem;
+    MenuItemVirusScanner: TMenuItem;
 
     // Event Handlers
     procedure ButtonAddFileClick(Sender: TObject);
@@ -110,6 +113,7 @@ type
     procedure ButtonViewFileClick(Sender: TObject);
     procedure ButtonSetLabelClick(Sender: TObject);
     procedure MenuItemConvertMSAClick(Sender: TObject);
+    procedure MenuItemVirusScannerClick(Sender: TObject);
     procedure FormDropFiles(Sender: TObject; const FileNames: array of string);
     procedure FormShow(Sender: TObject);
 
@@ -143,7 +147,8 @@ type
     FDiskSerial: LongWord;            // 24-bit Atari disk serial number (from boot sector $08..$0A)
     FIsMSAImage: Boolean;             // True if currently loaded from/saving to MSA
     FOriginalMSAPath: string;         // Original host path of the MSA file
-    FTempSTPath: string;              // Temporary ST image file when working with MSA
+    FOriginalSTPath: string;          // Original host path of single-sided interleaved ST file
+    FTempSTPath: string;              // Temporary ST image file when working with MSA or de-interleaved ST
     FTempZipExtractedPath: string;    // Temporary ST/MSA image file extracted from ZIP
     FOriginalZipPath: string;         // Original host path of the ZIP archive
     FDragStartPoint: TPoint;          // Mouse point where drag-out starts
@@ -218,6 +223,11 @@ type
     procedure WriteVolumeLabelToImage(const AImageFile: TFileStream; const ALabel: string);
     function ExtractFileToStream(const AFileName: string; AOutStream: TStream; out AStartCluster: Word): Boolean;
     function ExtractFileToTemp(const AFileName: string): string;
+    function CheckAndDeinterleaveSingleSidedST(const ASourceFile: string; out ADeinterleavedFile: string): Boolean;
+    function ScoreDirectoryAtOffset(const AStream: TStream; AOffset: Int64; AMaxEntries: Integer): Integer;
+    function DiscoverDirectoryContent(const AStream: TStream; out ARootDirStart: Int64; out ARootDirEntries: Word): Integer;
+    procedure DeduceSubdirectoryGeometry(const AStream: TStream; ARootDirStart: Int64; var ARootDirEntries: Word;
+      var ASectorsPerCluster: Byte; var ADataAreaStart: Int64);
 
     // Helper Functions
     function IsDirectoryEntryValid(const DirEntry: array of Byte): Boolean;
@@ -1175,6 +1185,8 @@ begin
   SaveDialog.Filter := 'Atari .ST Image (*.st)|*.st|Magic Shadow Archiver (*.msa)|*.msa|All Files (*.*)|*.*';
   if FIsMSAImage and (FOriginalMSAPath <> '') then
     SaveDialog.FileName := ExtractFileName(FOriginalMSAPath)
+  else if FOriginalSTPath <> '' then
+    SaveDialog.FileName := ExtractFileName(FOriginalSTPath)
   else if (FOriginalZipPath <> '') and (FTempZipExtractedPath <> '') then
     SaveDialog.FileName := ExtractFileName(FTempZipExtractedPath)
   else if FImagePath <> '' then
@@ -1672,6 +1684,7 @@ begin
   FDiskSerial := 0;
   FIsMSAImage := False;
   FOriginalMSAPath := '';
+  FOriginalSTPath := '';
   FTempSTPath := '';
   FTempZipExtractedPath := '';
   FOriginalZipPath := '';
@@ -2595,15 +2608,20 @@ var
   RootDirSectors: Int64;
   DataSectors: Int64;
   MaxClustersInFile, MaxClustersInFAT: Int64;
+  BpbScore, ScanScore: Integer;
+  ScannedOffset: Int64;
+  ScannedEntries: Word;
 begin
   AImageFile.Position := 0;
-  AImageFile.Read(BootSector, FAT12_BOOT_SECTOR_SIZE);
+  FillChar(BootSector[0], FAT12_BOOT_SECTOR_SIZE, 0);
+  if AImageFile.Size >= FAT12_BOOT_SECTOR_SIZE then
+    AImageFile.Read(BootSector, FAT12_BOOT_SECTOR_SIZE);
 
   // Parse boot sector
   FBytesPerSector := Word(BootSector[$0B]) + (Word(BootSector[$0C]) shl 8);
-  if FBytesPerSector = 0 then FBytesPerSector := 512;
+  if FBytesPerSector <> 512 then FBytesPerSector := 512;
   FSectorsPerCluster := BootSector[$0D];
-  if FSectorsPerCluster = 0 then FSectorsPerCluster := 2;
+  if not (FSectorsPerCluster in [1, 2, 4, 8]) then FSectorsPerCluster := 2;
   ReservedSectors := Word(BootSector[$0E]) + (Word(BootSector[$0F]) shl 8);
   FNumberOfFATs := BootSector[$10];
   RootEntries := Word(BootSector[$11]) + (Word(BootSector[$12]) shl 8);
@@ -2618,14 +2636,48 @@ begin
                  (LongWord(BootSector[9]) shl 8) or
                  LongWord(BootSector[10]);
 
-  // Calculate FAT and data area positions
+  // Standard BPB calculation
   FSingleFATSize := FSectorsPerFAT * FBytesPerSector;
   FFatTableStart := ReservedSectors * FBytesPerSector;
   FFatTableSize := FNumberOfFATs * FSingleFATSize;
   FRootDirStart := (ReservedSectors + (FNumberOfFATs * FSectorsPerFAT)) * FBytesPerSector;
 
-  RootDirSectors := ((RootEntries * FAT12_DIR_ENTRY_SIZE) + (FBytesPerSector - 1)) div FBytesPerSector;
+  // Validate BPB root directory score
+  BpbScore := -1;
+  if (FRootDirStart >= 512) and (FRootDirStart + (Int64(FRootEntries) * FAT12_DIR_ENTRY_SIZE) <= AImageFile.Size) and
+     (ReservedSectors in [1..10]) and (FNumberOfFATs in [1..2]) and (FSectorsPerFAT in [1..32]) and
+     ((FRootEntries in [64, 112, 224]) or (FRootEntries = 576)) then
+  begin
+    BpbScore := ScoreDirectoryAtOffset(AImageFile, FRootDirStart, Min(FRootEntries, 16));
+  end;
+
+  // Fallback sliding-window discovery if BPB is non-compliant, missing, or has 0 valid files while another sector does
+  if (BpbScore <= 0) or (FRootEntries = 0) or (FSectorsPerFAT = 0) or (ReservedSectors = 0) then
+  begin
+    ScanScore := DiscoverDirectoryContent(AImageFile, ScannedOffset, ScannedEntries);
+    if (ScanScore > BpbScore) and (ScanScore >= 1) then
+    begin
+      FRootDirStart := ScannedOffset;
+      FRootEntries := ScannedEntries;
+      if FNumberOfFATs < 1 then FNumberOfFATs := 2;
+      ReservedSectors := 1;
+      FSectorsPerFAT := Max(1, (FRootDirStart - 512) div (FNumberOfFATs * FBytesPerSector));
+      FSingleFATSize := FSectorsPerFAT * FBytesPerSector;
+      FFatTableStart := ReservedSectors * FBytesPerSector;
+      FFatTableSize := FNumberOfFATs * FSingleFATSize;
+    end;
+  end;
+
+  RootDirSectors := ((Int64(FRootEntries) * FAT12_DIR_ENTRY_SIZE) + (FBytesPerSector - 1)) div FBytesPerSector;
   FDataAreaStart := FRootDirStart + (RootDirSectors * FBytesPerSector);
+
+  // If BPB was non-compliant, run subdirectory cluster consensus to refine dataAreaStart and sectorsPerCluster
+  if BpbScore <= 0 then
+  begin
+    DeduceSubdirectoryGeometry(AImageFile, FRootDirStart, FRootEntries, FSectorsPerCluster, FDataAreaStart);
+    RootDirSectors := ((Int64(FRootEntries) * FAT12_DIR_ENTRY_SIZE) + (FBytesPerSector - 1)) div FBytesPerSector;
+  end;
+
   FBytesPerCluster := FSectorsPerCluster * FBytesPerSector;
 
   // Calculate total data clusters dynamically from filesystem layout
@@ -2782,13 +2834,377 @@ end;
 
 
 {------------------------------------------------------------------
+  Function: ScoreDirectoryAtOffset
+  Purpose:  Scores a potential directory table at a byte offset in an ST image.
+            Valid entries with GEMDOS/MS-DOS 8.3 names and cluster <= 4000
+            yield positive points. Corrupted entries, control chars, or null
+            padding yield negative score (-1).
+ ------------------------------------------------------------------}
+function TForm1.ScoreDirectoryAtOffset(const AStream: TStream; AOffset: Int64; AMaxEntries: Integer): Integer;
+var
+  EntriesToCheck, I, J: Integer;
+  Entry: array[0..31] of Byte;
+  FirstByte, Attr: Byte;
+  IsValidFirst, HasInvalidChars: Boolean;
+  StartClust: Word;
+begin
+  Result := -1;
+  if AOffset + (Int64(AMaxEntries) * 32) > AStream.Size then
+    EntriesToCheck := (AStream.Size - AOffset) div 32
+  else
+    EntriesToCheck := AMaxEntries;
+
+  if EntriesToCheck <= 0 then Exit;
+
+  Result := 0;
+  AStream.Position := AOffset;
+
+  for I := 0 to EntriesToCheck - 1 do
+  begin
+    if AStream.Read(Entry, 32) <> 32 then Break;
+    FirstByte := Entry[0];
+    if FirstByte = 0 then Continue;
+
+    // Check valid first byte
+    IsValidFirst := (FirstByte = $E5) or (FirstByte = $05) or
+                    ((FirstByte >= Ord('A')) and (FirstByte <= Ord('Z'))) or
+                    ((FirstByte >= Ord('a')) and (FirstByte <= Ord('z'))) or
+                    ((FirstByte >= Ord('0')) and (FirstByte <= Ord('9'))) or
+                    (Char(FirstByte) in ['_', '^', '$', '~', '!', '#', '%', '&', '-', '{', '}', '(', ')', '@', '''']) or
+                    ((FirstByte >= 128) and (FirstByte <= 254) and (FirstByte <> $F8) and (FirstByte <> $F9));
+
+    if not IsValidFirst then Exit(-1); // Garbage penalty
+
+    Attr := Entry[11];
+    if (Attr and $C0) <> 0 then Exit(-1); // Invalid attribute bits
+
+    // Check 11 characters of 8.3 name: no nulls, no control characters
+    HasInvalidChars := False;
+    for J := 0 to 10 do
+    begin
+      if Entry[J] = 0 then
+      begin
+        HasInvalidChars := True;
+        Break;
+      end;
+      if (Entry[J] < 32) and (Entry[J] <> 5) then
+      begin
+        HasInvalidChars := True;
+        Break;
+      end;
+    end;
+    if HasInvalidChars then Exit(-1);
+
+    StartClust := Word(Entry[26]) or (Word(Entry[27]) shl 8);
+    if StartClust > 4000 then Exit(-1);
+
+    Inc(Result);
+  end;
+end;
+
+{------------------------------------------------------------------
+  Function: DiscoverDirectoryContent
+  Purpose:  Scans through sectors 1..30 (offset 512..15360) using a sliding
+            window to find the root directory with the highest validity score.
+ ------------------------------------------------------------------}
+function TForm1.DiscoverDirectoryContent(const AStream: TStream; out ARootDirStart: Int64; out ARootDirEntries: Word): Integer;
+var
+  Offset: Int64;
+  BestScore, Score: Integer;
+  BestOffset: Int64;
+  ExpectedEntries: Word;
+begin
+  if AStream.Size <= 368640 then
+  begin
+    BestOffset := 2560; // Sector 5 (360KB single-sided default)
+    ExpectedEntries := 64;
+  end
+  else
+  begin
+    BestOffset := 3584; // Sector 7 (720KB double-sided default)
+    ExpectedEntries := 112;
+  end;
+
+  BestScore := 0;
+
+  // Scan through first 30 sectors (offsets 512..15360)
+  Offset := 512;
+  while (Offset < 15360) and (Offset + 512 <= AStream.Size) do
+  begin
+    Score := ScoreDirectoryAtOffset(AStream, Offset, 16);
+    if Score > BestScore then
+    begin
+      BestScore := Score;
+      BestOffset := Offset;
+      if Offset < 3000 then
+        ExpectedEntries := 64
+      else
+        ExpectedEntries := 112;
+    end;
+    Inc(Offset, 512);
+  end;
+
+  ARootDirStart := BestOffset;
+  ARootDirEntries := ExpectedEntries;
+  Result := BestScore;
+end;
+
+{------------------------------------------------------------------
+  Procedure: DeduceSubdirectoryGeometry
+  Purpose:  Scans the disk for '.' and '..' directory headers to reach a
+            consensus vote on the true DataAreaStart and SectorsPerCluster.
+ ------------------------------------------------------------------}
+procedure TForm1.DeduceSubdirectoryGeometry(const AStream: TStream; ARootDirStart: Int64; var ARootDirEntries: Word;
+  var ASectorsPerCluster: Byte; var ADataAreaStart: Int64);
+type
+  TSubDirInfo = record
+    Cluster: Word;
+    Offset: Int64;
+  end;
+var
+  SubDirs: array of TSubDirInfo;
+  SubDirCount: Integer;
+  Offset: Int64;
+  Buf: array[0..63] of Byte;
+  StartClust: Word;
+  TestSPC: Integer;
+  ImpliedDAS: Int64;
+  BestSPC: Integer;
+  BestDAS: Int64;
+  MaxAgreement, CurAgreement: Integer;
+  I, J: Integer;
+  RootDirSectors: Int64;
+begin
+  SubDirCount := 0;
+  SetLength(SubDirs, 0);
+
+  // Scan for '.' and '..' directory signature
+  Offset := 512;
+  while (Offset < AStream.Size - 64) and (Offset < 200000) do
+  begin
+    AStream.Position := Offset;
+    if AStream.Read(Buf, 64) <> 64 then Break;
+
+    // Check entry 0: name is '.', attr is $10 (directory)
+    // and entry 1: name is '..', attr is $10 (directory)
+    if (Buf[0] = $2E) and (Buf[1] = $20) and (Buf[11] = $10) and
+       (Buf[32] = $2E) and (Buf[33] = $2E) and (Buf[43] = $10) then
+    begin
+      StartClust := Word(Buf[26]) or (Word(Buf[27]) shl 8);
+      if (StartClust >= 2) and (StartClust < 4096) then
+      begin
+        Inc(SubDirCount);
+        SetLength(SubDirs, SubDirCount);
+        SubDirs[SubDirCount - 1].Cluster := StartClust;
+        SubDirs[SubDirCount - 1].Offset := Offset;
+      end;
+    end;
+    Inc(Offset, 512);
+  end;
+
+  if SubDirCount > 0 then
+  begin
+    BestSPC := ASectorsPerCluster;
+    BestDAS := ADataAreaStart;
+    MaxAgreement := 0;
+
+    for TestSPC in [1, 2, 4] do
+    begin
+      for I := 0 to SubDirCount - 1 do
+      begin
+        ImpliedDAS := SubDirs[I].Offset - Int64(SubDirs[I].Cluster - 2) * TestSPC * 512;
+        if (ImpliedDAS >= ARootDirStart) and ((ImpliedDAS mod 512) = 0) then
+        begin
+          CurAgreement := 0;
+          for J := 0 to SubDirCount - 1 do
+          begin
+            if SubDirs[J].Offset - Int64(SubDirs[J].Cluster - 2) * TestSPC * 512 = ImpliedDAS then
+              Inc(CurAgreement);
+          end;
+          if CurAgreement > MaxAgreement then
+          begin
+            MaxAgreement := CurAgreement;
+            BestSPC := TestSPC;
+            BestDAS := ImpliedDAS;
+          end;
+        end;
+      end;
+    end;
+
+    ASectorsPerCluster := BestSPC;
+    ADataAreaStart := BestDAS;
+    if ADataAreaStart > ARootDirStart then
+    begin
+      RootDirSectors := (ADataAreaStart - ARootDirStart) div 512;
+      ARootDirEntries := RootDirSectors * 16;
+    end;
+  end;
+end;
+
+{------------------------------------------------------------------
+  Function: CheckAndDeinterleaveSingleSidedST
+  Purpose:  Detects single-sided ST images (sides=1 in BPB, or single-sided
+            sector counts, or faked double-sided containers) that were dumped
+            interleaved in a double-sided drive. Extracts Head 0 from each cylinder
+            to produce a clean single-sided ST disk image where all directories
+            and files are directly readable.
+ ------------------------------------------------------------------}
+function TForm1.CheckAndDeinterleaveSingleSidedST(const ASourceFile: string; out ADeinterleavedFile: string): Boolean;
+var
+  InStream, OutStream: TFileStream;
+  BootSector: array[0..FAT12_BOOT_SECTOR_SIZE - 1] of Byte;
+  BytesPerSector, SectorsPerTrack, Sides, TotalSectors: Word;
+  TrackSize, CylinderSize, TrackCount, T: Integer;
+  TrackBuf: TBytes;
+  TempFile: string;
+  ShouldDeinterleave: Boolean;
+  UseSpt: Integer;
+  AsIsRootStart: Int64;
+  AsIsRootEntries: Word;
+  AsIsScore: Integer;
+  CandSPT, BestSPT, CandScore, BestCandScore: Integer;
+  CandStream: TMemoryStream;
+begin
+  Result := False;
+  ADeinterleavedFile := '';
+  if not FileExists(ASourceFile) then Exit;
+
+  InStream := TFileStream.Create(ASourceFile, fmOpenRead or fmShareDenyNone);
+  try
+    // Only candidates with double-sided container sizes (>= 500KB) can be faked double-sided containers
+    if InStream.Size < 500000 then Exit;
+
+    FillChar(BootSector[0], FAT12_BOOT_SECTOR_SIZE, 0);
+    if InStream.Size >= FAT12_BOOT_SECTOR_SIZE then
+      InStream.Read(BootSector, FAT12_BOOT_SECTOR_SIZE);
+
+    BytesPerSector := Word(BootSector[$0B]) + (Word(BootSector[$0C]) shl 8);
+    if BytesPerSector <> 512 then BytesPerSector := 512;
+    SectorsPerTrack := Word(BootSector[$18]) + (Word(BootSector[$19]) shl 8);
+    Sides := Word(BootSector[$1A]) + (Word(BootSector[$1B]) shl 8);
+    TotalSectors := Word(BootSector[$13]) + (Word(BootSector[$14]) shl 8);
+
+    ShouldDeinterleave := False;
+    UseSpt := 9;
+
+    // Case 1: BPB specifically says 1 side and total sectors <= 820
+    if (Sides = 1) and (SectorsPerTrack in [9..11]) and (TotalSectors > 0) and (TotalSectors <= 820) then
+    begin
+      ShouldDeinterleave := True;
+      UseSpt := SectorsPerTrack;
+    end
+    // Case 2: BPB total sectors indicates single-sided disk (e.g. 720 sectors for 360KB) in a double-sided file
+    else if (TotalSectors > 0) and (TotalSectors <= 820) and (SectorsPerTrack in [9..11]) then
+    begin
+      ShouldDeinterleave := True;
+      UseSpt := SectorsPerTrack;
+    end
+    else
+    begin
+      // Case 3: Heuristic fallback from diskUtils.ts
+      // Only test deinterleaving if the as-is layout is unreadable (score <= 0)
+      AsIsScore := DiscoverDirectoryContent(InStream, AsIsRootStart, AsIsRootEntries);
+      if AsIsScore <= 0 then
+      begin
+        BestCandScore := 0;
+        BestSPT := 9;
+        for CandSPT in [9, 10, 11] do
+        begin
+          TrackSize := CandSPT * BytesPerSector;
+          CylinderSize := TrackSize * 2;
+          TrackCount := InStream.Size div CylinderSize;
+          if TrackCount >= 40 then
+          begin
+            CandStream := TMemoryStream.Create;
+            try
+              SetLength(TrackBuf, TrackSize);
+              // Read first 10 tracks to test directory area
+              for T := 0 to Min(TrackCount - 1, 10) do
+              begin
+                InStream.Position := Int64(T) * CylinderSize;
+                InStream.ReadBuffer(TrackBuf[0], TrackSize);
+                CandStream.WriteBuffer(TrackBuf[0], TrackSize);
+              end;
+              CandScore := DiscoverDirectoryContent(CandStream, AsIsRootStart, AsIsRootEntries);
+              if CandScore > BestCandScore then
+              begin
+                BestCandScore := CandScore;
+                BestSPT := CandSPT;
+              end;
+            finally
+              CandStream.Free;
+            end;
+          end;
+        end;
+
+        if (BestCandScore > 0) and (BestCandScore > AsIsScore) then
+        begin
+          ShouldDeinterleave := True;
+          UseSpt := BestSPT;
+        end;
+      end;
+    end;
+
+    if ShouldDeinterleave then
+    begin
+      TrackSize := UseSpt * BytesPerSector;
+      CylinderSize := TrackSize * 2;
+      TrackCount := InStream.Size div CylinderSize;
+      if TrackCount >= 40 then
+      begin
+        TempFile := GetTempFile(GetTempDir, 'st-deint-') + '.st';
+        OutStream := TFileStream.Create(TempFile, fmCreate);
+        try
+          SetLength(TrackBuf, TrackSize);
+          for T := 0 to TrackCount - 1 do
+          begin
+            InStream.Position := Int64(T) * CylinderSize;
+            InStream.ReadBuffer(TrackBuf[0], TrackSize);
+            OutStream.WriteBuffer(TrackBuf[0], TrackSize);
+          end;
+
+          // Ensure boot sector in deinterleaved image reflects single-sided geometry
+          if OutStream.Size >= FAT12_BOOT_SECTOR_SIZE then
+          begin
+            OutStream.Position := 0;
+            OutStream.Read(BootSector, FAT12_BOOT_SECTOR_SIZE);
+            BootSector[$1A] := 1; // 1 side
+            BootSector[$1B] := 0;
+            BootSector[$18] := UseSpt and $FF;
+            BootSector[$19] := (UseSpt shr 8) and $FF;
+            TotalSectors := Word(BootSector[$13]) + (Word(BootSector[$14]) shl 8);
+            if (TotalSectors = 0) or (TotalSectors > 820) then
+            begin
+              TotalSectors := UseSpt * 80;
+              BootSector[$13] := TotalSectors and $FF;
+              BootSector[$14] := (TotalSectors shr 8) and $FF;
+            end;
+            OutStream.Position := 0;
+            OutStream.Write(BootSector, FAT12_BOOT_SECTOR_SIZE);
+          end;
+
+          ADeinterleavedFile := TempFile;
+          Result := True;
+        finally
+          OutStream.Free;
+        end;
+      end;
+    end;
+  finally
+    InStream.Free;
+  end;
+end;
+
+{------------------------------------------------------------------
   Function: LoadDiskImage
   Purpose:  Loads a disk image (.st or .msa), handling MSA decompression if needed
  ------------------------------------------------------------------}
 function TForm1.LoadDiskImage(const AFileName: string): Boolean;
 var
   Ext: string;
-  TempFile: string;
+  TempFile, DeintTempFile: string;
+  VirusThreatName: string;
+  IsBootExec: Boolean;
 begin
   Result := False;
   if not FileExists(AFileName) then Exit;
@@ -2829,15 +3245,36 @@ begin
     end;
     FIsMSAImage := True;
     FOriginalMSAPath := AFileName;
-    FTempSTPath := TempFile;
-    FImagePath := TempFile;
+    FOriginalSTPath := '';
+
+    if CheckAndDeinterleaveSingleSidedST(TempFile, DeintTempFile) then
+    begin
+      SysUtils.DeleteFile(TempFile);
+      FTempSTPath := DeintTempFile;
+      FImagePath := DeintTempFile;
+    end
+    else
+    begin
+      FTempSTPath := TempFile;
+      FImagePath := TempFile;
+    end;
   end
   else
   begin
     FIsMSAImage := False;
     FOriginalMSAPath := '';
-    FTempSTPath := '';
-    FImagePath := AFileName;
+    if CheckAndDeinterleaveSingleSidedST(AFileName, TempFile) then
+    begin
+      FOriginalSTPath := AFileName;
+      FTempSTPath := TempFile;
+      FImagePath := TempFile;
+    end
+    else
+    begin
+      FOriginalSTPath := '';
+      FTempSTPath := '';
+      FImagePath := AFileName;
+    end;
   end;
 
   ReadSTImage(FImagePath, FCurrentPath);
@@ -2849,8 +3286,23 @@ begin
     Self.Caption := 'Atari .ST Image File Manager - ' + ExtractFileName(FOriginalZipPath) + ' [' + ExtractFileName(FTempZipExtractedPath) + ']'
   else if FIsMSAImage and (FOriginalMSAPath <> '') then
     Self.Caption := 'Atari .ST Image File Manager - ' + ExtractFileName(FOriginalMSAPath)
+  else if FOriginalSTPath <> '' then
+    Self.Caption := 'Atari .ST Image File Manager - ' + ExtractFileName(FOriginalSTPath)
   else
     Self.Caption := 'Atari .ST Image File Manager - ' + ExtractFileName(FImagePath);
+
+  // Real-time Anti-Virus Boot Sector check
+  if QuickCheckBootSector(FImagePath, VirusThreatName, IsBootExec) then
+  begin
+    if MessageDlg('Atari ST Anti-Virus Guard',
+      Format('WARNING: Virus threat detected in Boot Sector: %s!' + sLineBreak + sLineBreak +
+             'Would you like to open the Anti-Virus Scanner now to inspect and disinfect the disk?',
+             [VirusThreatName]),
+      mtWarning, [mbYes, mbNo], 0) = mrYes then
+    begin
+      FormVirusScanner.OpenForDisk(FImagePath, True);
+    end;
+  end;
 
   Result := True;
 end;
@@ -3371,6 +3823,8 @@ begin
       DefZipName := ChangeFileExt(ExtractFileName(FTempZipExtractedPath), '') + '_export.zip'
     else if FIsMSAImage and (FOriginalMSAPath <> '') then
       DefZipName := ChangeFileExt(ExtractFileName(FOriginalMSAPath), '') + '.zip'
+    else if FOriginalSTPath <> '' then
+      DefZipName := ChangeFileExt(ExtractFileName(FOriginalSTPath), '') + '.zip'
     else if FImagePath <> '' then
       DefZipName := ChangeFileExt(ExtractFileName(FImagePath), '') + '.zip'
     else
@@ -3618,6 +4072,20 @@ begin
   finally
     MemStream.Free;
   end;
+end;
+
+{------------------------------------------------------------------
+  Procedure: MenuItemVirusScannerClick
+  Purpose:  Opens the Atari ST Anti-Virus Scanner & Disinfection Tool
+ ------------------------------------------------------------------}
+procedure TForm1.MenuItemVirusScannerClick(Sender: TObject);
+begin
+  if (FImagePath = '') or not FileExists(FImagePath) then
+  begin
+    ShowMessage('Please open an Atari ST disk image first.');
+    Exit;
+  end;
+  FormVirusScanner.OpenForDisk(FImagePath, True);
 end;
 
 {------------------------------------------------------------------
@@ -3874,6 +4342,13 @@ begin
     Exit;
   end;
 
+  if not IsPackerSupported(PackerName) then
+  begin
+    ShowMessage(Format('File "%s" appears to be packed with "%s", but decompression for this specific packer format is not implemented.',
+      [CleanName, PackerName]));
+    Exit;
+  end;
+
   Screen.Cursor := crHourGlass;
   try
     if not DepackBuffer(@InBuf[0], Length(InBuf), OutBuf, PackerName) then
@@ -3933,6 +4408,13 @@ begin
   if (ssCtrl in Shift) and (Key = VK_N) then
   begin
     ButtonCreate720Click(nil);
+    Key := 0;
+    Exit;
+  end;
+
+  if Key = VK_F6 then
+  begin
+    MenuItemVirusScannerClick(nil);
     Key := 0;
     Exit;
   end;

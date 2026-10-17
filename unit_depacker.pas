@@ -14,6 +14,7 @@ type
 function DetectPackerSignature(const Buffer: PByte; Size: Integer): string; overload;
 function DetectPackerSignature(const Bytes: TBytes): string; overload;
 function DetectPackerSignature(Stream: TStream): string; overload;
+function IsPackerSupported(const PackerName: string): Boolean;
 
 // Universal Depacker Dispatcher
 function DepackBuffer(const InBuf: PByte; InSize: Integer; out OutBuf: TBytes; out DetectedPacker: string): Boolean;
@@ -29,6 +30,7 @@ function DecompressThunderV1(const InBuf: PByte; InSize: Integer; out OutBuf: TB
 function DecompressThunderV2(const InBuf: PByte; InSize: Integer; out OutBuf: TBytes): Boolean;
 function DecompressJek(const InBuf: PByte; InSize: Integer; out OutBuf: TBytes): Boolean;
 function DecompressRLE(const InBuf: PByte; InSize: Integer; out OutBuf: TBytes): Boolean;
+function DecompressFire(const InBuf: PByte; InSize: Integer; out OutBuf: TBytes): Boolean;
 
 implementation
 
@@ -129,7 +131,6 @@ var
   Idx: Integer;
   ULen, PLen, AbsEnd, AbsLitOff, LitLen, AbsLitStart: LongWord;
   DummyOut: TBytes;
-  IsExec, IsSwapped: Boolean;
 begin
   Result := 'None';
   if (Buffer = nil) or (Size < 4) then Exit;
@@ -210,7 +211,14 @@ begin
   if CheckString(Buffer, Size, 52, 'EASY') then
     Exit('Happy Packer Executable');
 
-  // 10. ICE Packer / Superior
+    // Pack-Ice executable banner check (e.g. MENU70, MENU71, MENU72, INTRO)
+  if (Size >= 64) and (FindEmbeddedSig(Buffer, Min(Size, 256), 'Pack-Ice') >= 0) then
+    Exit('Pack-Ice v2.1 Executable Packer');
+// 10. ICE Packer / Superior
+  if CheckWord(Buffer, Size, 28, 008) and (CheckString(Buffer, Size, 30, 'Pack-Ice') or CheckString(Buffer, Size, 30, 'Ice!')) then
+    Exit('Pack-Ice v2.0 Executable Packer');
+  if CheckWord(Buffer, Size, 28, 006) and CheckString(Buffer, Size, 30, 'Ice!') then
+    Exit('Pack-Ice v2.0 Executable Packer');
   if CheckLastLongString(Buffer, Size, 'Ice!') then
     Exit('ICE Packer v1.1 Raw Data');
   if CheckString(Buffer, Size, 0, 'Ice!') then
@@ -241,6 +249,8 @@ begin
     Exit('Ivory Dragon Packer Executable');
 
   // 13. FIRE Packer
+  if (Size >= 40) and (FindEmbeddedSig(Buffer, Min(Size, 256), 'Pack-Fire') >= 0) then
+    Exit('FIRE Packer v2.0 Executable');
   if CheckLastLongString(Buffer, Size, 'Fire') then
     Exit('FIRE Packer v1.0 Raw Data');
   if CheckString(Buffer, Size, 0, 'FIRE') then
@@ -273,6 +283,17 @@ begin
     Exit('JAM Packer LZW JAM4 Executable');
   if CheckString(Buffer, Size, 712, 'Ice!') then
     Exit('JAM Packer ICE JAM4 Executable');
+
+  // Embedded JAM Packer check (before GEMDOS C startup matches JEK)
+  for Idx := 0 to Min(Size - 12, 4096) do
+  begin
+    if Buffer[Idx] = Byte('L') then
+    begin
+      if CheckString(Buffer, Size, Idx, 'LSD!') then Exit('JAM Packer v2 JAM Executable');
+      if CheckString(Buffer, Size, Idx, 'LZH!') then Exit('JAM Packer LZH Executable');
+      if CheckString(Buffer, Size, Idx, 'LZW!') then Exit('JAM Packer LZW Executable');
+    end;
+  end;
 
   // 16. JEK Packer
   if CheckLong(Buffer, Size, 28, $2A6F0004) and CheckLong(Buffer, Size, 32, $226D0010) then
@@ -370,10 +391,6 @@ begin
   // 32. Heuristics fallback scanning on first 8192 bytes
   AsciiContext := BufferToAscii(Buffer, Size, 8192);
 
-  if Pos('THE MEDWAY BOYS', AsciiContext) > 0 then Exit('The Medway Boys Packer');
-  if Pos('ICE!', AsciiContext) > 0 then Exit('Pack-Ice v2.4 Executable Packer');
-  if Pos('Ice!', AsciiContext) > 0 then Exit('Pack-Ice v2.1 Executable Packer');
-  if Pos('Pack-Ice', AsciiContext) > 0 then Exit('Pack-Ice v2.1 Executable Packer');
   if (Pos('DPAK', AsciiContext) > 0) or (Pos('NEW_DPAK', AsciiContext) > 0) or (Pos('XERUD', AsciiContext) > 0) then
     Exit('Mike Watson (Xerud) NEW_DPAK');
   if (Pos('JAM Packer', AsciiContext) > 0) or (Pos('The JAM Packer', AsciiContext) > 0) or (Pos('JAM PACKER', AsciiContext) > 0) then
@@ -409,7 +426,7 @@ begin
   end;
 
   if Pos('AUTOMATION PACKER V2.3', AsciiContext) > 0 then Exit('Automation 2.3 Packer');
-  if (Pos('AUTOMATION PACKER', AsciiContext) > 0) or (Pos('Automation', AsciiContext) > 0) or (Pos('COMPACTER', AsciiContext) > 0) then
+  if (Pos('AUTOMATION PACKER', AsciiContext) > 0) or (Pos('AUTOMATION COMPACTER', AsciiContext) > 0) then
     Exit('Automation Compacter');
   if (Pos('POMPEY PIRATES', AsciiContext) > 0) or (Pos('POMPEY', AsciiContext) > 0) then Exit('Pompey Pirates Packer');
   if (Pos('JEK PACKER', AsciiContext) > 0) or (Pos('JEK!', AsciiContext) > 0) then Exit('JEK Packer / Byte Killer');
@@ -420,16 +437,12 @@ begin
   else
     TailAscii := AsciiContext;
 
-  if Pos('THE MEDWAY BOYS', TailAscii) > 0 then Exit('The Medway Boys Packer');
   if Pos('JPM!', TailAscii) > 0 then Exit('Bytekiller (JPM Data) Raw Data');
   if Pos('GUS*', TailAscii) > 0 then Exit('Gremlin Packer Raw Data');
   if (Pos('JEK!', TailAscii) > 0) or (Pos('JEK PACKER', TailAscii) > 0) then Exit('JEK Packer / Byte Killer');
 
-  // Atari ST Executable Header fallback (BRA $1A / $1C)
-  IsExec := (Buffer[0] = $60) and ((Buffer[1] = $1A) or (Buffer[1] = $1C) or (Buffer[1] = $00));
-  IsSwapped := (Size >= 4) and (Buffer[0] = $1A) and (Buffer[1] = $00) and (Buffer[3] = $61);
-  if IsExec or IsSwapped then
-    Exit('Atari ST Executable');
+  // Uncompressed files have no packer signature
+  Result := 'None';
 end;
 
 function DetectPackerSignature(const Bytes: TBytes): string;
@@ -456,286 +469,467 @@ begin
   end;
 end;
 
-// -----------------------------------------------------------------------------
-// Pack-Ice Bit Reader and Decompressor
-// -----------------------------------------------------------------------------
-
-type
-  TIceBitReader = class
-  public
-    function GetBit: Byte; virtual; abstract;
-    function GetBits(N: Integer): LongWord;
-    function ReadRawByte: Byte; virtual; abstract;
-  end;
-
-function TIceBitReader.GetBits(N: Integer): LongWord;
+function IsPackerSupported(const PackerName: string): Boolean;
 var
-  I: Integer;
+  P: string;
 begin
-  Result := 0;
-  for I := 1 to N do
-    Result := (Result shl 1) or GetBit;
+  Result := False;
+  if (PackerName = '') or (PackerName = 'None') then Exit(False);
+  P := UpperCase(PackerName);
+  if Pos('UNSUPPORTED', P) > 0 then Exit(False);
+  if Pos('ATARI ST EXECUTABLE', P) > 0 then Exit(False);
+  if Pos('UNKNOWN', P) > 0 then Exit(False);
+
+  if (Pos('PACK-ICE', P) > 0) or (Pos('ICE PACKER', P) > 0) or
+     (Pos('ATOMIK', P) > 0) or
+     (Pos('AUTOMATION', P) > 0) or
+     (Pos('JAM', P) > 0) or
+     (Pos('ROB NORTHEN', P) > 0) or (Pos('RNC', P) > 0) or
+     (Pos('THUNDER', P) > 0) or
+     (Pos('JEK', P) > 0) or (Pos('BYTEKILLER', P) > 0) or (Pos('BYTE KILLER', P) > 0) or
+     (Pos('DEGAS', P) > 0) or
+     (Pos('FIRE', P) > 0) then
+    Result := True;
 end;
 
+// -----------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
+// Backward Stream, Bit Reader, VLC and Pack-Ice Decompressor
+// -----------------------------------------------------------------------------
+
 type
-  TIceBitReader24 = class(TIceBitReader)
+  TBackwardInputStream = class
   private
     FBuffer: PByte;
-    FSrcIdx: Integer;
-    FD7: Byte;
+    FCurrentOffset: Integer;
+    FEndOffset: Integer;
   public
-    constructor Create(ABuffer: PByte; AStartIdx: Integer);
-    function GetBit: Byte; override;
-    function ReadRawByte: Byte; override;
+    constructor Create(ABuffer: PByte; AStartOffset, AEndOffset: Integer);
+    function Eof: Boolean; inline;
+    function ReadByte: Byte; inline;
+    function ReadBE16: Word;
+    function ReadBE32: LongWord;
   end;
 
-constructor TIceBitReader24.Create(ABuffer: PByte; AStartIdx: Integer);
+constructor TBackwardInputStream.Create(ABuffer: PByte; AStartOffset, AEndOffset: Integer);
 begin
   inherited Create;
   FBuffer := ABuffer;
-  FSrcIdx := AStartIdx;
-  if FSrcIdx > 0 then
-  begin
-    Dec(FSrcIdx);
-    FD7 := FBuffer[FSrcIdx];
-  end
-  else
-    FD7 := 0;
+  FCurrentOffset := AEndOffset;
+  FEndOffset := AStartOffset;
 end;
 
-function TIceBitReader24.GetBit: Byte;
+function TBackwardInputStream.Eof: Boolean;
+begin
+  Result := FCurrentOffset <= FEndOffset;
+end;
+
+function TBackwardInputStream.ReadByte: Byte;
+begin
+  if FCurrentOffset <= FEndOffset then
+    raise Exception.Create('BackwardInputStream EOF');
+  Dec(FCurrentOffset);
+  Result := FBuffer[FCurrentOffset];
+end;
+
+function TBackwardInputStream.ReadBE16: Word;
 var
-  NewByte: Byte;
+  B0, B1: Byte;
 begin
-  Result := (FD7 shr 7) and 1;
-  FD7 := (FD7 shl 1) and $FF;
-  if FD7 = 0 then
-  begin
-    if FSrcIdx <= 0 then raise Exception.Create('PackIce bitstream OOB');
-    Dec(FSrcIdx);
-    NewByte := FBuffer[FSrcIdx];
-    Result := (NewByte shr 7) and 1;
-    FD7 := ((NewByte shl 1) or 1) and $FF;
-  end;
+  B0 := ReadByte;
+  B1 := ReadByte;
+  Result := (Word(B1) shl 8) or B0;
 end;
 
-function TIceBitReader24.ReadRawByte: Byte;
+function TBackwardInputStream.ReadBE32: LongWord;
+var
+  B0, B1, B2, B3: Byte;
 begin
-  if FSrcIdx <= 0 then raise Exception.Create('PackIce raw byte OOB');
-  Dec(FSrcIdx);
-  Result := FBuffer[FSrcIdx];
+  B0 := ReadByte;
+  B1 := ReadByte;
+  B2 := ReadByte;
+  B3 := ReadByte;
+  Result := (LongWord(B3) shl 24) or (LongWord(B2) shl 16) or (LongWord(B1) shl 8) or B0;
 end;
 
 type
-  TIceBitReader21 = class(TIceBitReader)
+  TBackwardOutputStream = class
   private
     FBuffer: PByte;
-    FSrcIdx: Integer;
-    FD7: LongWord;
+    FStartOffset: Integer;
+    FCurrentOffset: Integer;
+    FEndOffset: Integer;
   public
-    constructor Create(ABuffer: PByte; AStartIdx: Integer);
-    function GetBit: Byte; override;
-    function ReadRawByte: Byte; override;
+    constructor Create(ABuffer: PByte; AStartOffset, AEndOffset: Integer);
+    function Eof: Boolean; inline;
+    procedure WriteByte(Val: Byte); inline;
+    procedure Copy(Distance, Count: Integer; DefaultChar: Integer = -1);
   end;
 
-constructor TIceBitReader21.Create(ABuffer: PByte; AStartIdx: Integer);
+constructor TBackwardOutputStream.Create(ABuffer: PByte; AStartOffset, AEndOffset: Integer);
 begin
   inherited Create;
   FBuffer := ABuffer;
-  FSrcIdx := AStartIdx;
-  if FSrcIdx >= 4 then
-  begin
-    Dec(FSrcIdx, 4);
-    FD7 := ReadBE32(FBuffer, FSrcIdx);
-  end
-  else
-    FD7 := 0;
+  FStartOffset := AStartOffset;
+  FCurrentOffset := AEndOffset;
+  FEndOffset := AEndOffset;
 end;
 
-function TIceBitReader21.GetBit: Byte;
-var
-  NewWord: LongWord;
+function TBackwardOutputStream.Eof: Boolean;
 begin
-  Result := (FD7 shr 31) and 1;
-  FD7 := (FD7 shl 1);
-  if FD7 = 0 then
+  Result := FCurrentOffset <= FStartOffset;
+end;
+
+procedure TBackwardOutputStream.WriteByte(Val: Byte);
+begin
+  if FCurrentOffset <= FStartOffset then
+    raise Exception.Create('BackwardOutputStream overflow');
+  Dec(FCurrentOffset);
+  FBuffer[FCurrentOffset] := Val;
+end;
+
+procedure TBackwardOutputStream.Copy(Distance, Count: Integer; DefaultChar: Integer);
+var
+  I, PrevCount: Integer;
+begin
+  if Distance <= 0 then raise Exception.Create('Invalid distance');
+  if FStartOffset + Count > FCurrentOffset then raise Exception.Create('Copy count overflow');
+
+  if DefaultChar >= 0 then
   begin
-    if FSrcIdx < 4 then raise Exception.Create('PackIce bitstream OOB');
-    Dec(FSrcIdx, 4);
-    NewWord := ReadBE32(FBuffer, FSrcIdx);
-    Result := (NewWord shr 31) and 1;
-    FD7 := (NewWord shl 1) or 1;
+    PrevCount := 0;
+    if FCurrentOffset + Distance > FEndOffset then
+    begin
+      PrevCount := Min(Count, FCurrentOffset + Distance - FEndOffset);
+      for I := 1 to PrevCount do
+      begin
+        Dec(FCurrentOffset);
+        FBuffer[FCurrentOffset] := Byte(DefaultChar);
+      end;
+    end;
+    for I := PrevCount + 1 to Count do
+    begin
+      Dec(FCurrentOffset);
+      FBuffer[FCurrentOffset] := FBuffer[FCurrentOffset + Distance];
+    end;
+  end
+  else
+  begin
+    if FCurrentOffset + Distance > FEndOffset then raise Exception.Create('Copy distance overflow');
+    for I := 1 to Count do
+    begin
+      Dec(FCurrentOffset);
+      FBuffer[FCurrentOffset] := FBuffer[FCurrentOffset + Distance];
+    end;
   end;
 end;
 
-function TIceBitReader21.ReadRawByte: Byte;
+type
+  TMSBBitReader = class
+  private
+    FStream: TBackwardInputStream;
+    FBufContent: LongWord;
+    FBufLength: Integer;
+  public
+    constructor Create(AStream: TBackwardInputStream);
+    procedure Reset(ABufContent: LongWord = 0; ABufLength: Integer = 0);
+    function ReadBits(Count: Integer): LongWord;
+    function ReadBitsBE32(Count: Integer): LongWord;
+  end;
+
+constructor TMSBBitReader.Create(AStream: TBackwardInputStream);
 begin
-  if FSrcIdx <= 0 then raise Exception.Create('PackIce raw byte OOB');
-  Dec(FSrcIdx);
-  Result := FBuffer[FSrcIdx];
+  inherited Create;
+  FStream := AStream;
+  FBufContent := 0;
+  FBufLength := 0;
 end;
 
-function DecompressPackIceInternal(const Buffer: PByte; TotalSize: Integer;
-  StartPos: Integer; IsIce21: Boolean; OrigSize: Integer; InitialSrcIdx: Integer;
-  out OutBuf: TBytes): Boolean;
-const
-  LenBits: array[0..5] of Integer = (1, 2, 2, 3, 8, 15);
-  MaxLen: array[0..5] of Integer = (1, 3, 3, 7, 255, 32767);
-  LiteralOffset: array[0..5] of Integer = (1, 2, 5, 8, 15, 270);
-  ExtraBits1: array[0..4] of Integer = (0, 0, 1, 2, 10);
-  SldOffset1: array[0..4] of Integer = (0, 1, 2, 4, 8);
-  ExtraBits2: array[0..2] of Integer = (8, 5, 12);
-  SldOffset2: array[0..2] of Integer = (32, 0, 288);
+procedure TMSBBitReader.Reset(ABufContent: LongWord; ABufLength: Integer);
+begin
+  FBufContent := ABufContent;
+  FBufLength := ABufLength;
+end;
+
+function TMSBBitReader.ReadBits(Count: Integer): LongWord;
 var
-  BR: TIceBitReader;
-  PIdx, TablePos, TablePos2, Len, LenRaw, PosVal, CopyDistance, SrcCopy: Integer;
-  I, J, K, PicIdx, PicIters: Integer;
-  D0, D1, D2, D3, D4: Word;
+  Ret: LongWord;
+  MaxCount: Integer;
+begin
+  Ret := 0;
+  while Count > 0 do
+  begin
+    if FBufLength = 0 then
+    begin
+      FBufContent := FStream.ReadByte;
+      FBufLength := 8;
+    end;
+    MaxCount := Min(Count, FBufLength);
+    Dec(FBufLength, MaxCount);
+    Ret := (Ret shl MaxCount) or ((FBufContent shr FBufLength) and ((LongWord(1) shl MaxCount) - 1));
+    Dec(Count, MaxCount);
+  end;
+  Result := Ret;
+end;
+
+function TMSBBitReader.ReadBitsBE32(Count: Integer): LongWord;
+var
+  Ret: LongWord;
+  MaxCount: Integer;
+begin
+  Ret := 0;
+  while Count > 0 do
+  begin
+    if FBufLength = 0 then
+    begin
+      FBufContent := FStream.ReadBE32;
+      FBufLength := 32;
+    end;
+    MaxCount := Min(Count, FBufLength);
+    Dec(FBufLength, MaxCount);
+    Ret := (Ret shl MaxCount) or ((FBufContent shr FBufLength) and ((LongWord(1) shl MaxCount) - 1));
+    Dec(Count, MaxCount);
+  end;
+  Result := Ret;
+end;
+
+type
+  TVLC = class
+  public
+    BitLengths: array of Integer;
+    Offsets: array of Integer;
+    constructor Create(const Args: array of Integer);
+    function Decode(ReadBitsFn: TMSBBitReader; Base: Integer): Integer;
+    function DecodeCascade(ReadBitsFn: TMSBBitReader): Integer;
+    function DecodeBE32(ReadBitsFn: TMSBBitReader; Base: Integer): Integer;
+    function DecodeCascadeBE32(ReadBitsFn: TMSBBitReader): Integer;
+  end;
+
+constructor TVLC.Create(const Args: array of Integer);
+var
+  I, L, Val: Integer;
+begin
+  inherited Create;
+  SetLength(BitLengths, Length(Args));
+  SetLength(Offsets, Length(Args));
+  L := 0;
+  for I := 0 to High(Args) do
+  begin
+    Val := Args[I];
+    if Val < 0 then
+    begin
+      BitLengths[I] := -Val;
+      Offsets[I] := 0;
+      L := 1 shl (-Val);
+    end
+    else
+    begin
+      BitLengths[I] := Val;
+      Offsets[I] := L;
+      L := L + (1 shl Val);
+    end;
+  end;
+end;
+
+function TVLC.Decode(ReadBitsFn: TMSBBitReader; Base: Integer): Integer;
+begin
+  Result := Offsets[Base] + Integer(ReadBitsFn.ReadBits(BitLengths[Base]));
+end;
+
+function TVLC.DecodeCascade(ReadBitsFn: TMSBBitReader): Integer;
+var
+  I, N, Len, Tmp: Integer;
+begin
+  N := Length(BitLengths);
+  for I := 0 to N - 1 do
+  begin
+    Len := BitLengths[I];
+    Tmp := Integer(ReadBitsFn.ReadBits(Len));
+    if (I = N - 1) or (Tmp <> (1 shl Len) - 1) then
+      Exit(Offsets[I] - I + Tmp);
+  end;
+  raise Exception.Create('VLC Cascade Error');
+end;
+
+function TVLC.DecodeBE32(ReadBitsFn: TMSBBitReader; Base: Integer): Integer;
+begin
+  Result := Offsets[Base] + Integer(ReadBitsFn.ReadBitsBE32(BitLengths[Base]));
+end;
+
+function TVLC.DecodeCascadeBE32(ReadBitsFn: TMSBBitReader): Integer;
+var
+  I, N, Len, Tmp: Integer;
+begin
+  N := Length(BitLengths);
+  for I := 0 to N - 1 do
+  begin
+    Len := BitLengths[I];
+    Tmp := Integer(ReadBitsFn.ReadBitsBE32(Len));
+    if (I = N - 1) or (Tmp <> (1 shl Len) - 1) then
+      Exit(Offsets[I] - I + Tmp);
+  end;
+  raise Exception.Create('VLC Cascade Error');
+end;
+
+
+function DecompressPackIceStream(const PackedData: PByte; StartOffset, PackedSize, RawSize, InitialSrcIdx: Integer; IsOld, UseBytes: Boolean; out OutBuf: TBytes): Boolean;
+var
+  InStream: TBackwardInputStream;
+  OutStream: TBackwardOutputStream;
+  BitReader: TMSBBitReader;
+  LitVlc, CountBaseVlc, CountVlc, DistBaseVlc, DistVlc: TVLC;
+  Val, Tmp: LongWord;
+  Count, LitLength, CountBase, CountVal, DistBase, Distance: Integer;
 begin
   Result := False;
   SetLength(OutBuf, 0);
-  if (OrigSize <= 0) or (OrigSize > 16 * 1024 * 1024) then Exit;
-
-  SetLength(OutBuf, OrigSize);
-  PIdx := OrigSize;
-
-  if IsIce21 then
-    BR := TIceBitReader21.Create(@Buffer[StartPos], InitialSrcIdx)
-  else
-    BR := TIceBitReader24.Create(@Buffer[StartPos], InitialSrcIdx);
-
   try
+    InStream := TBackwardInputStream.Create(PackedData, StartOffset, InitialSrcIdx);
+    BitReader := TMSBBitReader.Create(InStream);
     try
-      while PIdx > 0 do
+      if UseBytes then
+        Val := InStream.ReadByte
+      else
+        Val := InStream.ReadBE32;
+
+      Tmp := Val;
+      Count := 0;
+      while Tmp <> 0 do
       begin
-        if BR.GetBit = 1 then
-        begin
-          // Literal Copy
-          TablePos := 0;
-          Len := 0;
-          while TablePos < 6 do
-          begin
-            Len := BR.GetBits(LenBits[TablePos]);
-            if (Len <> MaxLen[TablePos]) or (TablePos = 5) then
-            begin
-              Inc(Len, LiteralOffset[TablePos]);
-              Break;
-            end;
-            Inc(TablePos);
-          end;
-
-          if PIdx < Len then Len := PIdx;
-          for I := 1 to Len do
-          begin
-            Dec(PIdx);
-            OutBuf[PIdx] := BR.ReadRawByte;
-          end;
-        end;
-
-        if PIdx <= 0 then Break;
-
-        // Match Copy
-        TablePos := 0;
-        while (TablePos < 4) and (BR.GetBit = 1) do Inc(TablePos);
-        LenRaw := SldOffset1[TablePos] + BR.GetBits(ExtraBits1[TablePos]);
-        PosVal := 0;
-
-        if LenRaw <> 0 then
-        begin
-          TablePos2 := 0;
-          while (TablePos2 < 2) and (BR.GetBit = 1) do Inc(TablePos2);
-          PosVal := SldOffset2[TablePos2] + BR.GetBits(ExtraBits2[TablePos2]);
-          if (not IsIce21) and (PosVal <> 0) then
-            Inc(PosVal, LenRaw);
-        end
+        Tmp := (Tmp shl 1) and $FFFFFFFF;
+        Inc(Count);
+      end;
+      if Count > 0 then Dec(Count);
+      if Count > 0 then
+      begin
+        if UseBytes then
+          BitReader.Reset(Val shr (32 - Count), Count - 24)
         else
-        begin
-          if BR.GetBit = 1 then
-            PosVal := 64 + BR.GetBits(9)
-          else
-            PosVal := BR.GetBits(6);
-        end;
-
-        Len := LenRaw + 2;
-        if IsIce21 then
-          CopyDistance := PosVal + Len
-        else
-          CopyDistance := PosVal + 1;
-
-        if PIdx < Len then Len := PIdx;
-        for I := 1 to Len do
-        begin
-          Dec(PIdx);
-          SrcCopy := PIdx + CopyDistance;
-          if (PIdx < 0) or (SrcCopy >= OrigSize) then Exit(False);
-          OutBuf[PIdx] := OutBuf[SrcCopy];
-        end;
+          BitReader.Reset(Val shr (32 - Count), Count);
       end;
 
-      // Picture Chunky Decrunch (optional)
-      if BR.GetBit = 1 then
-      begin
-        PicIdx := OrigSize;
-        PicIters := Min(4000, OrigSize div 8);
-        for I := 1 to PicIters do
-        begin
-          D0 := 0; D1 := 0; D2 := 0; D3 := 0;
-          for J := 1 to 4 do
-          begin
-            Dec(PicIdx, 2);
-            if PicIdx < 0 then Exit(False);
-            D4 := (Word(OutBuf[PicIdx]) shl 8) or OutBuf[PicIdx + 1];
-            for K := 1 to 4 do
-            begin
-              D0 := ((D0 shl 1) or ((D4 shr 15) and 1)); D4 := (D4 shl 1) and $FFFF;
-              D1 := ((D1 shl 1) or ((D4 shr 15) and 1)); D4 := (D4 shl 1) and $FFFF;
-              D2 := ((D2 shl 1) or ((D4 shr 15) and 1)); D4 := (D4 shl 1) and $FFFF;
-              D3 := ((D3 shl 1) or ((D4 shr 15) and 1)); D4 := (D4 shl 1) and $FFFF;
-            end;
-          end;
-          OutBuf[PicIdx]     := (D0 shr 8) and $FF;
-          OutBuf[PicIdx + 1] := D0 and $FF;
-          OutBuf[PicIdx + 2] := (D1 shr 8) and $FF;
-          OutBuf[PicIdx + 3] := D1 and $FF;
-          OutBuf[PicIdx + 4] := (D2 shr 8) and $FF;
-          OutBuf[PicIdx + 5] := D2 and $FF;
-          OutBuf[PicIdx + 6] := (D3 shr 8) and $FF;
-          OutBuf[PicIdx + 7] := D3 and $FF;
-        end;
-      end;
+      SetLength(OutBuf, RawSize);
+      OutStream := TBackwardOutputStream.Create(@OutBuf[0], 0, RawSize);
+      try
+        if IsOld then
+          LitVlc := TVLC.Create([1, 2, 2, 3, 10])
+        else
+          LitVlc := TVLC.Create([1, 2, 2, 3, 8, 15]);
 
-      Result := True;
-    except
-      Result := False;
+        CountBaseVlc := TVLC.Create([1, 1, 1, 1]);
+        CountVlc := TVLC.Create([0, 0, 1, 2, 10]);
+        DistBaseVlc := TVLC.Create([1, 1]);
+        DistVlc := TVLC.Create([5, 8, 12]);
+        try
+          while True do
+          begin
+            if ((UseBytes and (BitReader.ReadBits(1) = 1)) or ((not UseBytes) and (BitReader.ReadBitsBE32(1) = 1))) then
+            begin
+              if UseBytes then
+                LitLength := LitVlc.DecodeCascade(BitReader) + 1
+              else
+                LitLength := LitVlc.DecodeCascadeBE32(BitReader) + 1;
+
+              for Count := 1 to LitLength do
+                OutStream.WriteByte(InStream.ReadByte);
+            end;
+            if OutStream.Eof then Break;
+
+            if UseBytes then
+            begin
+              CountBase := CountBaseVlc.DecodeCascade(BitReader);
+              CountVal := CountVlc.Decode(BitReader, CountBase) + 2;
+              if CountVal = 2 then
+              begin
+                if BitReader.ReadBits(1) = 1 then
+                  Distance := Integer(BitReader.ReadBits(9)) + $40
+                else
+                  Distance := Integer(BitReader.ReadBits(6));
+                Inc(Distance, CountVal - 1);
+              end
+              else
+              begin
+                DistBase := DistBaseVlc.DecodeCascade(BitReader);
+                if DistBase < 2 then DistBase := DistBase xor 1;
+                Distance := DistVlc.Decode(BitReader, DistBase);
+                if Distance <> 0 then Inc(Distance, CountVal - 1) else Distance := 1;
+              end;
+            end
+            else
+            begin
+              CountBase := CountBaseVlc.DecodeCascadeBE32(BitReader);
+              CountVal := CountVlc.DecodeBE32(BitReader, CountBase) + 2;
+              if CountVal = 2 then
+              begin
+                if BitReader.ReadBitsBE32(1) = 1 then
+                  Distance := Integer(BitReader.ReadBitsBE32(9)) + $40
+                else
+                  Distance := Integer(BitReader.ReadBitsBE32(6));
+                Inc(Distance, CountVal);
+              end
+              else
+              begin
+                DistBase := DistBaseVlc.DecodeCascadeBE32(BitReader);
+                if DistBase < 2 then DistBase := DistBase xor 1;
+                Distance := DistVlc.DecodeBE32(BitReader, DistBase);
+                Inc(Distance, CountVal);
+              end;
+            end;
+
+            OutStream.Copy(Distance, CountVal);
+          end;
+          Result := True;
+        finally
+          LitVlc.Free;
+          CountBaseVlc.Free;
+          CountVlc.Free;
+          DistBaseVlc.Free;
+          DistVlc.Free;
+        end;
+      finally
+        OutStream.Free;
+      end;
+    finally
+      BitReader.Free;
+      InStream.Free;
     end;
-  finally
-    BR.Free;
+  except
+    Result := False;
   end;
+end;
+
+function IsValidOutput(const OutBuf: TBytes): Boolean;
+begin
+  Result := False;
+  if Length(OutBuf) < 28 then Exit;
+  if (OutBuf[0] = $60) and (OutBuf[1] in [$1A, $1C, $00]) then Exit(True);
+  if (Length(OutBuf) = 32000) or (Length(OutBuf) = 32034) or (Length(OutBuf) = 32066) or (Length(OutBuf) = 32128) then Exit(True);
 end;
 
 function DecompressPackIce(const InBuf: PByte; InSize: Integer; out OutBuf: TBytes): Boolean;
 var
   SearchOffsets: array of Integer;
-  IsIce21: Boolean;
-  I, Off, Delta: Integer;
-  PackedSize, OrigSize: LongWord;
+  PossibleEnds: array of Integer;
+  TrialOrigSizes: array of Integer;
+  Ts, Ds, Ss, PackedSize, OrigSize: LongWord;
+  PrgEnd, Off, I, Delta, SrcIdx, Op, Mode, ImmVal, EndIdx: Integer;
+  IsIce21, UseBytes, IsOld: Boolean;
 begin
   Result := False;
   SetLength(OutBuf, 0);
   if (InBuf = nil) or (InSize < 12) then Exit;
 
+  // Phase 1: Raw ICE! and Ice! signatures
   SetLength(SearchOffsets, 0);
-  // Scan for 'ICE!' or 'Ice!'
-  Off := 0;
-  while Off <= InSize - 12 do
+  for Off := 0 to InSize - 12 do
   begin
-    if ((InBuf[Off] = Byte('I')) and (InBuf[Off+1] = Byte('C')) and (InBuf[Off+2] = Byte('E')) and (InBuf[Off+3] = Byte('!'))) or
-       ((InBuf[Off] = Byte('I')) and (InBuf[Off+1] = Byte('c')) and (InBuf[Off+2] = Byte('e')) and (InBuf[Off+3] = Byte('!'))) then
+    if (InBuf[Off] = Byte('I')) and
+       (((InBuf[Off+1] = Byte('C')) and (InBuf[Off+2] = Byte('E')) and (InBuf[Off+3] = Byte('!'))) or
+        ((InBuf[Off+1] = Byte('c')) and (InBuf[Off+2] = Byte('e')) and (InBuf[Off+3] = Byte('!')))) then
     begin
       SetLength(SearchOffsets, Length(SearchOffsets) + 1);
       SearchOffsets[High(SearchOffsets)] := Off;
     end;
-    Inc(Off);
   end;
 
   for I := 0 to High(SearchOffsets) do
@@ -744,21 +938,143 @@ begin
     IsIce21 := (InBuf[Off+1] = Byte('c'));
     PackedSize := ReadBE32(InBuf, Off + 4);
     OrigSize := ReadBE32(InBuf, Off + 8);
-
-    if (PackedSize > 0) and (PackedSize <= LongWord(InSize)) and (OrigSize > 0) and (OrigSize < 16777216) then
+    if (PackedSize > 0) and (PackedSize <= LongWord(InSize)) and (OrigSize > 0) and (OrigSize <= $800000) then
     begin
-      for Delta := 0 to 4 do
+      for Delta := -256 to 256 do
       begin
-        if DecompressPackIceInternal(InBuf, InSize, Off + 12, IsIce21, OrigSize, PackedSize - Delta, OutBuf) then
-          Exit(True);
-        if DecompressPackIceInternal(InBuf, InSize, Off, IsIce21, OrigSize, PackedSize + 12 - Delta, OutBuf) then
-          Exit(True);
+        for IsOld in [False, True] do
+          for UseBytes in [True, False] do
+          begin
+            // 1. Try bitstream ending at Off + PackedSize + Delta with data start at Off + 12
+            EndIdx := Off + Integer(PackedSize) + Delta;
+            if (EndIdx > Off + 12) and (EndIdx <= InSize) then
+            begin
+              if DecompressPackIceStream(InBuf, Off + 12, InSize, OrigSize, EndIdx, IsOld, UseBytes, OutBuf) then
+              begin
+                if (Off = 0) or IsValidOutput(OutBuf) then Exit(True);
+              end;
+            end;
+
+            // 2. Try bitstream ending at Off + PackedSize + 12 + Delta with data start at Off
+            EndIdx := Off + Integer(PackedSize) + 12 + Delta;
+            if (EndIdx > Off) and (EndIdx <= InSize) then
+            begin
+              if DecompressPackIceStream(InBuf, Off, InSize, OrigSize, EndIdx, IsOld, UseBytes, OutBuf) then
+              begin
+                if (Off = 0) or IsValidOutput(OutBuf) then Exit(True);
+              end;
+            end;
+
+            // 3. Try bitstream ending at Off + PackedSize + Delta with data start at Off
+            EndIdx := Off + Integer(PackedSize) + Delta;
+            if (EndIdx > Off) and (EndIdx <= InSize) then
+            begin
+              if DecompressPackIceStream(InBuf, Off, InSize, OrigSize, EndIdx, IsOld, UseBytes, OutBuf) then
+              begin
+                if (Off = 0) or IsValidOutput(OutBuf) then Exit(True);
+              end;
+            end;
+          end;
+      end;
+    end;
+  end;
+// Phase 2: PRG executables without raw ICE header
+  if (InSize >= 28) and (InBuf[0] = $60) and (InBuf[1] in [$1A, $1C, $00]) then
+  begin
+    Ts := ReadBE32(InBuf, 2);
+    Ds := ReadBE32(InBuf, 6);
+    Ss := ReadBE32(InBuf, 14);
+
+    SetLength(PossibleEnds, 0);
+    if (Ts + Ds + Ss > 0) and (28 + Ts + Ds + Ss <= LongWord(InSize)) then
+    begin
+      SetLength(PossibleEnds, Length(PossibleEnds) + 1);
+      PossibleEnds[High(PossibleEnds)] := 28 + Ts + Ds + Ss;
+    end;
+    if (Ts + Ds > 0) and (28 + Ts + Ds <= LongWord(InSize)) then
+    begin
+      SetLength(PossibleEnds, Length(PossibleEnds) + 1);
+      PossibleEnds[High(PossibleEnds)] := 28 + Ts + Ds;
+    end;
+    if (Ts > 0) and (28 + Ts <= LongWord(InSize)) then
+    begin
+      SetLength(PossibleEnds, Length(PossibleEnds) + 1);
+      PossibleEnds[High(PossibleEnds)] := 28 + Ts;
+    end;
+    SetLength(PossibleEnds, Length(PossibleEnds) + 1);
+    PossibleEnds[High(PossibleEnds)] := InSize;
+
+    // Scan assembly for immediate sizes
+    SetLength(TrialOrigSizes, 0);
+    for I := 28 to Min(InSize - 6, 4096) do
+    begin
+      Op := InBuf[I];
+      Mode := InBuf[I + 1];
+      if (Op >= $20) and (Op <= $2E) and ((Mode = $3C) or (Mode = $7C)) then
+      begin
+        ImmVal := Integer(ReadBE32(InBuf, I + 2));
+        if (ImmVal > 1000) and (ImmVal <= $800000) then
+        begin
+          SetLength(TrialOrigSizes, Length(TrialOrigSizes) + 1);
+          TrialOrigSizes[High(TrialOrigSizes)] := ImmVal;
+        end;
+      end;
+    end;
+
+    for EndIdx := 0 to High(PossibleEnds) do
+    begin
+      PrgEnd := PossibleEnds[EndIdx];
+      if PrgEnd >= 8 then
+      begin
+        ImmVal := Integer(ReadBE32(InBuf, PrgEnd - 4));
+        if (ImmVal > 1000) and (ImmVal <= $800000) then
+        begin
+          SetLength(TrialOrigSizes, Length(TrialOrigSizes) + 1);
+          TrialOrigSizes[High(TrialOrigSizes)] := ImmVal;
+        end;
+        ImmVal := Integer(ReadBE32(InBuf, PrgEnd - 8));
+        if (ImmVal > 1000) and (ImmVal <= $800000) then
+        begin
+          SetLength(TrialOrigSizes, Length(TrialOrigSizes) + 1);
+          TrialOrigSizes[High(TrialOrigSizes)] := ImmVal;
+        end;
+        if PrgEnd >= 9 then
+        begin
+          ImmVal := Integer(ReadBE32(InBuf, PrgEnd - 5));
+          if (ImmVal > 1000) and (ImmVal <= $800000) then
+          begin
+            SetLength(TrialOrigSizes, Length(TrialOrigSizes) + 1);
+            TrialOrigSizes[High(TrialOrigSizes)] := ImmVal;
+          end;
+        end;
+      end;
+
+      for I := 0 to High(TrialOrigSizes) do
+      begin
+        OrigSize := TrialOrigSizes[I];
+        if (OrigSize <= 1000) or (OrigSize > $800000) then Continue;
+
+        // Try old/new, useBytes
+        for IsOld in [True, False] do
+          for UseBytes in [False, True] do
+          begin
+            // Sweep deltas near PrgEnd
+            for Delta := -8 to 8 do
+            begin
+              SrcIdx := PrgEnd + Delta;
+              if (SrcIdx >= 12) and (SrcIdx <= InSize) then
+              begin
+                if DecompressPackIceStream(InBuf, 0, InSize, OrigSize, SrcIdx, IsOld, UseBytes, OutBuf) and IsValidOutput(OutBuf) then
+                  Exit(True);
+              end;
+            end;
+          end;
       end;
     end;
   end;
 end;
 
-// -----------------------------------------------------------------------------
+
 // Rob Northen Compression (RNC Propack Method 1 & 2)
 // -----------------------------------------------------------------------------
 
@@ -1515,14 +1831,23 @@ begin
   DataStart := -1;
   for I := 0 to Min(8192, InSize - 12) do
   begin
-    D5 := ReadBE32(InBuf, I + 4);
-    D1 := ReadBE32(InBuf, I + 8);
-    if (D1 > 0) and (D5 >= D1) and (D5 < 32 * 1024 * 1024) then
+    if (I = 0) or
+       CheckString(InBuf, InSize, I, 'LSD!') or
+       CheckString(InBuf, InSize, I, 'LSD$') or
+       CheckString(InBuf, InSize, I, 'AUTM') or
+       CheckString(InBuf, InSize, I, 'AU5!') or
+       CheckString(InBuf, InSize, I, 'AU5C') or
+       CheckString(InBuf, InSize, I, 'LSDC') then
     begin
-      if (I + 8 + D1 <= InSize + 4) and (I + 8 + D1 >= InSize - 1024) then
+      D5 := ReadBE32(InBuf, I + 4);
+      D1 := ReadBE32(InBuf, I + 8);
+      if (D1 > 0) and (D5 >= D1) and (D5 < 32 * 1024 * 1024) then
       begin
-        DataStart := I;
-        Break;
+        if (I + 8 + D1 <= InSize + 4) and (I + 8 + D1 >= InSize - 1024) then
+        begin
+          DataStart := I;
+          Break;
+        end;
       end;
     end;
   end;
@@ -1630,13 +1955,18 @@ begin
       begin
         Dec(A1);
         Dec(A2);
-        if (A1 < 0) or (A2 < 0) or (A2 >= Length(OutBuf)) then Exit(False);
+        if (A1 < 0) or (A2 < 0) or (A2 >= Length(OutBuf)) then
+        begin
+          SetLength(OutBuf, 0);
+          Exit(False);
+        end;
         OutBuf[A1] := OutBuf[A2];
       end;
     end;
 
     Result := True;
   except
+    SetLength(OutBuf, 0);
     Result := False;
   end;
 end;
@@ -1645,187 +1975,403 @@ end;
 // JAM Packer (LSD, LZH with Dynamic Huffman, LZW)
 // -----------------------------------------------------------------------------
 
-type
-  TDynHuffNode = record
-    Freq: Word;
-    Index: Word;
-    Parent: Word;
-    LeftLeaf: Word;
-    RightLeaf: Word;
-  end;
+// -----------------------------------------------------------------------------
+// Dynamic Huffman & JAM Decompressor
+// -----------------------------------------------------------------------------
 
-function DecompressJamLZH(const PackedData: PByte; PackedSize: Integer; RawSize: Integer; out OutBuf: TBytes): Boolean;
+// DYNAMIC HUFFMAN
 const
-  MaxCount = 314;
-  VlcLengths: array[0..15] of Integer = (5, 5, 6, 6, 6, 7, 7, 7, 7, 8, 8, 8, 9, 9, 9, 10);
-  VlcOffsets: array[0..15] of Integer = (0, 32, 64, 128, 192, 256, 384, 512, 640, 768, 1024, 1280, 1536, 2048, 2560, 3072);
-var
-  Nodes: array[0..MaxCount * 2 - 2] of TDynHuffNode;
-  CodeMap: array[0..MaxCount * 2 - 2] of Word;
-  InPos, OutPos: Integer;
-  BitBuf, BitLen: Integer;
+  MaxHuffCount = 314;
 
-  procedure ResetTree;
-  var
-    I, J, L, R: Integer;
-  begin
-    for I := 0 to MaxCount - 1 do
-    begin
-      Nodes[I].Freq := 1;
-      Nodes[I].Index := I;
-      Nodes[I].Parent := MaxCount + (I shr 1);
-      Nodes[I].LeftLeaf := 0;
-      Nodes[I].RightLeaf := 0;
-      CodeMap[I] := I;
-    end;
-    for I := MaxCount to MaxCount * 2 - 2 do
-    begin
-      J := (I - MaxCount) shl 1;
-      L := J;
-      R := J + 1;
-      Nodes[I].Freq := Nodes[L].Freq + Nodes[R].Freq;
-      Nodes[I].Index := I;
-      Nodes[I].Parent := MaxCount + (I shr 1);
-      Nodes[I].LeftLeaf := L;
-      Nodes[I].RightLeaf := R;
-      CodeMap[I] := I;
-    end;
+type
+  TDynNode = record
+    Freq: Integer;
+    Index: Integer;
+    Parent: Integer;
+    LeftLeaf: Integer;
+    RightLeaf: Integer;
   end;
 
-  function ReadByte: Byte;
-  begin
-    if InPos <= 12 then raise Exception.Create('Jam LZH OOB');
-    Dec(InPos);
-    Result := PackedData[InPos];
+  TDynamicHuffman = class
+  private
+    FCount: Integer;
+    FNodes: array[0..MaxHuffCount * 2 - 2] of TDynNode;
+    FCodeMap: array[0..MaxHuffCount * 2 - 2] of Integer;
+  public
+    constructor Create;
+    procedure Reset;
+    function Decode(BitReader: TMSBBitReader): Integer;
+    procedure Update(Code: Integer);
+    procedure Halve;
+    function GetMaxFrequency: Integer;
   end;
 
-  function ReadBits(Count: Integer): Integer;
-  var
-    Ret, MaxC: Integer;
-  begin
-    Ret := 0;
-    while Count > 0 do
-    begin
-      if BitLen = 0 then
-      begin
-        BitBuf := ReadByte;
-        BitLen := 8;
-      end;
-      MaxC := Min(Count, BitLen);
-      Dec(BitLen, MaxC);
-      Ret := (Ret shl MaxC) or ((BitBuf shr BitLen) and ((1 shl MaxC) - 1));
-      Dec(Count, MaxC);
-    end;
-    Result := Ret;
-  end;
-
-  function DecodeSymbol: Word;
-  var
-    Code: Word;
-  begin
-    Code := MaxCount * 2 - 2;
-    while Code >= MaxCount do
-    begin
-      if ReadBits(1) = 1 then
-        Code := Nodes[Code].RightLeaf
-      else
-        Code := Nodes[Code].LeftLeaf;
-    end;
-    Result := Code;
-  end;
-
-  procedure UpdateTree(Code: Word);
-  var
-    ParentIdx, DestCode, TempParent: Word;
-  begin
-    while Code <> MaxCount * 2 - 2 do
-    begin
-      Inc(Nodes[Code].Freq);
-      Code := Nodes[Code].Parent;
-    end;
-    Inc(Nodes[Code].Freq);
-  end;
-
-var
-  Symbol, Count, DistBase, Distance, I: Integer;
+constructor TDynamicHuffman.Create;
 begin
-  Result := False;
-  SetLength(OutBuf, RawSize);
-  InPos := PackedSize;
-  OutPos := RawSize;
-  BitBuf := 0;
-  BitLen := 0;
-  ResetTree;
+  inherited Create;
+  Reset;
+end;
 
-  try
-    while OutPos > 0 do
+procedure TDynamicHuffman.Reset;
+var
+  I, J, L, R: Integer;
+begin
+  FCount := MaxHuffCount;
+  for I := 0 to FCount - 1 do
+  begin
+    FNodes[I].Freq := 1;
+    FNodes[I].Index := I + (MaxHuffCount - FCount) * 2;
+    FNodes[I].Parent := MaxHuffCount * 2 - FCount + (I shr 1);
+    FNodes[I].LeftLeaf := 0;
+    FNodes[I].RightLeaf := 0;
+    FCodeMap[I + (MaxHuffCount - FCount) * 2] := I;
+  end;
+  for I := MaxHuffCount * 2 - FCount to MaxHuffCount * 2 - 2 do
+  begin
+    J := (I - (MaxHuffCount * 2 - FCount)) * 2;
+    if J >= FCount then L := J + (MaxHuffCount - FCount) * 2 else L := J;
+    if J + 1 >= FCount then R := J + 1 + (MaxHuffCount - FCount) * 2 else R := J + 1;
+    FNodes[I].Freq := FNodes[L].Freq + FNodes[R].Freq;
+    FNodes[I].Index := I;
+    FNodes[I].Parent := MaxHuffCount + (I shr 1);
+    FNodes[I].LeftLeaf := L;
+    FNodes[I].RightLeaf := R;
+    FCodeMap[I] := I;
+  end;
+end;
+
+function TDynamicHuffman.Decode(BitReader: TMSBBitReader): Integer;
+var
+  Code: Integer;
+begin
+  if FCount <= 1 then Exit(0);
+  Code := MaxHuffCount * 2 - 2;
+  while Code >= MaxHuffCount do
+  begin
+    if BitReader.ReadBits(1) = 1 then
+      Code := FNodes[Code].RightLeaf
+    else
+      Code := FNodes[Code].LeftLeaf;
+  end;
+  Result := Code;
+end;
+
+procedure TDynamicHuffman.Update(Code: Integer);
+var
+  Index, DestIndex, Freq, DestCode, TempIndex, TempCodeMap, TempParent: Integer;
+  ParentA, ParentB: Integer;
+begin
+  if Code >= FCount then raise Exception.Create('Huffman Code OOB');
+  if FCount = 1 then
+  begin
+    FNodes[0].Freq := 1;
+    Exit;
+  end;
+
+  while Code <> MaxHuffCount * 2 - 2 do
+  begin
+    Inc(FNodes[Code].Freq);
+    Index := FNodes[Code].Index;
+    DestIndex := Index;
+    Freq := FNodes[Code].Freq;
+
+    while (DestIndex <> MaxHuffCount * 2 - 2) and (Freq > FNodes[FCodeMap[DestIndex + 1]].Freq) do
+      Inc(DestIndex);
+
+    if Index <> DestIndex then
     begin
-      Symbol := DecodeSymbol;
-      UpdateTree(Symbol);
-      if Symbol < 256 then
+      DestCode := FCodeMap[DestIndex];
+
+      TempIndex := FNodes[Code].Index;
+      FNodes[Code].Index := FNodes[DestCode].Index;
+      FNodes[DestCode].Index := TempIndex;
+
+      TempCodeMap := FCodeMap[Index];
+      FCodeMap[Index] := FCodeMap[DestIndex];
+      FCodeMap[DestIndex] := TempCodeMap;
+
+      ParentA := FNodes[Code].Parent;
+      ParentB := FNodes[DestCode].Parent;
+
+      if FNodes[ParentA].LeftLeaf = Code then
       begin
-        Dec(OutPos);
-        OutBuf[OutPos] := Symbol;
+        if FNodes[ParentB].LeftLeaf = DestCode then
+        begin
+          FNodes[ParentA].LeftLeaf := DestCode;
+          FNodes[ParentB].LeftLeaf := Code;
+        end
+        else
+        begin
+          FNodes[ParentA].LeftLeaf := DestCode;
+          FNodes[ParentB].RightLeaf := Code;
+        end;
       end
       else
       begin
-        DistBase := ReadBits(4);
-        Distance := VlcOffsets[DistBase] + ReadBits(VlcLengths[DistBase]) + 1;
-        Count := Symbol - 253;
-        for I := 1 to Count do
+        if FNodes[ParentB].LeftLeaf = DestCode then
         begin
-          Dec(OutPos);
-          if OutPos + Distance < RawSize then
-            OutBuf[OutPos] := OutBuf[OutPos + Distance]
-          else
-            OutBuf[OutPos] := $20;
+          FNodes[ParentA].RightLeaf := DestCode;
+          FNodes[ParentB].LeftLeaf := Code;
+        end
+        else
+        begin
+          FNodes[ParentA].RightLeaf := DestCode;
+          FNodes[ParentB].RightLeaf := Code;
         end;
       end;
+
+      TempParent := FNodes[Code].Parent;
+      FNodes[Code].Parent := FNodes[DestCode].Parent;
+      FNodes[DestCode].Parent := TempParent;
     end;
-    Result := True;
-  except
-    Result := False;
+    Code := FNodes[Code].Parent;
+  end;
+  Inc(FNodes[Code].Freq);
+end;
+
+procedure TDynamicHuffman.Halve;
+var
+  I, J, K, L, R, Freq, C, DestCode, TempIndex, TempParent, TempMap: Integer;
+begin
+  if FCount <= 1 then Exit;
+
+  J := (MaxHuffCount - FCount) * 2;
+  for I := (MaxHuffCount - FCount) * 2 to MaxHuffCount * 2 - 2 do
+  begin
+    if J >= MaxHuffCount * 2 - FCount then Break;
+    if FCodeMap[I] < MaxHuffCount then
+    begin
+      FNodes[FCodeMap[I]].Index := J;
+      Inc(J);
+    end;
+  end;
+
+  for I := 0 to FCount - 1 do
+  begin
+    FNodes[I].Freq := (FNodes[I].Freq + 1) shr 1;
+    FNodes[I].Parent := MaxHuffCount + (FNodes[I].Index shr 1);
+    FCodeMap[FNodes[I].Index] := I;
+  end;
+
+  J := (MaxHuffCount - FCount) * 2;
+  for I := MaxHuffCount * 2 - FCount to MaxHuffCount * 2 - 2 do
+  begin
+    L := FCodeMap[J];
+    R := FCodeMap[J + 1];
+    Freq := FNodes[L].Freq + FNodes[R].Freq;
+    FNodes[I].Freq := Freq;
+    FNodes[I].Index := I;
+    FNodes[I].Parent := MaxHuffCount + (I shr 1);
+    FNodes[I].LeftLeaf := L;
+    FNodes[I].RightLeaf := R;
+    FCodeMap[I] := I;
+
+    K := I;
+    while (K > 0) and (Freq < FNodes[FCodeMap[K - 1]].Freq) do
+    begin
+      C := FCodeMap[K];
+      DestCode := FCodeMap[K - 1];
+
+      TempIndex := FNodes[C].Index;
+      FNodes[C].Index := FNodes[DestCode].Index;
+      FNodes[DestCode].Index := TempIndex;
+
+      TempParent := FNodes[C].Parent;
+      FNodes[C].Parent := FNodes[DestCode].Parent;
+      FNodes[DestCode].Parent := TempParent;
+
+      TempMap := FCodeMap[K];
+      FCodeMap[K] := FCodeMap[K - 1];
+      FCodeMap[K - 1] := TempMap;
+      Dec(K);
+    end;
+    Inc(J, 2);
+  end;
+end;
+
+function TDynamicHuffman.GetMaxFrequency: Integer;
+begin
+  Result := FNodes[MaxHuffCount * 2 - 2].Freq;
+end;
+
+// =============================================================================
+// MAIN DECOMPRESSORS
+// =============================================================================
+
+function DecompressInternalV2(const PackedData: PByte; RawSize, PackedSize: Integer): TBytes;
+var
+  InStream: TBackwardInputStream;
+  OutStream: TBackwardOutputStream;
+  BitReader: TMSBBitReader;
+  LitVlc, CountBaseVlc, CountVlc, DistBaseVlc, DistVlc: TVLC;
+  LitLength, CountBase, CountVal, DistBase, Distance: Integer;
+  Tmp, I, J: Integer;
+begin
+  InStream := TBackwardInputStream.Create(PackedData, 12, PackedSize);
+  BitReader := TMSBBitReader.Create(InStream);
+  try
+    if (InStream.ReadBE16 and $8000) <> 0 then
+      InStream.ReadByte;
+    Tmp := InStream.ReadByte;
+    I := 1; J := 7;
+    while I < $80 do
+    begin
+      if (Tmp and I) <> 0 then
+      begin
+        BitReader.Reset(Tmp shr (8 - J), J);
+        Break;
+      end;
+      I := I shl 1;
+      Dec(J);
+    end;
+
+    SetLength(Result, RawSize);
+    OutStream := TBackwardOutputStream.Create(@Result[0], 0, RawSize);
+    try
+      LitVlc := TVLC.Create([1, 2, 2, 3, 10]);
+      CountBaseVlc := TVLC.Create([1, 1, 1, 1]);
+      CountVlc := TVLC.Create([0, 0, 1, 2, 10]);
+      DistBaseVlc := TVLC.Create([1, 1]);
+      DistVlc := TVLC.Create([5, 8, 12]);
+      try
+        while True do
+        begin
+          if BitReader.ReadBits(1) = 1 then
+          begin
+            LitLength := LitVlc.DecodeCascade(BitReader) + 1;
+            for I := 1 to LitLength do
+              OutStream.WriteByte(InStream.ReadByte);
+          end;
+          if OutStream.Eof then Break;
+
+          CountBase := CountBaseVlc.DecodeCascade(BitReader);
+          CountVal := CountVlc.Decode(BitReader, CountBase) + 2;
+          Distance := 0;
+          if CountVal = 2 then
+          begin
+            if BitReader.ReadBits(1) = 1 then
+              Distance := Integer(BitReader.ReadBits(9)) + $40
+            else
+              Distance := Integer(BitReader.ReadBits(6));
+          end
+          else
+          begin
+            DistBase := DistBaseVlc.DecodeCascade(BitReader);
+            if DistBase < 2 then DistBase := DistBase xor 1;
+            Distance := DistVlc.Decode(BitReader, DistBase);
+          end;
+          Inc(Distance, CountVal);
+          OutStream.Copy(Distance, CountVal);
+        end;
+      finally
+        LitVlc.Free;
+        CountBaseVlc.Free;
+        CountVlc.Free;
+        DistBaseVlc.Free;
+        DistVlc.Free;
+      end;
+    finally
+      OutStream.Free;
+    end;
+  finally
+    BitReader.Free;
+    InStream.Free;
+  end;
+end;
+
+function DecompressInternalLZH(const PackedData: PByte; RawSize, PackedSize: Integer): TBytes;
+var
+  InStream: TBackwardInputStream;
+  OutStream: TBackwardOutputStream;
+  BitReader: TMSBBitReader;
+  Decoder: TDynamicHuffman;
+  Vlc: TVLC;
+  Symbol, DistBase, Distance, CountVal: Integer;
+begin
+  InStream := TBackwardInputStream.Create(PackedData, 12, PackedSize);
+  BitReader := TMSBBitReader.Create(InStream);
+  try
+    SetLength(Result, RawSize);
+    OutStream := TBackwardOutputStream.Create(@Result[0], 0, RawSize);
+    try
+      Decoder := TDynamicHuffman.Create;
+      Vlc := TVLC.Create([5, 5, 6, 6, 6, 7, 7, 7, 7, 8, 8, 8, 9, 9, 9, 10]);
+      try
+        while not OutStream.Eof do
+        begin
+          Symbol := Decoder.Decode(BitReader);
+          if Decoder.GetMaxFrequency = $8000 then
+            Decoder.Halve;
+          Decoder.Update(Symbol);
+          if Symbol < 256 then
+            OutStream.WriteByte(Symbol)
+          else
+          begin
+            DistBase := BitReader.ReadBits(4);
+            Distance := Vlc.Decode(BitReader, DistBase) + 1;
+            CountVal := Symbol - 253;
+            OutStream.Copy(Distance, CountVal, $20);
+          end;
+        end;
+      finally
+        Vlc.Free;
+        Decoder.Free;
+      end;
+    finally
+      OutStream.Free;
+    end;
+  finally
+    BitReader.Free;
+    InStream.Free;
   end;
 end;
 
 function DecompressJam(const InBuf: PByte; InSize: Integer; out OutBuf: TBytes): Boolean;
 var
   Off: Integer;
+  IsLsd, IsLzh, IsLzw: Boolean;
   RawSize, PackedSize: LongWord;
-  Dummy: TBytes;
 begin
   Result := False;
   SetLength(OutBuf, 0);
   if (InBuf = nil) or (InSize < 12) then Exit;
 
-  // Scan for LSD!, LZH!, LZW!
-  for Off := 0 to Min(InSize - 12, 4096) do
+  for Off := 0 to InSize - 12 do
   begin
-    if (InBuf[Off] = Byte('L')) and
-       ((CheckString(InBuf, InSize, Off, 'LSD!') or
-         CheckString(InBuf, InSize, Off, 'LZH!') or
-         CheckString(InBuf, InSize, Off, 'LZW!'))) then
+    if InBuf[Off] = Byte('L') then
     begin
-      RawSize := ReadBE32(InBuf, Off + 4);
-      PackedSize := ReadBE32(InBuf, Off + 8);
-      if (RawSize > 0) and (RawSize < 16777216) and (PackedSize > 0) and (Off + PackedSize <= InSize + 12) then
+      IsLsd := (InBuf[Off+1] = Byte('S')) and (InBuf[Off+2] = Byte('D')) and (InBuf[Off+3] = Byte('!'));
+      IsLzh := (InBuf[Off+1] = Byte('Z')) and (InBuf[Off+2] = Byte('H')) and (InBuf[Off+3] = Byte('!'));
+      IsLzw := (InBuf[Off+1] = Byte('Z')) and (InBuf[Off+2] = Byte('W')) and (InBuf[Off+3] = Byte('!'));
+      if IsLsd or IsLzh or IsLzw then
       begin
-        if CheckString(InBuf, InSize, Off, 'LSD!') then
+        RawSize := ReadBE32(InBuf, Off + 4);
+        PackedSize := ReadBE32(InBuf, Off + 8);
+        if IsLsd then Inc(PackedSize, 4)
+        else if IsLzh then Inc(PackedSize, 12);
+
+        if (Off + Integer(PackedSize) <= InSize) and (RawSize > 0) and (RawSize <= $800000) then
         begin
-          if DecompressAutomation(@InBuf[Off], PackedSize + 12, OutBuf) then
-            Exit(True);
-        end
-        else if CheckString(InBuf, InSize, Off, 'LZH!') then
-        begin
-          if DecompressJamLZH(@InBuf[Off], PackedSize + 12, RawSize, OutBuf) then
-            Exit(True);
+          try
+            if IsLsd then
+            begin
+              OutBuf := DecompressInternalV2(@InBuf[Off], RawSize, PackedSize);
+              Exit(True);
+            end
+            else if IsLzh then
+            begin
+              OutBuf := DecompressInternalLZH(@InBuf[Off], RawSize, PackedSize);
+              Exit(True);
+            end;
+          except
+          end;
         end;
       end;
     end;
   end;
 end;
 
-// -----------------------------------------------------------------------------
+
 // Thunder v1 & v2 Decompressor
 // -----------------------------------------------------------------------------
 
@@ -2133,10 +2679,13 @@ end;
 
 function DecompressJek(const InBuf: PByte; InSize: Integer; out OutBuf: TBytes): Boolean;
 var
-  ActualEnd, OffsetVal, OutPtr, CmdVal, CountVal, OffVal, SrcVal, I: Integer;
+  Candidates: array of Integer;
+  CandIdx, ActualEnd, OffsetVal, OutPtr, CmdVal, CountVal, OffVal, SrcVal, I, P, RelocBytes: Integer;
   XorKey, D0Val, CarryVal, WVal: LongWord;
-  MaxBufSize: Integer;
-  TempBuf: TBytes;
+  TextSize, DataSize, SymSize, TextLen, DataLen, SymLen, TotalExp, TotalWithReloc, FirstReloc: LongWord;
+  End1, End2, MaxBufSize, ResultLen, PrgStart: Integer;
+  TempBuf, RawSlice: TBytes;
+  FallbackBuf: TBytes;
 
   function ReadLong: LongWord;
   begin
@@ -2170,36 +2719,108 @@ var
 begin
   Result := False;
   SetLength(OutBuf, 0);
+  SetLength(FallbackBuf, 0);
   if (InBuf = nil) or (InSize < 12) then Exit;
 
-  ActualEnd := InSize;
-  OffsetVal := ActualEnd - 4;
-  XorKey := ReadBE32(InBuf, OffsetVal);
-  D0Val := 0;
-
-  MaxBufSize := Min(4 * 1024 * 1024, InSize * 8 + 65536);
-  SetLength(TempBuf, MaxBufSize);
-  OutPtr := MaxBufSize;
-
-  try
-    while OutPtr > 0 do
+  // Gather candidate stream end positions
+  SetLength(Candidates, 0);
+  if (InSize >= 28) and (InBuf[0] = $60) and (InBuf[1] in [$1A, $1C, $00]) then
+  begin
+    TextSize := ReadBE32(InBuf, 2);
+    DataSize := ReadBE32(InBuf, 6);
+    SymSize  := ReadBE32(InBuf, 14);
+    End1 := 28 + TextSize + DataSize;
+    End2 := 28 + TextSize + DataSize + SymSize;
+    if (End1 > 28) and (End1 <= InSize) then
     begin
-      if GetBit = 0 then
+      SetLength(Candidates, Length(Candidates) + 1);
+      Candidates[High(Candidates)] := End1;
+    end;
+    if (End2 > 28) and (End2 <= InSize) and (End2 <> End1) then
+    begin
+      SetLength(Candidates, Length(Candidates) + 1);
+      Candidates[High(Candidates)] := End2;
+    end;
+  end;
+  SetLength(Candidates, Length(Candidates) + 1);
+  Candidates[High(Candidates)] := InSize;
+
+  for CandIdx := 0 to High(Candidates) do
+  begin
+    ActualEnd := Candidates[CandIdx];
+    if ActualEnd < 8 then Continue;
+
+    OffsetVal := ActualEnd - 4;
+    XorKey := ReadBE32(InBuf, OffsetVal);
+    D0Val := 0;
+
+    MaxBufSize := 4 * 1024 * 1024;
+    SetLength(TempBuf, MaxBufSize);
+    OutPtr := MaxBufSize;
+
+    try
+      while OutPtr > 0 do
       begin
         if GetBit = 0 then
         begin
-          CountVal := GetBits(3) + 1;
-          for I := 1 to CountVal do
+          if GetBit = 0 then
           begin
-            Dec(OutPtr);
-            if OutPtr >= 0 then TempBuf[OutPtr] := GetBits(8);
+            CountVal := GetBits(3) + 1;
+            for I := 1 to CountVal do
+            begin
+              Dec(OutPtr);
+              if OutPtr >= 0 then TempBuf[OutPtr] := GetBits(8);
+            end;
+          end
+          else
+          begin
+            OffVal := GetBits(8);
+            SrcVal := OutPtr + OffVal;
+            for I := 1 to 2 do
+            begin
+              Dec(OutPtr);
+              Dec(SrcVal);
+              if (OutPtr >= 0) and (SrcVal >= 0) and (SrcVal < MaxBufSize) then
+                TempBuf[OutPtr] := TempBuf[SrcVal]
+              else
+                TempBuf[OutPtr] := 0;
+            end;
           end;
         end
         else
         begin
-          OffVal := GetBits(8);
+          CmdVal := GetBits(2);
+          CountVal := 0;
+          OffVal := 0;
+
+          if CmdVal = 0 then
+          begin
+            OffVal := GetBits(9);
+            CountVal := 3;
+          end
+          else if CmdVal = 1 then
+          begin
+            OffVal := GetBits(10);
+            CountVal := 4;
+          end
+          else if CmdVal = 2 then
+          begin
+            CountVal := GetBits(8) + 1;
+            OffVal := GetBits(12);
+          end
+          else if CmdVal = 3 then
+          begin
+            CountVal := GetBits(8) + 9;
+            for I := 1 to CountVal do
+            begin
+              Dec(OutPtr);
+              if OutPtr >= 0 then TempBuf[OutPtr] := GetBits(8);
+            end;
+            Continue;
+          end;
+
           SrcVal := OutPtr + OffVal;
-          for I := 1 to 2 do
+          for I := 1 to CountVal do
           begin
             Dec(OutPtr);
             Dec(SrcVal);
@@ -2209,60 +2830,70 @@ begin
               TempBuf[OutPtr] := 0;
           end;
         end;
-      end
-      else
+      end;
+    except
+      // Graceful exit upon hitting end of compressed bitstream
+    end;
+
+    if OutPtr < MaxBufSize then
+    begin
+      ResultLen := MaxBufSize - OutPtr;
+      SetLength(RawSlice, ResultLen);
+      Move(TempBuf[OutPtr], RawSlice[0], ResultLen);
+
+      // Scan for embedded GEMDOS/TOS executable header ($601A)
+      PrgStart := -1;
+      TotalWithReloc := 0;
+      for I := 0 to ResultLen - 28 do
       begin
-        CmdVal := GetBits(2);
-        CountVal := 0;
-        OffVal := 0;
-
-        if CmdVal = 0 then
+        if (RawSlice[I] = $60) and (RawSlice[I+1] = $1A) then
         begin
-          OffVal := GetBits(9);
-          CountVal := 3;
-        end
-        else if CmdVal = 1 then
-        begin
-          OffVal := GetBits(10);
-          CountVal := 4;
-        end
-        else if CmdVal = 2 then
-        begin
-          CountVal := GetBits(8) + 1;
-          OffVal := GetBits(12);
-        end
-        else if CmdVal = 3 then
-        begin
-          CountVal := GetBits(8) + 9;
-          for I := 1 to CountVal do
+          TextLen := ReadBE32(@RawSlice[I], 2);
+          DataLen := ReadBE32(@RawSlice[I], 6);
+          SymLen  := ReadBE32(@RawSlice[I], 14);
+          TotalExp := 28 + TextLen + DataLen + SymLen;
+          if (TotalExp > 0) and (TotalExp <= LongWord(ResultLen - I + 512)) then
           begin
-            Dec(OutPtr);
-            if OutPtr >= 0 then TempBuf[OutPtr] := GetBits(8);
+            P := I + TotalExp;
+            TotalWithReloc := Min(LongWord(ResultLen - I), TotalExp);
+            if P + 4 <= ResultLen then
+            begin
+              FirstReloc := ReadBE32(@RawSlice[0], P);
+              if FirstReloc = 0 then
+                Inc(TotalWithReloc, 4)
+              else
+              begin
+                RelocBytes := 4;
+                while (P + RelocBytes < ResultLen) and (RawSlice[P + RelocBytes] <> 0) do
+                  Inc(RelocBytes);
+                if P + RelocBytes < ResultLen then Inc(RelocBytes);
+                Inc(TotalWithReloc, RelocBytes);
+              end;
+            end;
+            TotalWithReloc := Min(LongWord(ResultLen - I), TotalWithReloc);
+            PrgStart := I;
+            Break;
           end;
-          Continue;
-        end;
-
-        SrcVal := OutPtr + OffVal;
-        for I := 1 to CountVal do
-        begin
-          Dec(OutPtr);
-          Dec(SrcVal);
-          if (OutPtr >= 0) and (SrcVal >= 0) and (SrcVal < MaxBufSize) then
-            TempBuf[OutPtr] := TempBuf[SrcVal]
-          else
-            TempBuf[OutPtr] := 0;
         end;
       end;
+
+      if PrgStart <> -1 then
+      begin
+        SetLength(OutBuf, TotalWithReloc);
+        Move(RawSlice[PrgStart], OutBuf[0], TotalWithReloc);
+        Exit(True);
+      end
+      else if (ResultLen >= 1024) and (Length(FallbackBuf) = 0) then
+      begin
+        FallbackBuf := RawSlice;
+      end;
     end;
-  except
-    // Graceful exit upon hitting end of compressed bitstream
   end;
 
-  if OutPtr < MaxBufSize then
+  if Length(FallbackBuf) > 0 then
   begin
-    SetLength(OutBuf, MaxBufSize - OutPtr);
-    Move(TempBuf[OutPtr], OutBuf[0], Length(OutBuf));
-    Result := (Length(OutBuf) > 0);
+    OutBuf := FallbackBuf;
+    Exit(True);
   end;
 end;
 
@@ -2328,6 +2959,314 @@ begin
 end;
 
 // -----------------------------------------------------------------------------
+// FIRE Packer v2.0 Decompressor
+// -----------------------------------------------------------------------------
+
+function DecompressFire(const InBuf: PByte; InSize: Integer; out OutBuf: TBytes): Boolean;
+var
+  PayloadStart, PayloadEnd: Integer;
+  UnpackedSize: LongWord;
+  InPos: Integer;
+  OutPos: Integer;
+  BitBuf: Byte;
+  Extend: Byte;
+  Off: Integer;
+  PLen, ULen: LongWord;
+
+  function GetBit: Byte; inline;
+  var
+    NewByte: Byte;
+  begin
+    Result := (BitBuf shr 7) and 1;
+    BitBuf := (BitBuf shl 1) and $FF;
+    Extend := Result;
+    if BitBuf = 0 then
+    begin
+      if InPos <= PayloadStart then
+        Exit(0);
+      Dec(InPos);
+      NewByte := InBuf[InPos];
+      Result := (NewByte shr 7) and 1;
+      BitBuf := ((NewByte shl 1) or Extend) and $FF;
+      Extend := Result;
+    end;
+  end;
+
+  function ReadBits(Count: Integer): LongWord;
+  var
+    I: Integer;
+  begin
+    Result := 0;
+    for I := 1 to Count do
+      Result := (Result shl 1) or GetBit;
+  end;
+
+  function ReadDistance: LongWord;
+  var
+    Idx: LongWord;
+  begin
+    Idx := ReadBits(2);
+    case Idx of
+      0: Result := ReadBits(4);
+      1: Result := ReadBits(8) + 16;
+      2: Result := ReadBits(12) + 272;
+    else
+      Result := ReadBits(16) + 4368;
+    end;
+  end;
+
+  function ReadOptDistance(out Dist: LongWord): Boolean;
+  var
+    Idx: LongWord;
+  begin
+    Idx := ReadBits(2);
+    if Idx = 0 then
+    begin
+      Dist := 0;
+      Exit(False);
+    end;
+    Dec(Idx);
+    case Idx of
+      0: Dist := ReadBits(4);
+      1: Dist := ReadBits(8) + 16;
+    else
+      Dist := ReadBits(12) + 272;
+    end;
+    Result := True;
+  end;
+
+  procedure CopyMatch(Len: Integer; Dist: LongWord);
+  var
+    Offset: LongWord;
+    K: Integer;
+  begin
+    Offset := Dist + LongWord(Len);
+    for K := 1 to Len do
+    begin
+      if (OutPos <= 0) or (OutPos + Integer(Offset) > Integer(UnpackedSize)) then
+        Exit;
+      Dec(OutPos);
+      OutBuf[OutPos] := OutBuf[OutPos + Offset];
+    end;
+  end;
+
+var
+  Bit1, Bit2, B1, B2: Byte;
+  LitCount, Val: LongWord;
+  I: Integer;
+  Mode, SubMode: LongWord;
+  Dist, LengthVal: LongWord;
+  HasDist: Boolean;
+  LastByte: Byte;
+  Shift: LongWord;
+  HeaderFound: Boolean;
+begin
+  Result := False;
+  SetLength(OutBuf, 0);
+  if (InBuf = nil) or (InSize < 16) then Exit;
+
+  HeaderFound := False;
+  PayloadStart := 0;
+  PayloadEnd := 0;
+  UnpackedSize := 0;
+
+  // 1. Direct 'FIRE' header at offset 0 (Raw data)
+  if (InBuf[0] = Byte('F')) and (InBuf[1] = Byte('I')) and 
+     (InBuf[2] = Byte('R')) and (InBuf[3] = Byte('E')) then
+  begin
+    PLen := ReadBE32(InBuf, 4);
+    ULen := ReadBE32(InBuf, 8);
+    if (PLen >= 12) and (ULen > 0) and (ULen <= 16 * 1024 * 1024) then
+    begin
+      PayloadStart := 12;
+      PayloadEnd := Min(Integer(PLen), InSize);
+      UnpackedSize := ULen;
+      HeaderFound := True;
+    end;
+  end;
+
+  // 2. Embedded 'FIRE' header (e.g. in Executables like Pack-Fire)
+  if not HeaderFound then
+  begin
+    for Off := 0 to Min(InSize - 16, 4096) do
+    begin
+      if (InBuf[Off] = Byte('F')) and (InBuf[Off + 1] = Byte('I')) and 
+         (InBuf[Off + 2] = Byte('R')) and (InBuf[Off + 3] = Byte('E')) then
+      begin
+        PLen := ReadBE32(InBuf, Off + 4);
+        ULen := ReadBE32(InBuf, Off + 8);
+        if (PLen >= 12) and (ULen > 0) and (ULen <= 16 * 1024 * 1024) and 
+           (Off + Integer(PLen) <= InSize + 16) then
+        begin
+          PayloadStart := Off + 12;
+          PayloadEnd := Min(Off + Integer(PLen), InSize);
+          UnpackedSize := ULen;
+          HeaderFound := True;
+          Break;
+        end;
+      end;
+    end;
+  end;
+
+  if not HeaderFound then Exit(False);
+
+  SetLength(OutBuf, UnpackedSize);
+  OutPos := UnpackedSize;
+  InPos := PayloadEnd;
+
+  // Initial bitstream priming (68k: move.b -(a5), d7)
+  Dec(InPos);
+  BitBuf := InBuf[InPos];
+  Extend := 0;
+
+  while OutPos > 0 do
+  begin
+    Bit1 := GetBit;
+    if Bit1 <> 0 then
+    begin
+      // Literals run
+      Bit2 := GetBit;
+      if Bit2 = 0 then
+        LitCount := 1
+      else
+      begin
+        Val := ReadBits(2);
+        if Val <> 3 then
+          LitCount := Val + 1 + 1
+        else
+        begin
+          Val := ReadBits(2);
+          if Val <> 3 then
+            LitCount := Val + 4 + 1
+          else
+          begin
+            Val := ReadBits(3);
+            if Val <> 7 then
+              LitCount := Val + 7 + 1
+            else
+            begin
+              Val := ReadBits(10);
+              LitCount := Val + 14 + 1;
+            end;
+          end;
+        end;
+      end;
+
+      for I := 1 to LitCount do
+      begin
+        if (InPos <= PayloadStart) or (OutPos <= 0) then
+          Exit(False);
+        Dec(InPos);
+        Dec(OutPos);
+        OutBuf[OutPos] := InBuf[InPos];
+      end;
+    end;
+
+    if OutPos <= 0 then Break;
+
+    Mode := ReadBits(2);
+    case Mode of
+      0:
+      begin
+        SubMode := ReadBits(2);
+        if SubMode = 0 then
+        begin
+          // RLE of last written byte
+          Dist := ReadDistance;
+          if Dist > 0 then
+          begin
+            if OutPos >= Integer(UnpackedSize) then Exit(False);
+            LastByte := OutBuf[OutPos];
+            for I := 0 to Dist do
+            begin
+              if OutPos <= 0 then Exit(False);
+              Dec(OutPos);
+              OutBuf[OutPos] := LastByte;
+            end;
+          end;
+        end
+        else
+        begin
+          case SubMode of
+            1: LengthVal := ReadBits(4) + 5;
+            2: LengthVal := ReadBits(6) + 21;
+          else
+            LengthVal := ReadBits(8) + 85;
+          end;
+          Dist := ReadDistance;
+          CopyMatch(LengthVal, Dist);
+        end;
+      end;
+
+      1:
+      begin
+        Dist := ReadBits(8);
+        CopyMatch(2, Dist);
+      end;
+
+      2:
+      begin
+        HasDist := ReadOptDistance(Dist);
+        if not HasDist then
+        begin
+          if OutPos <= 0 then Exit(False);
+          Dec(OutPos);
+          OutBuf[OutPos] := 0;
+        end
+        else
+          CopyMatch(3, Dist);
+      end;
+
+      3:
+      begin
+        B1 := GetBit;
+        if B1 = 0 then
+        begin
+          Shift := ReadBits(3);
+          if OutPos <= 0 then Exit(False);
+          Dec(OutPos);
+          OutBuf[OutPos] := Byte(1 shl Shift);
+        end
+        else
+        begin
+          B2 := GetBit;
+          if B2 = 0 then
+          begin
+            HasDist := ReadOptDistance(Dist);
+            if not HasDist then
+            begin
+              if OutPos >= Integer(UnpackedSize) then Exit(False);
+              LastByte := OutBuf[OutPos];
+              if OutPos <= 0 then Exit(False);
+              Dec(OutPos);
+              OutBuf[OutPos] := LastByte;
+            end
+            else
+              CopyMatch(4, Dist);
+          end
+          else
+          begin
+            HasDist := ReadOptDistance(Dist);
+            if not HasDist then
+            begin
+              if OutPos <= 0 then Exit(False);
+              Dec(OutPos);
+              OutBuf[OutPos] := $FF;
+            end
+            else
+              CopyMatch(5, Dist);
+          end;
+        end;
+      end;
+    end;
+  end;
+
+  Result := (OutPos = 0);
+end;
+
+// -----------------------------------------------------------------------------
+// Master Depacker Dispatcher
+// -----------------------------------------------------------------------------
 // Master Depacker Dispatcher
 // -----------------------------------------------------------------------------
 
@@ -2344,24 +3283,33 @@ begin
   if Pos('Pack-Ice', DetectedPacker) > 0 then
   begin
     if DecompressPackIce(InBuf, InSize, OutBuf) then Exit(True);
+    if DecompressJam(InBuf, InSize, OutBuf) then begin DetectedPacker := 'JAM Packer Executable'; Exit(True); end;
+    if DecompressJek(InBuf, InSize, OutBuf) then begin DetectedPacker := 'JEK Packer Executable'; Exit(True); end;
+    if DecompressAutomation(InBuf, InSize, OutBuf) then begin DetectedPacker := 'Automation Packer Executable'; Exit(True); end;
   end;
 
   // 2. Atomik Cruncher
   if Pos('Atomik', DetectedPacker) > 0 then
   begin
     if DecompressAtomik(InBuf, InSize, OutBuf) then Exit(True);
+    if DecompressThunderV2(InBuf, InSize, OutBuf) then begin DetectedPacker := 'Thunder V2 Executable'; Exit(True); end;
+    if DecompressThunderV1(InBuf, InSize, OutBuf) then begin DetectedPacker := 'Thunder V1 Executable'; Exit(True); end;
   end;
 
   // 3. Automation Packer
   if Pos('Automation', DetectedPacker) > 0 then
   begin
+    if DecompressJam(InBuf, InSize, OutBuf) then begin DetectedPacker := 'JAM Packer Executable'; Exit(True); end;
     if DecompressAutomation(InBuf, InSize, OutBuf) then Exit(True);
+    if DecompressPackIce(InBuf, InSize, OutBuf) then begin DetectedPacker := 'Pack-Ice Executable'; Exit(True); end;
   end;
 
   // 4. JAM Packer
   if Pos('JAM', DetectedPacker) > 0 then
   begin
     if DecompressJam(InBuf, InSize, OutBuf) then Exit(True);
+    if DecompressPackIce(InBuf, InSize, OutBuf) then begin DetectedPacker := 'Pack-Ice Executable'; Exit(True); end;
+    if DecompressAutomation(InBuf, InSize, OutBuf) then begin DetectedPacker := 'Automation Packer Executable'; Exit(True); end;
   end;
 
   // 5. Rob Northen Compression
@@ -2375,12 +3323,16 @@ begin
   begin
     if DecompressThunderV2(InBuf, InSize, OutBuf) then Exit(True);
     if DecompressThunderV1(InBuf, InSize, OutBuf) then Exit(True);
+    if DecompressAtomik(InBuf, InSize, OutBuf) then begin DetectedPacker := 'Atomik Cruncher Executable'; Exit(True); end;
   end;
 
   // 7. JEK Packer / Byte Killer
-  if (Pos('JEK', DetectedPacker) > 0) or (Pos('Bytekiller', DetectedPacker) > 0) then
+  if (Pos('JEK', DetectedPacker) > 0) or (Pos('Bytekiller', DetectedPacker) > 0) or (Pos('Byte Killer', DetectedPacker) > 0) then
   begin
+    if DecompressJam(InBuf, InSize, OutBuf) then begin DetectedPacker := 'JAM Packer Executable'; Exit(True); end;
     if DecompressJek(InBuf, InSize, OutBuf) then Exit(True);
+    if DecompressPackIce(InBuf, InSize, OutBuf) then begin DetectedPacker := 'Pack-Ice Executable'; Exit(True); end;
+    if DecompressAutomation(InBuf, InSize, OutBuf) then begin DetectedPacker := 'Automation Packer Executable'; Exit(True); end;
   end;
 
   // 8. Degas Elite RLE
@@ -2389,10 +3341,40 @@ begin
     if DecompressRLE(InBuf, InSize, OutBuf) then Exit(True);
   end;
 
-  // Generic fallback tries for files with generic executable or data flags
+  // 9. FIRE Packer
+  if (Pos('FIRE', UpperCase(DetectedPacker)) > 0) or (Pos('PACK-FIRE', UpperCase(DetectedPacker)) > 0) then
+  begin
+    if DecompressFire(InBuf, InSize, OutBuf) then Exit(True);
+  end;
+
+  // Generic fallback tries if specific packer failed or was unknown
   if DecompressPackIce(InBuf, InSize, OutBuf) then
   begin
     DetectedPacker := 'Pack-Ice (Auto-detected)';
+    Exit(True);
+  end;
+
+  if DecompressJam(InBuf, InSize, OutBuf) then
+  begin
+    DetectedPacker := 'JAM Packer (Auto-detected)';
+    Exit(True);
+  end;
+
+  if DecompressFire(InBuf, InSize, OutBuf) then
+  begin
+    DetectedPacker := 'FIRE Packer (Auto-detected)';
+    Exit(True);
+  end;
+
+  if DecompressJek(InBuf, InSize, OutBuf) then
+  begin
+    DetectedPacker := 'JEK Packer (Auto-detected)';
+    Exit(True);
+  end;
+
+  if DecompressAutomation(InBuf, InSize, OutBuf) then
+  begin
+    DetectedPacker := 'Automation Packer (Auto-detected)';
     Exit(True);
   end;
 
@@ -2408,12 +3390,9 @@ begin
     Exit(True);
   end;
 
-  if DecompressAutomation(InBuf, InSize, OutBuf) then
-  begin
-    DetectedPacker := 'Automation Packer (Auto-detected)';
-    Exit(True);
-  end;
+  SetLength(OutBuf, 0);
 end;
+
 
 function DepackStream(InStream: TStream; OutStream: TStream; out DetectedPacker: string): Boolean;
 var

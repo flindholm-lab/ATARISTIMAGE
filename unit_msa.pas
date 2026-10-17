@@ -21,6 +21,7 @@ type
 
 function SwapWordBE(AValue: Word): Word;
 function IsMSAFile(const AFileName: string): Boolean;
+function GetMSAInfo(const AMSAFileName: string; out ASectorsPerTrack, ASides, AStartTrack, AEndTrack: Integer): Boolean;
 function UnpackMSAToStream(const AMSAFileName: string; AOutStream: TStream): Boolean;
 function UnpackMSAToST(const AMSAFileName, ASTFileName: string): Boolean;
 function PackSTToMSA(const ASTFileName, AMSAFileName: string; ASectorsPerTrack: Integer = 9; ASides: Integer = 2): Boolean;
@@ -55,19 +56,57 @@ begin
   end;
 end;
 
+function GetMSAInfo(const AMSAFileName: string; out ASectorsPerTrack, ASides, AStartTrack, AEndTrack: Integer): Boolean;
+var
+  FS: TFileStream;
+  Hdr: TMSAHeader;
+begin
+  Result := False;
+  ASectorsPerTrack := 9;
+  ASides := 2;
+  AStartTrack := 0;
+  AEndTrack := 79;
+  if not FileExists(AMSAFileName) then Exit;
+  try
+    FS := TFileStream.Create(AMSAFileName, fmOpenRead or fmShareDenyNone);
+    try
+      if FS.Size >= 10 then
+      begin
+        FS.ReadBuffer(Hdr, SizeOf(Hdr));
+        if SwapWordBE(Hdr.ID) = MSA_MAGIC then
+        begin
+          ASectorsPerTrack := SwapWordBE(Hdr.SectorsPerTrack);
+          ASides := SwapWordBE(Hdr.Sides) + 1;
+          AStartTrack := SwapWordBE(Hdr.StartTrack);
+          AEndTrack := SwapWordBE(Hdr.EndTrack);
+          Result := True;
+        end;
+      end;
+    finally
+      FS.Free;
+    end;
+  except
+    Result := False;
+  end;
+end;
+
 function UnpackMSAToStream(const AMSAFileName: string; AOutStream: TStream): Boolean;
 var
   FS: TFileStream;
   Hdr: TMSAHeader;
   SecPerTrack, SidesCount, StartTrk, EndTrk: Integer;
   ExpectedTrackSize: Integer;
+  ExpectedTotalTracks, ExpectedTotalBytes: Int64;
   Trk, Side: Integer;
   TrackLenBE, TrackLen: Word;
   TrackData: array of Byte;
   TrackOut: array of Byte;
+  ZeroBuf: array of Byte;
   InPos, InEnd, OutPos: Integer;
   B, DataByte: Byte;
   Count: Word;
+  AvailBytes, BytesToRead, PadBytes: Int64;
+  AnyTrackWritten: Boolean;
 begin
   Result := False;
   if not FileExists(AMSAFileName) then Exit;
@@ -88,6 +127,7 @@ begin
     if (EndTrk < StartTrk) or (EndTrk > 90) then EndTrk := 79;
 
     ExpectedTrackSize := SecPerTrack * 512;
+    AnyTrackWritten := False;
 
     for Trk := StartTrk to EndTrk do
     begin
@@ -97,25 +137,34 @@ begin
         FS.ReadBuffer(TrackLenBE, 2);
         TrackLen := SwapWordBE(TrackLenBE);
 
+        AvailBytes := FS.Size - FS.Position;
+        if AvailBytes < 0 then AvailBytes := 0;
+
         if TrackLen = ExpectedTrackSize then
         begin
           // Uncompressed track
-          SetLength(TrackData, TrackLen);
-          FS.ReadBuffer(TrackData[0], TrackLen);
-          AOutStream.WriteBuffer(TrackData[0], TrackLen);
+          SetLength(TrackData, ExpectedTrackSize);
+          FillChar(TrackData[0], ExpectedTrackSize, 0);
+          BytesToRead := Min(Int64(ExpectedTrackSize), AvailBytes);
+          if BytesToRead > 0 then
+            FS.ReadBuffer(TrackData[0], BytesToRead);
+          AOutStream.WriteBuffer(TrackData[0], ExpectedTrackSize);
+          AnyTrackWritten := True;
         end
         else
         begin
           // RLE compressed track
+          BytesToRead := Min(Int64(TrackLen), AvailBytes);
           SetLength(TrackData, TrackLen);
-          if TrackLen > 0 then
-            FS.ReadBuffer(TrackData[0], TrackLen);
+          FillChar(TrackData[0], TrackLen, 0);
+          if BytesToRead > 0 then
+            FS.ReadBuffer(TrackData[0], BytesToRead);
 
           SetLength(TrackOut, ExpectedTrackSize);
           FillChar(TrackOut[0], ExpectedTrackSize, 0);
           OutPos := 0;
           InPos := 0;
-          InEnd := TrackLen;
+          InEnd := BytesToRead;
 
           while (InPos < InEnd) and (OutPos < ExpectedTrackSize) do
           begin
@@ -147,10 +196,27 @@ begin
           end;
 
           AOutStream.WriteBuffer(TrackOut[0], ExpectedTrackSize);
+          AnyTrackWritten := True;
         end;
       end;
+      if FS.Position >= FS.Size then Break;
     end;
-    Result := True;
+
+    // If archive ended early (e.g. truncated MSA image), pad remaining tracks up to expected disk geometry
+    ExpectedTotalTracks := (EndTrk - StartTrk + 1);
+    ExpectedTotalBytes := ExpectedTotalTracks * SidesCount * ExpectedTrackSize;
+    if (AOutStream.Size > 0) and (AOutStream.Size < ExpectedTotalBytes) then
+    begin
+      SetLength(ZeroBuf, ExpectedTrackSize);
+      FillChar(ZeroBuf[0], ExpectedTrackSize, 0);
+      while AOutStream.Size < ExpectedTotalBytes do
+      begin
+        PadBytes := Min(Int64(ExpectedTrackSize), ExpectedTotalBytes - AOutStream.Size);
+        AOutStream.WriteBuffer(ZeroBuf[0], PadBytes);
+      end;
+    end;
+
+    Result := AnyTrackWritten or (AOutStream.Size > 0);
   finally
     FS.Free;
   end;

@@ -1,0 +1,171 @@
+object FormVirusScanner: TFormVirusScanner
+  Left = 280
+  Height = 520
+  Top = 160
+  Width = 780
+  Caption = 'Atari ST Anti-Virus Scanner & Disinfection'
+  ClientHeight = 520
+  ClientWidth = 780
+  Color = clBtnFace
+  Font.Color = clWindowText
+  Font.Height = -11
+  Font.Name = 'Tahoma'
+  Position = poScreenCenter
+  OnCreate = FormCreate
+  object PanelTop: TPanel
+    Left = 0
+    Height = 84
+    Top = 0
+    Width = 780
+    Align = alTop
+    BevelOuter = bvNone
+    ClientHeight = 84
+    ClientWidth = 780
+    TabOrder = 0
+    object LabelTitle: TLabel
+      Left = 14
+      Height = 18
+      Top = 10
+      Width = 272
+      Caption = 'Atari ST Anti-Virus Protection & Guard'
+      Font.Height = -15
+      Font.Name = 'Tahoma'
+      Font.Style = [fsBold]
+      ParentFont = False
+    end
+    object LabelDiskPath: TLabel
+      Left = 14
+      Height = 13
+      Top = 34
+      Width = 109
+      Caption = 'Disk Image: [No Disk]'
+      ParentFont = False
+    end
+    object LabelBootStatus: TLabel
+      Left = 14
+      Height = 13
+      Top = 52
+      Width = 265
+      Caption = 'Boot Sector: Checksum $0000 (Non-executable / Clean)'
+      ParentFont = False
+    end
+    object LabelScanStatus: TLabel
+      Left = 450
+      Height = 16
+      Top = 12
+      Width = 316
+      Alignment = taRightJustify
+      Anchors = [akTop, akRight]
+      AutoSize = False
+      Caption = 'Ready to scan'
+      Font.Height = -12
+      Font.Name = 'Tahoma'
+      Font.Style = [fsBold]
+      ParentFont = False
+    end
+  end
+  object ListViewThreats: TListView
+    Left = 0
+    Height = 361
+    Top = 84
+    Width = 780
+    Align = alClient
+    Columns = <    
+      item
+        Caption = 'Target'
+        Width = 170
+      end    
+      item
+        Caption = 'Threat Name'
+        Width = 175
+      end    
+      item
+        Caption = 'Category'
+        Width = 105
+      end    
+      item
+        Caption = 'Action / Status'
+        Width = 110
+      end    
+      item
+        Caption = 'Description'
+        Width = 300
+      end>
+    GridLines = True
+    ReadOnly = True
+    RowSelect = True
+    TabOrder = 1
+    ViewStyle = vsReport
+    OnSelectItem = ListViewThreatsSelectItem
+  end
+  object PanelBottom: TPanel
+    Left = 0
+    Height = 75
+    Top = 445
+    Width = 780
+    Align = alBottom
+    BevelOuter = bvNone
+    ClientHeight = 75
+    ClientWidth = 780
+    TabOrder = 2
+    object ProgressBarScan: TProgressBar
+      Left = 14
+      Height = 16
+      Top = 10
+      Width = 752
+      Anchors = [akTop, akLeft, akRight]
+      TabOrder = 0
+    end
+    object ButtonScan: TButton
+      Left = 14
+      Height = 28
+      Top = 36
+      Width = 105
+      Caption = '&Scan Disk'
+      Default = True
+      TabOrder = 1
+      OnClick = ButtonScanClick
+    end
+    object ButtonDisinfectBoot: TButton
+      Left = 126
+      Height = 28
+      Top = 36
+      Width = 150
+      Caption = 'Disinfect &Boot Sector'
+      Enabled = False
+      TabOrder = 2
+      OnClick = ButtonDisinfectBootClick
+    end
+    object ButtonDisinfectAll: TButton
+      Left = 283
+      Height = 28
+      Top = 36
+      Width = 110
+      Caption = 'Disinfect &All'
+      Enabled = False
+      TabOrder = 3
+      OnClick = ButtonDisinfectAllClick
+    end
+    object ButtonInspectHex: TButton
+      Left = 400
+      Height = 28
+      Top = 36
+      Width = 135
+      Caption = '&Inspect in Hex...'
+      Enabled = False
+      TabOrder = 4
+      OnClick = ButtonInspectHexClick
+    end
+    object ButtonClose: TButton
+      Left = 676
+      Height = 28
+      Top = 36
+      Width = 90
+      Anchors = [akTop, akRight]
+      Cancel = True
+      Caption = '&Close'
+      TabOrder = 5
+      OnClick = ButtonCloseClick
+    end
+  end
+end
