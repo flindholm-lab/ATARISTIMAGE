@@ -31,6 +31,32 @@ type
   { TForm1 }
   TForm1 = class(TForm)
     // UI Components
+    PanelQuickToolbar: TPanel;
+    ButtonToolOpen: TButton;
+    ButtonToolNew: TButton;
+    ButtonToolWrite: TButton;
+    BevelSep1: TBevel;
+    ButtonToolAddFile: TButton;
+    ButtonToolAddFolder: TButton;
+    ButtonToolCreateDir: TButton;
+    ButtonToolExtract: TButton;
+    BevelSep2: TBevel;
+    ButtonToolView: TButton;
+    ButtonToolClusterMap: TButton;
+    ButtonToolVirusScan: TButton;
+
+    PanelHeader: TPanel;
+    ButtonNavUp: TButton;
+    ButtonNavRoot: TButton;
+    PanelPathBox: TPanel;
+    LabelCurrentPath: TLabel;
+    LabelVolume: TLabel;
+    ButtonSetLabel: TButton;
+    LabelFreeSpace: TLabel;
+    ProgressBarFreeSpace: TProgressBar;
+
+    StatusBar1: TStatusBar;
+
     PanelToolbar: TPanel;
     ButtonExit: TButton;
     ButtonRemoveDir: TButton;
@@ -47,14 +73,9 @@ type
     ButtonViewFile: TButton;
     ButtonVirusScan: TButton;
     ButtonBack: TButton;
-    ButtonSetLabel: TButton;
-    Label1: TLabel;
-    LabelVolume: TLabel;
-    LabelFreeSpace: TLabel;
-    LabelCurrentPath: TLabel;
+
     ListViewFiles: TListView;
     OpenDialog: TOpenDialog;
-    ProgressBarFreeSpace: TProgressBar;
     SaveDialog: TSaveDialog;
     SelectDirectoryDialog: TSelectDirectoryDialog;
     MainMenu1: TMainMenu;
@@ -81,13 +102,14 @@ type
     MenuItemSepEdit2: TMenuItem;
     MenuItemSetLabel: TMenuItem;
     MenuItemView: TMenuItem;
-    MenuItemViewFile: TMenuItem;
+    MenuItemQuickToolbar: TMenuItem;
+    MenuItemButtonToolbar: TMenuItem;
     MenuItemSepView1: TMenuItem;
+    MenuItemViewFile: TMenuItem;
+    MenuItemSepView2: TMenuItem;
     MenuItemBrowseArchive: TMenuItem;
     MenuItemCloseArchive: TMenuItem;
     MenuItemBack: TMenuItem;
-    MenuItemSepView2: TMenuItem;
-    MenuItemButtonToolbar: TMenuItem;
     MenuItemTools: TMenuItem;
     MenuItemClusterMap: TMenuItem;
     MenuItemSepTools: TMenuItem;
@@ -118,12 +140,14 @@ type
     procedure FormCreate(Sender: TObject);
     procedure FormDestroy(Sender: TObject);
     procedure ButtonBackClick(Sender: TObject);
+    procedure ButtonNavRootClick(Sender: TObject);
     procedure ListViewFilesClick(Sender: TObject);
     procedure ListViewFilesDblClick(Sender: TObject);
     procedure ListViewFilesSelectItem(Sender: TObject; Item: TListItem; Selected: Boolean);
     procedure ListViewFilesMouseDown(Sender: TObject; Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
     procedure ListViewFilesMouseMove(Sender: TObject; Shift: TShiftState; X, Y: Integer);
     procedure ListViewFilesKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
+    procedure ListViewFilesColumnClick(Sender: TObject; Column: TListColumn);
     procedure ListViewFilesCustomDrawItem(Sender: TCustomListView; Item: TListItem; State: TCustomDrawState; var DefaultDraw: Boolean);
     procedure ListViewFilesCustomDrawSubItem(Sender: TCustomListView; Item: TListItem; SubItem: Integer; State: TCustomDrawState; var DefaultDraw: Boolean);
     procedure FormKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
@@ -143,6 +167,7 @@ type
     procedure MenuItemPopupDeleteClick(Sender: TObject);
     procedure MenuItemCloseImageClick(Sender: TObject);
     procedure MenuItemCloseArchiveClick(Sender: TObject);
+    procedure MenuItemQuickToolbarClick(Sender: TObject);
     procedure MenuItemButtonToolbarClick(Sender: TObject);
     procedure MenuItemAboutClick(Sender: TObject);
     procedure FormResize(Sender: TObject);
@@ -150,8 +175,16 @@ type
   public
     procedure SetButtonToolbarVisible(AVisible: Boolean);
     procedure UpdateLayout;
+    procedure UpdateStatusBar;
+    procedure SortDiskItems;
+    procedure RefreshListViewFromDiskItems;
+    procedure PopulateFileIcons(AImageList: TImageList);
+    function GetFileIconIndex(const AFileName: string; IsDir: Boolean): Integer;
 
   private
+    FSortColumn: Integer;             // Current sort column index (0..5)
+    FSortAscending: Boolean;          // True = ascending, False = descending
+    ImageListFiles: TImageList;       // 16x16 file type icons
     // Lists for tracking files, directories, and pending operations
     FFilePaths: TStringList;          // Files to be added to the image (host paths)
     FFileDestDirs: TStringList;       // Target directory inside the image for each file in FFilePaths
@@ -442,6 +475,7 @@ var
 begin
   Item := ListViewFiles.Items.Add;
   Item.Caption := AInfo.CleanName;
+  Item.ImageIndex := GetFileIconIndex(AInfo.CleanName, AInfo.IsDir);
   Item.SubItems.Add(AInfo.SizeStr);
   Item.SubItems.Add(AInfo.ClusterStr);
   Item.SubItems.Add(AInfo.DateTimeStr);
@@ -1785,6 +1819,7 @@ end;
 procedure TForm1.ListViewFilesSelectItem(Sender: TObject; Item: TListItem; Selected: Boolean);
 begin
   UpdateDeleteButtonState;
+  UpdateStatusBar;
 end;
 
 {------------------------------------------------------------------
@@ -1870,6 +1905,16 @@ begin
   Menu := MainMenu1;
   UpdateDeleteButtonState;
   SetButtonToolbarVisible(False);
+
+  // Initialize sorting and file type icons
+  FSortColumn := 0;
+  FSortAscending := True;
+  ImageListFiles := TImageList.Create(Self);
+  PopulateFileIcons(ImageListFiles);
+  ListViewFiles.SmallImages := ImageListFiles;
+  ListViewFiles.AutoWidthLastColumn := True;
+  UpdateLayout;
+  UpdateStatusBar;
 end;
 
 {------------------------------------------------------------------
@@ -1883,6 +1928,7 @@ begin
   DragAcceptFiles(Handle, True);
   DragAcceptFiles(ListViewFiles.Handle, True);
   {$ENDIF}
+  UpdateLayout;
   if (ParamCount >= 1) and FileExists(ParamStr(1)) and (FImagePath = '') then
     LoadDiskImage(ParamStr(1));
 end;
@@ -2090,7 +2136,6 @@ begin
     Info.StatusStr := 'Parent';
     SetLength(FDiskItems, Length(FDiskItems) + 1);
     FDiskItems[High(FDiskItems)] := Info;
-    AddDiskItemToListView(Info);
 
     // 2. Query children from vault
     MaxItems := FArchiveVault.ItemCount * 2 + 32;
@@ -2124,11 +2169,13 @@ begin
 
       SetLength(FDiskItems, Length(FDiskItems) + 1);
       FDiskItems[High(FDiskItems)] := Info;
-      AddDiskItemToListView(Info);
     end;
   finally
     ListViewFiles.Items.EndUpdate;
   end;
+
+  SortDiskItems;
+  RefreshListViewFromDiskItems;
 
   if FArchiveInnerPath = '' then
     LabelCurrentPath.Caption := 'Archive: ' + FArchiveSourceFileName + ' [Root]'
@@ -2296,7 +2343,6 @@ begin
       Info.StatusStr := 'Parent';
       SetLength(FDiskItems, Length(FDiskItems) + 1);
       FDiskItems[High(FDiskItems)] := Info;
-      AddDiskItemToListView(Info);
     end;
 
     // 2. Entries on disk (from FDiskItemsRaw)
@@ -2333,7 +2379,6 @@ begin
       end;
       SetLength(FDiskItems, Length(FDiskItems) + 1);
       FDiskItems[High(FDiskItems)] := Info;
-      AddDiskItemToListView(Info);
     end;
 
     // 3. Staged directory additions (*A*)
@@ -2353,7 +2398,6 @@ begin
         Info.StatusStr := 'Staged [A]';
         SetLength(FDiskItems, Length(FDiskItems) + 1);
         FDiskItems[High(FDiskItems)] := Info;
-        AddDiskItemToListView(Info);
       end;
     end;
 
@@ -2385,12 +2429,14 @@ begin
         Info.StatusStr := 'Staged [A]';
         SetLength(FDiskItems, Length(FDiskItems) + 1);
         FDiskItems[High(FDiskItems)] := Info;
-        AddDiskItemToListView(Info);
       end;
     end;
   finally
     ListViewFiles.Items.EndUpdate;
   end;
+
+  SortDiskItems;
+  RefreshListViewFromDiskItems;
 
   // Update current path and volume label
   LabelCurrentPath.Caption := 'Current Path: ' + FCurrentPath;
@@ -3220,6 +3266,7 @@ var
   ImageFile: TFileStream;
   FreeClusters: Word;
   UtilizedPercent: Double;
+  FreeBytes, TotalBytes: Int64;
 begin
   if FImagePath = '' then Exit;
 
@@ -3235,17 +3282,24 @@ begin
       if UtilizedPercent < 0 then UtilizedPercent := 0;
       if UtilizedPercent > 100 then UtilizedPercent := 100;
       ProgressBarFreeSpace.Position := Round(UtilizedPercent);
-      LabelFreeSpace.Caption := Format('Utilized space: %.1f%% (%d/%d clusters)',
-        [UtilizedPercent, FTotalClusters - FreeClusters, FTotalClusters]);
+      LabelFreeSpace.Caption := Format('%.0f%%', [UtilizedPercent]);
+
+      FreeBytes := Int64(FreeClusters) * FBytesPerCluster;
+      TotalBytes := Int64(FTotalClusters) * FBytesPerCluster;
+      if (StatusBar1 <> nil) and (StatusBar1.Panels.Count >= 4) then
+        StatusBar1.Panels[2].Text := 'Free: ' + FormatSizeStr(FreeBytes, False) + ' / ' + FormatSizeStr(TotalBytes, False);
     end
     else
     begin
       ProgressBarFreeSpace.Position := 0;
-      LabelFreeSpace.Caption := 'Utilized space: 0%';
+      LabelFreeSpace.Caption := '0%';
+      if (StatusBar1 <> nil) and (StatusBar1.Panels.Count >= 4) then
+        StatusBar1.Panels[2].Text := 'Free: 0 B';
     end;
   finally
     ImageFile.Free;
   end;
+  UpdateStatusBar;
 end;
 
 
@@ -5241,41 +5295,33 @@ end;
  ------------------------------------------------------------------}
 procedure TForm1.UpdateLayout;
 var
-  TargetBottom: Integer;
-  ColWidth: Integer;
+  FixedWidth, Remainder: Integer;
 begin
-  if (PanelToolbar = nil) or (ListViewFiles = nil) then Exit;
+  if ListViewFiles = nil then Exit;
 
-  // Align free space indicators to the right edge with 16px margin
-  if ProgressBarFreeSpace <> nil then
-    ProgressBarFreeSpace.Left := ClientWidth - 16 - ProgressBarFreeSpace.Width;
-  if LabelFreeSpace <> nil then
-    LabelFreeSpace.Left := ClientWidth - 16 - LabelFreeSpace.Width;
-
-  // Position bottom toolbar when visible
-  if PanelToolbar.Visible then
-  begin
-    PanelToolbar.Top := ClientHeight - PanelToolbar.Height - 7;
-    PanelToolbar.Left := 0;
-    PanelToolbar.Width := ClientWidth;
-    TargetBottom := PanelToolbar.Top - 8;
-  end
-  else
-  begin
-    TargetBottom := ClientHeight - 12;
-  end;
-
-  // Stretch ListViewFiles to fill width and available height
-  ListViewFiles.SetBounds(16, 51, ClientWidth - 32, Max(100, TargetBottom - 51));
-
-  // Dynamically auto-expand the Name column so items fill the list view
+  // Auto-expand columns to completely fill ListViewFiles without any blank space right of Status
   if ListViewFiles.Columns.Count >= 6 then
   begin
-    ColWidth := ListViewFiles.ClientWidth - (80 + 55 + 110 + 50 + 75 + 28);
-    if ColWidth < 145 then
-      ColWidth := 145;
-    ListViewFiles.Columns[0].Width := ColWidth;
+    // Sum of standard fixed columns: Size (80) + Cluster (55) + Date/Time (110) + Attr (50) = 295
+    FixedWidth := ListViewFiles.Columns[1].Width +
+                  ListViewFiles.Columns[2].Width +
+                  ListViewFiles.Columns[3].Width +
+                  ListViewFiles.Columns[4].Width;
+
+    Remainder := ListViewFiles.ClientWidth - FixedWidth;
+    if Remainder < 265 then
+    begin
+      ListViewFiles.Columns[0].Width := 180;
+      ListViewFiles.Columns[5].Width := 85;
+    end
+    else
+    begin
+      ListViewFiles.Columns[5].Width := 85;
+      ListViewFiles.Columns[0].Width := Remainder - 85;
+    end;
   end;
+
+  UpdateStatusBar;
 end;
 
 {------------------------------------------------------------------
@@ -5344,6 +5390,485 @@ begin
     '  * Cluster Map & Low-Level Sector Hex Inspector' + LineEnding +
     '  * Integrated Atari ST Boot-Sector & File Virus Scanner',
     mtInformation, [mbOK], 0);
+end;
+
+{------------------------------------------------------------------
+  Procedure: ButtonNavRootClick
+  Purpose:  Jumps directly to the disk root or exits archive vault
+ ------------------------------------------------------------------}
+procedure TForm1.ButtonNavRootClick(Sender: TObject);
+begin
+  if FInArchiveMode then
+  begin
+    CloseArchiveMode;
+    Exit;
+  end;
+
+  if FCurrentPath <> '' then
+  begin
+    FCurrentPath := '';
+    if (FImagePath <> '') and FileExists(FImagePath) then
+      ReadSTImage(FImagePath, FCurrentPath)
+    else
+      FDisplayItems.Clear;
+    UpdateFileListDisplay;
+  end;
+end;
+
+{------------------------------------------------------------------
+  Procedure: MenuItemQuickToolbarClick
+  Purpose:  Toggles visibility of the top Quick Action Toolbar
+ ------------------------------------------------------------------}
+procedure TForm1.MenuItemQuickToolbarClick(Sender: TObject);
+begin
+  PanelQuickToolbar.Visible := MenuItemQuickToolbar.Checked;
+  UpdateLayout;
+end;
+
+{------------------------------------------------------------------
+  Procedure: ListViewFilesColumnClick
+  Purpose:  Sorts the file list ascending/descending by clicked column
+ ------------------------------------------------------------------}
+procedure TForm1.ListViewFilesColumnClick(Sender: TObject; Column: TListColumn);
+begin
+  if Column = nil then Exit;
+  if FSortColumn = Column.Index then
+    FSortAscending := not FSortAscending
+  else
+  begin
+    FSortColumn := Column.Index;
+    FSortAscending := True;
+  end;
+  SortDiskItems;
+  RefreshListViewFromDiskItems;
+end;
+
+{------------------------------------------------------------------
+  Procedure: SortDiskItems
+  Purpose:  Sorts the in-memory FDiskItems list by FSortColumn
+            keeping the parent directory link '..' at index 0
+ ------------------------------------------------------------------}
+procedure TForm1.SortDiskItems;
+const
+  BaseCaptions: array[0..5] of string = ('Name', 'Size', 'Cluster', 'Date / Time', 'Attr', 'Status');
+var
+  C, StartIdx, I, J: Integer;
+  Temp: TDiskItemInfo;
+
+  function CompareItems(const A, B: TDiskItemInfo): Integer;
+  begin
+    // Directories always sort before files
+    if A.IsDir and not B.IsDir then
+      Exit(-1);
+    if not A.IsDir and B.IsDir then
+      Exit(1);
+
+    case FSortColumn of
+      0: Result := CompareText(A.CleanName, B.CleanName);
+      1:
+        begin
+          if A.Size < B.Size then Result := -1
+          else if A.Size > B.Size then Result := 1
+          else Result := CompareText(A.CleanName, B.CleanName);
+        end;
+      2:
+        begin
+          if A.StartCluster < B.StartCluster then Result := -1
+          else if A.StartCluster > B.StartCluster then Result := 1
+          else Result := CompareText(A.CleanName, B.CleanName);
+        end;
+      3:
+        begin
+          Result := CompareText(A.DateTimeStr, B.DateTimeStr);
+          if Result = 0 then
+            Result := CompareText(A.CleanName, B.CleanName);
+        end;
+      4:
+        begin
+          Result := CompareText(A.AttrStr, B.AttrStr);
+          if Result = 0 then
+            Result := CompareText(A.CleanName, B.CleanName);
+        end;
+      5:
+        begin
+          Result := CompareText(A.StatusStr, B.StatusStr);
+          if Result = 0 then
+            Result := CompareText(A.CleanName, B.CleanName);
+        end;
+    else
+      Result := CompareText(A.CleanName, B.CleanName);
+    end;
+
+    if not FSortAscending then
+      Result := -Result;
+  end;
+
+begin
+  // Update column header indicator glyphs
+  if ListViewFiles <> nil then
+  begin
+    for C := 0 to Min(5, ListViewFiles.Columns.Count - 1) do
+    begin
+      if C = FSortColumn then
+      begin
+        if FSortAscending then
+          ListViewFiles.Columns[C].Caption := BaseCaptions[C] + ' ▲'
+        else
+          ListViewFiles.Columns[C].Caption := BaseCaptions[C] + ' ▼';
+      end
+      else
+        ListViewFiles.Columns[C].Caption := BaseCaptions[C];
+    end;
+  end;
+
+  if Length(FDiskItems) <= 1 then Exit;
+
+  // Keep parent directory link '..' pinned at index 0
+  StartIdx := 0;
+  if (FDiskItems[0].CleanName = '..') or (FDiskItems[0].DisplayName = '..') then
+    StartIdx := 1;
+
+  if StartIdx >= High(FDiskItems) then Exit;
+
+  // Stable insertion sort
+  for I := StartIdx + 1 to High(FDiskItems) do
+  begin
+    Temp := FDiskItems[I];
+    J := I - 1;
+    while (J >= StartIdx) and (CompareItems(FDiskItems[J], Temp) > 0) do
+    begin
+      FDiskItems[J + 1] := FDiskItems[J];
+      Dec(J);
+    end;
+    FDiskItems[J + 1] := Temp;
+  end;
+end;
+
+{------------------------------------------------------------------
+  Procedure: RefreshListViewFromDiskItems
+  Purpose:  Populates ListViewFiles from the sorted FDiskItems array
+ ------------------------------------------------------------------}
+procedure TForm1.RefreshListViewFromDiskItems;
+var
+  I: Integer;
+begin
+  if ListViewFiles = nil then Exit;
+  ListViewFiles.Items.BeginUpdate;
+  try
+    ListViewFiles.Items.Clear;
+    for I := 0 to High(FDiskItems) do
+      AddDiskItemToListView(FDiskItems[I]);
+  finally
+    ListViewFiles.Items.EndUpdate;
+  end;
+  UpdateLayout;
+end;
+
+{------------------------------------------------------------------
+  Procedure: PopulateFileIcons
+  Purpose:  Generates sharp 16x16 pixel-art icons for file types:
+            0: Folder, 1: ST Executable, 2: Archive, 3: Graphic/Pic,
+            4: Audio, 5: Doc/Text, 6: Disk Image, 7: Generic File
+ ------------------------------------------------------------------}
+procedure TForm1.PopulateFileIcons(AImageList: TImageList);
+var
+  Bmp: TBitmap;
+
+  procedure InitBmp;
+  begin
+    Bmp.Canvas.Brush.Color := clFuchsia;
+    Bmp.Canvas.FillRect(0, 0, 16, 16);
+  end;
+
+  procedure AddBmp;
+  begin
+    AImageList.AddMasked(Bmp, clFuchsia);
+  end;
+
+begin
+  if AImageList = nil then Exit;
+  AImageList.Clear;
+  AImageList.Width := 16;
+  AImageList.Height := 16;
+
+  Bmp := TBitmap.Create;
+  try
+    Bmp.SetSize(16, 16);
+
+    // 0: Folder (Manila yellow folder with tab)
+    InitBmp;
+    Bmp.Canvas.Pen.Color := $002070A0;
+    Bmp.Canvas.Brush.Color := $003090D0;
+    Bmp.Canvas.Rectangle(2, 3, 8, 6);
+    Bmp.Canvas.Brush.Color := $0040B8F8;
+    Bmp.Canvas.Rectangle(2, 5, 14, 14);
+    Bmp.Canvas.Pen.Color := $0070D0FF;
+    Bmp.Canvas.Line(3, 6, 13, 6);
+    AddBmp;
+
+    // 1: ST Executable (PRG/TOS/TTP - retro window with GEM header and play symbol)
+    InitBmp;
+    Bmp.Canvas.Pen.Color := $00404040;
+    Bmp.Canvas.Brush.Color := clWhite;
+    Bmp.Canvas.Rectangle(2, 2, 14, 14);
+    Bmp.Canvas.Pen.Color := $00904000;
+    Bmp.Canvas.Brush.Color := $00C06000;
+    Bmp.Canvas.Rectangle(3, 3, 13, 6);
+    Bmp.Canvas.Pen.Color := $00209020;
+    Bmp.Canvas.Brush.Color := $0030D030;
+    Bmp.Canvas.Polygon([Point(5, 7), Point(5, 12), Point(11, 9)]);
+    AddBmp;
+
+    // 2: Archive (ZIP/LZH/ARC/MSA - cardboard package with vertical strap)
+    InitBmp;
+    Bmp.Canvas.Pen.Color := $00205070;
+    Bmp.Canvas.Brush.Color := $004080A8;
+    Bmp.Canvas.Rectangle(2, 3, 14, 14);
+    Bmp.Canvas.Pen.Color := $001080D0;
+    Bmp.Canvas.Brush.Color := $0020A0F0;
+    Bmp.Canvas.Rectangle(7, 3, 9, 14);
+    Bmp.Canvas.Pen.Color := $00205070;
+    Bmp.Canvas.Line(2, 8, 13, 8);
+    AddBmp;
+
+    // 3: Picture / Graphic (PI1/NEO/PC1 - photo frame with sun & mountain)
+    InitBmp;
+    Bmp.Canvas.Pen.Color := $00606060;
+    Bmp.Canvas.Brush.Color := clWhite;
+    Bmp.Canvas.Rectangle(2, 2, 14, 14);
+    Bmp.Canvas.Pen.Color := $00D09030;
+    Bmp.Canvas.Brush.Color := $00F0C060;
+    Bmp.Canvas.Rectangle(3, 3, 13, 9);
+    Bmp.Canvas.Pen.Color := $0000B0E0;
+    Bmp.Canvas.Brush.Color := $0000D0FF;
+    Bmp.Canvas.Ellipse(10, 4, 12, 6);
+    Bmp.Canvas.Pen.Color := $00308020;
+    Bmp.Canvas.Brush.Color := $0040B030;
+    Bmp.Canvas.Polygon([Point(3, 13), Point(7, 8), Point(10, 11), Point(13, 13)]);
+    AddBmp;
+
+    // 4: Audio / Sound (MOD/SND/YM - musical notes)
+    InitBmp;
+    Bmp.Canvas.Pen.Color := $00802080;
+    Bmp.Canvas.Brush.Color := $00A02090;
+    Bmp.Canvas.Ellipse(3, 10, 7, 13);
+    Bmp.Canvas.Line(6, 4, 6, 11);
+    Bmp.Canvas.Ellipse(9, 8, 13, 11);
+    Bmp.Canvas.Line(12, 3, 12, 9);
+    Bmp.Canvas.Pen.Width := 2;
+    Bmp.Canvas.Line(6, 4, 12, 3);
+    Bmp.Canvas.Pen.Width := 1;
+    AddBmp;
+
+    // 5: Document / Text (TXT/DOC/1ST - page sheet with folded corner and lines)
+    InitBmp;
+    Bmp.Canvas.Pen.Color := $00808080;
+    Bmp.Canvas.Brush.Color := clWhite;
+    Bmp.Canvas.Rectangle(3, 2, 13, 14);
+    Bmp.Canvas.Pen.Color := $00A0A0A0;
+    Bmp.Canvas.Brush.Color := $00E0E0E0;
+    Bmp.Canvas.Polygon([Point(10, 2), Point(13, 5), Point(10, 5)]);
+    Bmp.Canvas.Pen.Color := $00606060;
+    Bmp.Canvas.Line(5, 6, 11, 6);
+    Bmp.Canvas.Line(5, 8, 11, 8);
+    Bmp.Canvas.Line(5, 10, 9, 10);
+    AddBmp;
+
+    // 6: Disk Image (ST/MSA/DIM - Atari 3.5" floppy disk)
+    InitBmp;
+    Bmp.Canvas.Pen.Color := $00803010;
+    Bmp.Canvas.Brush.Color := $00B04018;
+    Bmp.Canvas.Rectangle(2, 2, 14, 14);
+    Bmp.Canvas.Pen.Color := $00808080;
+    Bmp.Canvas.Brush.Color := $00D0D0D0;
+    Bmp.Canvas.Rectangle(5, 2, 11, 7);
+    Bmp.Canvas.Pen.Color := $00B0B0B0;
+    Bmp.Canvas.Brush.Color := clWhite;
+    Bmp.Canvas.Rectangle(4, 8, 12, 13);
+    AddBmp;
+
+    // 7: Generic File (clean document sheet)
+    InitBmp;
+    Bmp.Canvas.Pen.Color := $00707070;
+    Bmp.Canvas.Brush.Color := clWhite;
+    Bmp.Canvas.Rectangle(3, 2, 13, 14);
+    Bmp.Canvas.Pen.Color := $00B0B0B0;
+    Bmp.Canvas.Line(5, 6, 11, 6);
+    Bmp.Canvas.Line(5, 9, 11, 9);
+    AddBmp;
+
+  finally
+    Bmp.Free;
+  end;
+end;
+
+{------------------------------------------------------------------
+  Function: GetFileIconIndex
+  Purpose:  Returns ImageList index (0..7) based on file type / extension
+ ------------------------------------------------------------------}
+function TForm1.GetFileIconIndex(const AFileName: string; IsDir: Boolean): Integer;
+var
+  Ext: string;
+begin
+  if IsDir or (AFileName = '..') or (AFileName = '..\') or AFileName.EndsWith('\') then
+    Exit(0);
+
+  Ext := UpperCase(ExtractFileExt(CleanFileName(AFileName)));
+
+  // 1: ST Executables & Libraries (PRG, TOS, TTP, APP, GTP, ACC, CPX, OVL, SLB, DRV, SYS)
+  if (Ext = '.PRG') or (Ext = '.TOS') or (Ext = '.TTP') or (Ext = '.APP') or
+     (Ext = '.GTP') or (Ext = '.ACC') or (Ext = '.CPX') or (Ext = '.OVL') or
+     (Ext = '.SLB') or (Ext = '.DRV') or (Ext = '.SYS') then
+    Exit(1);
+
+  // 2: Archives (ZIP, LZH, LHA, ARC, ZOO, ARJ, TAR, GZ, TGZ, 7Z, PAK, CHZ, CAB, RAR, SIT, BZ2, XZ)
+  if (Ext = '.ZIP') or (Ext = '.LZH') or (Ext = '.LHA') or (Ext = '.ARC') or
+     (Ext = '.ZOO') or (Ext = '.ARJ') or (Ext = '.TAR') or (Ext = '.GZ') or
+     (Ext = '.TGZ') or (Ext = '.7Z') or (Ext = '.PAK') or (Ext = '.CHZ') or
+     (Ext = '.CAB') or (Ext = '.RAR') or (Ext = '.SIT') or (Ext = '.BZ2') or
+     (Ext = '.XZ') then
+    Exit(2);
+
+  // 3: Graphics & Pictures (PI1-3, PC1-3, NEO, SPU, SPC, SPS, ART, DOO, PBX, PAC, TN1-3, TNY, IMG, IFF, ILBM, LBM, BMP, GIF, DEG, MUR, ANM, GPH, ICN, JPG, JPEG, PNG, TGA, TIF, TIFF)
+  if (Ext = '.PI1') or (Ext = '.PI2') or (Ext = '.PI3') or
+     (Ext = '.PC1') or (Ext = '.PC2') or (Ext = '.PC3') or
+     (Ext = '.NEO') or (Ext = '.SPU') or (Ext = '.SPC') or (Ext = '.SPS') or
+     (Ext = '.ART') or (Ext = '.DOO') or (Ext = '.PBX') or (Ext = '.PAC') or
+     (Ext = '.TN1') or (Ext = '.TN2') or (Ext = '.TN3') or (Ext = '.TNY') or
+     (Ext = '.IMG') or (Ext = '.IFF') or (Ext = '.ILBM') or (Ext = '.LBM') or
+     (Ext = '.BMP') or (Ext = '.GIF') or (Ext = '.DEG') or (Ext = '.MUR') or
+     (Ext = '.ANM') or (Ext = '.GPH') or (Ext = '.ICN') or (Ext = '.JPG') or
+     (Ext = '.JPEG') or (Ext = '.PNG') or (Ext = '.TGA') or (Ext = '.TIF') or
+     (Ext = '.TIFF') then
+    Exit(3);
+
+  // 4: Audio & Tracker Music (MOD, SND, YM, MID, MIDI, WAV, SMP, THK, SID, DUD, SNG, AVR, AIF, AIFF, MP3, OGG, FLAC, XM, IT, S3M, MED, OKT, HIP, HIPC, AON, MUS)
+  if (Ext = '.MOD') or (Ext = '.SND') or (Ext = '.YM') or (Ext = '.MID') or
+     (Ext = '.MIDI') or (Ext = '.WAV') or (Ext = '.SMP') or (Ext = '.THK') or
+     (Ext = '.SID') or (Ext = '.DUD') or (Ext = '.SNG') or (Ext = '.AVR') or
+     (Ext = '.AIF') or (Ext = '.AIFF') or (Ext = '.MP3') or (Ext = '.OGG') or
+     (Ext = '.FLAC') or (Ext = '.XM') or (Ext = '.IT') or (Ext = '.S3M') or
+     (Ext = '.MED') or (Ext = '.OKT') or (Ext = '.HIP') or (Ext = '.HIPC') or
+     (Ext = '.AON') or (Ext = '.MUS') then
+    Exit(4);
+
+  // 5: Documents, Source Code & Config (TXT, DOC, 1ST, ME, INF, CFG, INI, ASC, BAT, BAS, GFA, C, CPP, CC, H, PAS, INC, S, ASM, DIZ, NFO, MD, README, HLP, MAN, LOG, TEX, RTF, HTM, HTML, XML, JSON, PRJ)
+  if (Ext = '.TXT') or (Ext = '.DOC') or (Ext = '.1ST') or (Ext = '.ME') or
+     (Ext = '.INF') or (Ext = '.CFG') or (Ext = '.INI') or (Ext = '.ASC') or
+     (Ext = '.BAT') or (Ext = '.BAS') or (Ext = '.GFA') or (Ext = '.C') or
+     (Ext = '.CPP') or (Ext = '.CC') or (Ext = '.H') or (Ext = '.PAS') or
+     (Ext = '.INC') or (Ext = '.S') or (Ext = '.ASM') or (Ext = '.DIZ') or
+     (Ext = '.NFO') or (Ext = '.MD') or (Ext = '.README') or (Ext = '.HLP') or
+     (Ext = '.MAN') or (Ext = '.LOG') or (Ext = '.TEX') or (Ext = '.RTF') or
+     (Ext = '.HTM') or (Ext = '.HTML') or (Ext = '.XML') or (Ext = '.JSON') or
+     (Ext = '.PRJ') then
+    Exit(5);
+
+  // 6: Disk Images & Cartridge Dumps (ST, MSA, DIM, STX, DSK, IPF, CTR, RAW)
+  if (Ext = '.ST') or (Ext = '.MSA') or (Ext = '.DIM') or (Ext = '.STX') or
+     (Ext = '.DSK') or (Ext = '.IPF') or (Ext = '.CTR') or (Ext = '.RAW') then
+    Exit(6);
+
+  // 7: Generic File
+  Result := 7;
+end;
+
+{------------------------------------------------------------------
+  Procedure: UpdateStatusBar
+  Purpose:  Populates the 4 panels of StatusBar1:
+            Panel 0: Format / Geometry
+            Panel 1: File/Directory counts & selection
+            Panel 2: Free capacity / Used
+            Panel 3: Ready / Modified state
+ ------------------------------------------------------------------}
+procedure TForm1.UpdateStatusBar;
+var
+  I, FileCount, DirCount: Integer;
+  FormatStr, FileStr, CapStr, StatusStr: string;
+  SelectedCaption: string;
+begin
+  if StatusBar1 = nil then Exit;
+
+  // 1. Format / Geometry Panel
+  if FInArchiveMode then
+    FormatStr := 'Archive: ' + UpperCase(ExtractFileExt(FArchiveSourceFileName)) + ' (' + ExtractFileName(FArchiveSourceFileName) + ')'
+  else if FImagePath <> '' then
+  begin
+    if FIsMSAImage then
+      FormatStr := '[MSA] '
+    else
+      FormatStr := '[ST] ';
+
+    if FTotalClusters >= 2800 then
+      FormatStr := FormatStr + 'Atari 1.44 MB HD (2S, 80T, 18SPT)'
+    else if FTotalClusters >= 1700 then
+      FormatStr := FormatStr + 'Atari 880 KB Extended (2S, 80T, 11SPT)'
+    else if FTotalClusters >= 1500 then
+      FormatStr := FormatStr + 'Atari 800 KB Demo (2S, 80T, 10SPT)'
+    else if FTotalClusters >= 1400 then
+      FormatStr := FormatStr + 'Atari 720 KB Standard (2S, 80T, 9SPT)'
+    else if FTotalClusters >= 700 then
+      FormatStr := FormatStr + 'Atari 360 KB SS (1S, 80T, 9SPT)'
+    else
+      FormatStr := FormatStr + 'Atari Custom Format (' + IntToStr(FTotalClusters) + ' clusters)';
+  end
+  else
+    FormatStr := 'No Disk Image Loaded';
+
+  // 2. File / Directory Counts & Selection Details
+  FileCount := 0;
+  DirCount := 0;
+  for I := 0 to High(FDiskItems) do
+  begin
+    if (FDiskItems[I].CleanName = '..') or (FDiskItems[I].DisplayName = '..') then
+      Continue;
+    if FDiskItems[I].IsDir then
+      Inc(DirCount)
+    else
+      Inc(FileCount);
+  end;
+
+  if (ListViewFiles <> nil) and (ListViewFiles.Selected <> nil) then
+  begin
+    SelectedCaption := ListViewFiles.Selected.Caption;
+    if ListViewFiles.Selected.SubItems.Count > 0 then
+      FileStr := 'Sel: ' + SelectedCaption + ' (' + ListViewFiles.Selected.SubItems[0] + ')'
+    else
+      FileStr := 'Sel: ' + SelectedCaption;
+  end
+  else
+  begin
+    if (FileCount = 0) and (DirCount = 0) then
+      FileStr := 'Empty directory'
+    else
+      FileStr := Format('%d file(s), %d folder(s)', [FileCount, DirCount]);
+  end;
+
+  // 3. Free Space & Capacity
+  if (StatusBar1.Panels.Count >= 4) and (StatusBar1.Panels[2].Text <> '') then
+    CapStr := StatusBar1.Panels[2].Text
+  else if (FImagePath <> '') and (FTotalClusters > 0) then
+    CapStr := 'Free: ' + IntToStr(FTotalClusters) + ' clusters'
+  else
+    CapStr := 'Free: -';
+
+  // 4. Status / State Indicator
+  if (FFilePaths.Count > 0) or (FNewDirectories.Count > 0) or (FFilesToDelete.Count > 0) or (FDirsToDelete.Count > 0) then
+    StatusStr := '● Modified'
+  else if FInArchiveMode then
+    StatusStr := '● Vault'
+  else if FImagePath <> '' then
+    StatusStr := '● Ready'
+  else
+    StatusStr := 'Idle';
+
+  if StatusBar1.Panels.Count >= 4 then
+  begin
+    StatusBar1.Panels[0].Text := FormatStr;
+    StatusBar1.Panels[1].Text := FileStr;
+    StatusBar1.Panels[2].Text := CapStr;
+    StatusBar1.Panels[3].Text := StatusStr;
+  end;
 end;
 
 end.
