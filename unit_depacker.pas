@@ -29,8 +29,13 @@ function DecompressRNC(const InBuf: PByte; InSize: Integer; out OutBuf: TBytes):
 function DecompressThunderV1(const InBuf: PByte; InSize: Integer; out OutBuf: TBytes): Boolean;
 function DecompressThunderV2(const InBuf: PByte; InSize: Integer; out OutBuf: TBytes): Boolean;
 function DecompressJek(const InBuf: PByte; InSize: Integer; out OutBuf: TBytes): Boolean;
+function DecompressDegasElite(const InBuf: PByte; InSize: Integer; DefaultRes: Integer; out OutBuf: TBytes): Boolean;
 function DecompressRLE(const InBuf: PByte; InSize: Integer; out OutBuf: TBytes): Boolean;
 function DecompressFire(const InBuf: PByte; InSize: Integer; out OutBuf: TBytes): Boolean;
+function DecompressTiny(const InBuf: PByte; InSize: Integer; DefaultRes: Integer; out OutPalette: TBytes; out OutVRAM: TBytes; out OutRes: Integer): Boolean;
+function DecompressStad(const InBuf: PByte; InSize: Integer; out OutScreen: TBytes): Boolean;
+function DecompressStosSquash(const InBuf: PByte; InSize: Integer; out OutBuf: TBytes): Boolean;
+function DecompressStosCompact(const InBuf: PByte; InSize: Integer; out OutPalette: TBytes; out OutVRAM: TBytes; out OutRes: Integer): Boolean;
 
 implementation
 
@@ -388,6 +393,26 @@ begin
   if CheckWord(Buffer, Size, 0, $8000) or CheckWord(Buffer, Size, 0, $8001) or CheckWord(Buffer, Size, 0, $8002) then
     Exit('Degas Elite Compressed Image');
 
+  // 32. STOS Picture Compactor
+  if CheckLong(Buffer, Size, 0, $06071963) then
+    Exit('STOS Picture Compactor');
+
+  // 33. STAD Monochrome Picture
+  if CheckString(Buffer, Size, 0, 'pM85') or CheckString(Buffer, Size, 0, 'pM86') then
+    Exit('STAD Monochrome Picture');
+
+  // 34. STOS Squashed Data / Picture
+  if (Size >= 16) and (ReadBE32(Buffer, Size - 4) > 0) and (ReadBE32(Buffer, Size - 4) <= 2097152) then
+  begin
+    if DecompressStosSquash(Buffer, Size, DummyOut) then
+    begin
+      if (Length(DummyOut) >= 4) and (ReadBE32(@DummyOut[0], 0) = $06071963) then
+        Exit('STOS Squashed Picture')
+      else
+        Exit('STOS Squashed Data');
+    end;
+  end;
+
   // 32. Heuristics fallback scanning on first 8192 bytes
   AsciiContext := BufferToAscii(Buffer, Size, 8192);
 
@@ -488,7 +513,9 @@ begin
      (Pos('THUNDER', P) > 0) or
      (Pos('JEK', P) > 0) or (Pos('BYTEKILLER', P) > 0) or (Pos('BYTE KILLER', P) > 0) or
      (Pos('DEGAS', P) > 0) or
-     (Pos('FIRE', P) > 0) then
+     (Pos('FIRE', P) > 0) or
+     (Pos('STOS', P) > 0) or (Pos('STAD', P) > 0) or (Pos('TINY', P) > 0) or (Pos('SQUASH', P) > 0) or
+     (Pos('COMPACTOR', P) > 0) then
     Result := True;
 end;
 
@@ -2898,64 +2925,161 @@ begin
 end;
 
 // -----------------------------------------------------------------------------
-// RLE / Degas Elite Decompressor
+// RLE / DEGAS Elite Decompressor
 // -----------------------------------------------------------------------------
 
-function DecompressRLE(const InBuf: PByte; InSize: Integer; out OutBuf: TBytes): Boolean;
+function DecompressDegasElite(const InBuf: PByte; InSize: Integer; DefaultRes: Integer; out OutBuf: TBytes): Boolean;
 var
-  InPos, OutPos, HeaderVal, Count, I: Integer;
-  B, ValByte: Byte;
+  ResWord: Word;
+  ResMode: Integer;
+  NumPlanes, BytesPerPlane, BytesPerTile, BytesPerScanline, Scanlines: Integer;
+  Y, Z, PlaneX, TileOffset, Count, I: Integer;
+  InPos: Integer;
+  Ctrl, Val: Byte;
+  RawPlane: array[0..79] of Byte;
+  LinePtr: PByte;
 begin
   Result := False;
   SetLength(OutBuf, 0);
-  if (InBuf = nil) or (InSize = 0) then Exit;
+  if (InBuf = nil) or (InSize < 34) then Exit;
 
-  SetLength(OutBuf, InSize * 4 + 32768);
-  InPos := 0;
-  OutPos := 0;
+  ResWord := (Word(InBuf[0]) shl 8) or Word(InBuf[1]);
+  // In DEGAS Elite:
+  // $8000 = Low Res (0)
+  // $8001 = Med Res (1)
+  // $8002 = High Res (2)
+  // Bit 15 indicates compressed format or color cycling.
+  if (ResWord and $8000 <> 0) or (ResWord in [0, 1, 2]) then
+    ResMode := ResWord and $0003
+  else
+    ResMode := DefaultRes and $0003;
 
-  // Skip 2-byte Degas Elite resolution header if present ($8000, $8001, $8002)
-  if (InSize >= 2) and (InBuf[0] = $80) and (InBuf[1] in [0, 1, 2]) then
-    InPos := 2;
+  case ResMode of
+    0: // Low Res: 320x200, 4 planes, 16 colors
+    begin
+      NumPlanes := 4;
+      BytesPerPlane := 40;
+      BytesPerTile := 8;
+      BytesPerScanline := 160;
+      Scanlines := 200;
+    end;
+    1: // Med Res: 640x200, 2 planes, 4 colors
+    begin
+      NumPlanes := 2;
+      BytesPerPlane := 80;
+      BytesPerTile := 4;
+      BytesPerScanline := 160;
+      Scanlines := 200;
+    end;
+    2: // High Res: 640x400, 1 plane, 2 colors (monochrome)
+    begin
+      NumPlanes := 1;
+      BytesPerPlane := 80;
+      BytesPerTile := 2;
+      BytesPerScanline := 80;
+      Scanlines := 400;
+    end;
+  else
+    Exit(False);
+  end;
 
-  while InPos < InSize do
+  // Allocate 32,034 bytes standard uncompressed DEGAS image (.PI1, .PI2, .PI3)
+  SetLength(OutBuf, 32034);
+  FillChar(OutBuf[0], 32034, 0);
+
+  // Resolution word in big-endian (0, 1, or 2)
+  OutBuf[0] := 0;
+  OutBuf[1] := Byte(ResMode);
+
+  // Copy 16-color palette (32 bytes)
+  Move(InBuf[2], OutBuf[2], 32);
+
+  InPos := 34; // Start of compressed RLE data
+
+  // Decode scanlines
+  for Y := 0 to Scanlines - 1 do
   begin
-    B := InBuf[InPos];
-    Inc(InPos);
-    if B > 127 then
-      HeaderVal := B - 256
-    else
-      HeaderVal := B;
+    LinePtr := @OutBuf[34 + Y * BytesPerScanline];
 
-    if (HeaderVal >= 0) and (HeaderVal <= 127) then
+    for Z := 0 to NumPlanes - 1 do
     begin
-      Count := HeaderVal + 1;
-      for I := 1 to Count do
+      FillChar(RawPlane, SizeOf(RawPlane), 0);
+      PlaneX := 0;
+
+      while (PlaneX < BytesPerPlane) and (InPos < InSize) do
       begin
-        if InPos >= InSize then Break;
-        if OutPos >= Length(OutBuf) then SetLength(OutBuf, Length(OutBuf) * 2);
-        OutBuf[OutPos] := InBuf[InPos];
-        Inc(OutPos);
+        Ctrl := InBuf[InPos];
         Inc(InPos);
+
+        if Ctrl < 128 then
+        begin
+          // Literal run: Ctrl + 1 bytes
+          Count := Ctrl + 1;
+          if PlaneX + Count > BytesPerPlane then
+            Count := BytesPerPlane - PlaneX;
+
+          for I := 0 to Count - 1 do
+          begin
+            if InPos < InSize then
+            begin
+              RawPlane[PlaneX] := InBuf[InPos];
+              Inc(InPos);
+            end
+            else
+              RawPlane[PlaneX] := 0;
+            Inc(PlaneX);
+          end;
+        end
+        else
+        begin
+          // Repeat run: 257 - Ctrl bytes
+          Count := 257 - Ctrl;
+          if PlaneX + Count > BytesPerPlane then
+            Count := BytesPerPlane - PlaneX;
+
+          if InPos < InSize then
+          begin
+            Val := InBuf[InPos];
+            Inc(InPos);
+          end
+          else
+            Val := 0;
+
+          for I := 0 to Count - 1 do
+          begin
+            RawPlane[PlaneX] := Val;
+            Inc(PlaneX);
+          end;
+        end;
       end;
-    end
-    else if (HeaderVal >= -127) and (HeaderVal <= -1) then
-    begin
-      if InPos >= InSize then Break;
-      ValByte := InBuf[InPos];
-      Inc(InPos);
-      Count := -HeaderVal + 1;
-      for I := 1 to Count do
+
+      // Interleave RawPlane into LinePtr
+      if NumPlanes = 1 then
       begin
-        if OutPos >= Length(OutBuf) then SetLength(OutBuf, Length(OutBuf) * 2);
-        OutBuf[OutPos] := ValByte;
-        Inc(OutPos);
+        // Monochrome high-res: no interleaving needed
+        Move(RawPlane[0], LinePtr[0], BytesPerPlane);
+      end
+      else
+      begin
+        TileOffset := Z * 2;
+        PlaneX := 0;
+        while PlaneX < BytesPerPlane do
+        begin
+          LinePtr[TileOffset] := RawPlane[PlaneX];
+          LinePtr[TileOffset + 1] := RawPlane[PlaneX + 1];
+          Inc(PlaneX, 2);
+          Inc(TileOffset, BytesPerTile);
+        end;
       end;
     end;
   end;
 
-  SetLength(OutBuf, OutPos);
-  Result := (OutPos > 0);
+  Result := True;
+end;
+
+function DecompressRLE(const InBuf: PByte; InSize: Integer; out OutBuf: TBytes): Boolean;
+begin
+  Result := DecompressDegasElite(InBuf, InSize, 0, OutBuf);
 end;
 
 // -----------------------------------------------------------------------------
@@ -3265,12 +3389,497 @@ begin
 end;
 
 // -----------------------------------------------------------------------------
-// Master Depacker Dispatcher
+// STOS Squasher Decompressor (unsquash)
+// -----------------------------------------------------------------------------
+function DecompressStosSquash(const InBuf: PByte; InSize: Integer; out OutBuf: TBytes): Boolean;
+var
+  Offset, UncompressedSize, Checksum, BitBuf, NextWord, Chk: LongWord;
+  OutPtr, Count, Dist, Val, Mode, NBits, I: Integer;
+
+  function GetBit: Byte;
+  begin
+    Result := BitBuf and 1;
+    BitBuf := BitBuf shr 1;
+    if BitBuf = 0 then
+    begin
+      if Offset < 4 then Exit(0);
+      Dec(Offset, 4);
+      NextWord := ReadBE32(InBuf, Offset);
+      Chk := Chk xor NextWord;
+      Result := NextWord and 1;
+      BitBuf := (NextWord shr 1) or $80000000;
+    end;
+  end;
+
+  function GetBits(N: Integer): LongWord;
+  var
+    J: Integer;
+  begin
+    Result := 0;
+    for J := 1 to N do
+      Result := (Result shl 1) or GetBit;
+  end;
+
+begin
+  Result := False;
+  SetLength(OutBuf, 0);
+  if (InBuf = nil) or (InSize < 16) then Exit;
+
+  Offset := InSize;
+  Dec(Offset, 4);
+  UncompressedSize := ReadBE32(InBuf, Offset);
+  if (UncompressedSize = 0) or (UncompressedSize > 10 * 1024 * 1024) then Exit;
+
+  Dec(Offset, 4);
+  Checksum := ReadBE32(InBuf, Offset);
+  Dec(Offset, 4);
+  BitBuf := ReadBE32(InBuf, Offset);
+
+  Chk := BitBuf xor Checksum;
+
+  SetLength(OutBuf, UncompressedSize);
+  OutPtr := UncompressedSize;
+
+  try
+    while OutPtr > 0 do
+    begin
+      if GetBit = 0 then
+      begin
+        if GetBit = 1 then
+        begin
+          Dist := GetBits(8);
+          for I := 1 to 2 do
+          begin
+            Dec(OutPtr);
+            if (OutPtr + Dist >= Integer(UncompressedSize)) then Exit(False);
+            OutBuf[OutPtr] := OutBuf[OutPtr + Dist];
+          end;
+        end
+        else
+        begin
+          Count := GetBits(3);
+          for I := 0 to Count do
+          begin
+            Val := GetBits(8);
+            Dec(OutPtr);
+            OutBuf[OutPtr] := Byte(Val);
+          end;
+        end;
+      end
+      else
+      begin
+        Mode := GetBits(2);
+        if Mode < 2 then
+        begin
+          NBits := 9 + Mode;
+          Count := Mode + 2;
+          Dist := GetBits(NBits);
+          for I := 0 to Count do
+          begin
+            Dec(OutPtr);
+            if (OutPtr + Dist >= Integer(UncompressedSize)) then Exit(False);
+            OutBuf[OutPtr] := OutBuf[OutPtr + Dist];
+          end;
+        end
+        else if Mode = 2 then
+        begin
+          Count := GetBits(8);
+          Dist := GetBits(12);
+          for I := 0 to Count do
+          begin
+            Dec(OutPtr);
+            if (OutPtr + Dist >= Integer(UncompressedSize)) then Exit(False);
+            OutBuf[OutPtr] := OutBuf[OutPtr + Dist];
+          end;
+        end
+        else
+        begin
+          Count := GetBits(8) + 8;
+          for I := 0 to Count do
+          begin
+            Val := GetBits(8);
+            Dec(OutPtr);
+            OutBuf[OutPtr] := Byte(Val);
+          end;
+        end;
+      end;
+    end;
+    Result := (OutPtr = 0);
+  except
+    Result := False;
+  end;
+end;
+
+// -----------------------------------------------------------------------------
+// STOS Picture Compactor Decompressor ($06071963)
+// -----------------------------------------------------------------------------
+function DecompressStosCompact(const InBuf: PByte; InSize: Integer; out OutPalette: TBytes; out OutVRAM: TBytes; out OutRes: Integer): Boolean;
+var
+  Res, XBlk, YBlk, LinesPerBlk, NumPlanes, LineStride, TileStride: Integer;
+  OffMask1, OffMask2, A4, A5, A6: LongWord;
+  D0, D1, D2, D3: Integer;
+  Plane, PlaneOffset, By, Bx, BlockYOffset, BlockXOffset, TileBase: Integer;
+  ByteIdx, Line, Dest: Integer;
+begin
+  Result := False;
+  SetLength(OutPalette, 0);
+  SetLength(OutVRAM, 0);
+  OutRes := 0;
+
+  if (InBuf = nil) or (InSize < $46) then Exit;
+  if ReadBE32(InBuf, 0) <> $06071963 then Exit;
+
+  Res := ReadBE16(InBuf, 4);
+  OutRes := Res;
+  XBlk := ReadBE16(InBuf, 10);
+  YBlk := ReadBE16(InBuf, 12);
+  LinesPerBlk := ReadBE16(InBuf, 16);
+  OffMask1 := ReadBE32(InBuf, 20);
+  OffMask2 := ReadBE32(InBuf, 24);
+
+  if (OffMask1 >= LongWord(InSize)) or (OffMask2 >= LongWord(InSize)) then Exit;
+
+  // Extract 16 palette words (32 bytes) at offset $26
+  SetLength(OutPalette, 32);
+  Move(InBuf[$26], OutPalette[0], 32);
+
+  // Screen size: 32000 bytes
+  SetLength(OutVRAM, 32000);
+  FillChar(OutVRAM[0], 32000, 0);
+
+  if Res = 0 then
+  begin
+    NumPlanes := 4;
+    TileStride := 8;
+  end
+  else if Res = 1 then
+  begin
+    NumPlanes := 2;
+    TileStride := 4;
+  end
+  else
+  begin
+    NumPlanes := 1;
+    TileStride := 2;
+  end;
+  LineStride := 160;
+
+  A4 := $46;
+  A5 := OffMask1;
+  A6 := OffMask2;
+
+  D0 := 7;
+  D1 := 7;
+
+  if A5 >= LongWord(InSize) then Exit(False);
+  D2 := InBuf[A5];
+  Inc(A5);
+  if A4 >= LongWord(InSize) then Exit(False);
+  D3 := InBuf[A4];
+  Inc(A4);
+
+  if A6 < LongWord(InSize) then
+    if (InBuf[A6] and (1 shl D1)) <> 0 then
+    begin
+      if A5 < LongWord(InSize) then
+      begin
+        D2 := InBuf[A5];
+        Inc(A5);
+      end;
+    end;
+  Dec(D1);
+  if D1 < 0 then
+  begin
+    D1 := 7;
+    Inc(A6);
+  end;
+
+  try
+    for Plane := 0 to NumPlanes - 1 do
+    begin
+      PlaneOffset := Plane * 2;
+      for By := 0 to YBlk - 1 do
+      begin
+        BlockYOffset := By * (LinesPerBlk * LineStride);
+        for Bx := 0 to XBlk - 1 do
+        begin
+          BlockXOffset := Bx * TileStride;
+          TileBase := BlockYOffset + BlockXOffset + PlaneOffset;
+
+          for ByteIdx := 0 to 1 do
+          begin
+            for Line := 0 to LinesPerBlk - 1 do
+            begin
+              if (D2 and (1 shl D0)) <> 0 then
+              begin
+                if A4 < LongWord(InSize) then
+                begin
+                  D3 := InBuf[A4];
+                  Inc(A4);
+                end;
+              end;
+              Dest := TileBase + Line * LineStride + ByteIdx;
+              if (Dest >= 0) and (Dest < 32000) then
+                OutVRAM[Dest] := Byte(D3);
+
+              Dec(D0);
+              if D0 < 0 then
+              begin
+                D0 := 7;
+                if A6 < LongWord(InSize) then
+                  if (InBuf[A6] and (1 shl D1)) <> 0 then
+                  begin
+                    if A5 < LongWord(InSize) then
+                    begin
+                      D2 := InBuf[A5];
+                      Inc(A5);
+                    end;
+                  end;
+                Dec(D1);
+                if D1 < 0 then
+                begin
+                  D1 := 7;
+                  Inc(A6);
+                end;
+              end;
+            end;
+          end;
+        end;
+      end;
+    end;
+    Result := True;
+  except
+    Result := False;
+  end;
+end;
+
+// -----------------------------------------------------------------------------
+// STAD Monochrome Decompressor (pM85 / pM86)
+// -----------------------------------------------------------------------------
+function DecompressStad(const InBuf: PByte; InSize: Integer; out OutScreen: TBytes): Boolean;
+var
+  IsVert: Boolean;
+  IdByte, PackByte, SpecialByte, CurrByte, RunVal: Byte;
+  RunCount, InIdx, OutIdx, X, Y: Integer;
+  RawBuf: TBytes;
+begin
+  Result := False;
+  SetLength(OutScreen, 0);
+  if (InBuf = nil) or (InSize < 7) then Exit;
+
+  if CheckString(InBuf, InSize, 0, 'pM85') then
+    IsVert := False
+  else if CheckString(InBuf, InSize, 0, 'pM86') then
+    IsVert := True
+  else
+    Exit(False);
+
+  IdByte := InBuf[4];
+  PackByte := InBuf[5];
+  SpecialByte := InBuf[6];
+
+  SetLength(RawBuf, 32000);
+  FillChar(RawBuf[0], 32000, 0);
+  InIdx := 7;
+  OutIdx := 0;
+
+  try
+    while (InIdx < InSize) and (OutIdx < 32000) do
+    begin
+      CurrByte := InBuf[InIdx];
+      Inc(InIdx);
+
+      if CurrByte = IdByte then
+      begin
+        if InIdx >= InSize then Break;
+        RunCount := InBuf[InIdx] + 1;
+        Inc(InIdx);
+        while (RunCount > 0) and (OutIdx < 32000) do
+        begin
+          RawBuf[OutIdx] := PackByte;
+          Inc(OutIdx);
+          Dec(RunCount);
+        end;
+      end
+      else if CurrByte = SpecialByte then
+      begin
+        if InIdx + 1 >= InSize then Break;
+        RunVal := InBuf[InIdx];
+        Inc(InIdx);
+        RunCount := InBuf[InIdx];
+        Inc(InIdx);
+        while (RunCount > 0) and (OutIdx < 32000) do
+        begin
+          RawBuf[OutIdx] := RunVal;
+          Inc(OutIdx);
+          Dec(RunCount);
+        end;
+      end
+      else
+      begin
+        RawBuf[OutIdx] := CurrByte;
+        Inc(OutIdx);
+      end;
+    end;
+
+    SetLength(OutScreen, 32000);
+    if IsVert then
+    begin
+      for X := 0 to 79 do
+        for Y := 0 to 399 do
+          OutScreen[Y * 80 + X] := RawBuf[X * 400 + Y];
+    end
+    else
+    begin
+      Move(RawBuf[0], OutScreen[0], 32000);
+    end;
+
+    Result := True;
+  except
+    Result := False;
+  end;
+end;
+
+// -----------------------------------------------------------------------------
+// Tiny Stuff Decompressor (.TN1, .TN2, .TN3, .TNY)
+// -----------------------------------------------------------------------------
+function DecompressTiny(const InBuf: PByte; InSize: Integer; DefaultRes: Integer;
+  out OutPalette: TBytes; out OutVRAM: TBytes; out OutRes: Integer): Boolean;
+var
+  Res, Offset, CtrlStreamSize, A5, A5End, A4, A1, D6, D4: Integer;
+  Ctrl, Count: Integer;
+  IsRepeat: Boolean;
+  ValWord: Word;
+  I: Integer;
+
+  procedure Advance;
+  begin
+    Inc(A1, 2);
+    Inc(A1, 158);
+    if A1 >= D6 then
+    begin
+      Inc(A1, -31992);
+      if A1 >= D4 then
+        Inc(A1, -158);
+    end;
+  end;
+
+begin
+  Result := False;
+  SetLength(OutPalette, 0);
+  SetLength(OutVRAM, 0);
+  OutRes := 0;
+
+  if (InBuf = nil) or (InSize < 37) then Exit;
+
+  Res := InBuf[0];
+  Offset := 1;
+  if Res > 2 then
+    Inc(Offset, 4);
+
+  if Offset + 32 + 4 > InSize then Exit;
+
+  // Palette: 32 bytes (16 words)
+  SetLength(OutPalette, 32);
+  Move(InBuf[Offset], OutPalette[0], 32);
+  Inc(Offset, 32);
+
+  // Control stream size
+  CtrlStreamSize := (Word(InBuf[Offset]) shl 8) or Word(InBuf[Offset + 1]);
+  Inc(Offset, 4); // size (2 bytes) + 2 padding bytes
+
+  if Offset + CtrlStreamSize > InSize then Exit;
+
+  A5 := Offset;
+  A5End := Offset + CtrlStreamSize;
+  A4 := A5End;
+
+  SetLength(OutVRAM, 32000);
+  FillChar(OutVRAM[0], 32000, 0);
+  A1 := 0;
+  D6 := 32000;
+  D4 := 160;
+
+  try
+    while A5 < A5End do
+    begin
+      Ctrl := InBuf[A5];
+      Inc(A5);
+
+      if Ctrl = 0 then
+      begin
+        if A5 + 1 >= A5End then Break;
+        Count := (Word(InBuf[A5]) shl 8) or Word(InBuf[A5 + 1]);
+        Inc(A5, 2);
+        IsRepeat := True;
+      end
+      else if Ctrl = 1 then
+      begin
+        if A5 + 1 >= A5End then Break;
+        Count := (Word(InBuf[A5]) shl 8) or Word(InBuf[A5 + 1]);
+        Inc(A5, 2);
+        IsRepeat := False;
+      end
+      else if Ctrl >= 128 then
+      begin
+        Count := 256 - Ctrl;
+        IsRepeat := False;
+      end
+      else
+      begin
+        Count := Ctrl;
+        IsRepeat := True;
+      end;
+
+      if IsRepeat then
+      begin
+        if A4 + 1 >= InSize then Break;
+        ValWord := (Word(InBuf[A4]) shl 8) or Word(InBuf[A4 + 1]);
+        Inc(A4, 2);
+        for I := 0 to Count - 1 do
+        begin
+          if A1 >= 32000 then Break;
+          OutVRAM[A1] := Byte((ValWord shr 8) and $FF);
+          OutVRAM[A1 + 1] := Byte(ValWord and $FF);
+          Advance;
+        end;
+      end
+      else
+      begin
+        for I := 0 to Count - 1 do
+        begin
+          if A4 + 1 >= InSize then Break;
+          ValWord := (Word(InBuf[A4]) shl 8) or Word(InBuf[A4 + 1]);
+          Inc(A4, 2);
+          if A1 >= 32000 then Break;
+          OutVRAM[A1] := Byte((ValWord shr 8) and $FF);
+          OutVRAM[A1 + 1] := Byte(ValWord and $FF);
+          Advance;
+        end;
+      end;
+    end;
+
+    if DefaultRes in [0, 1, 2] then
+      OutRes := DefaultRes
+    else if Res <= 2 then
+      OutRes := Res
+    else
+      OutRes := 0;
+
+    Result := True;
+  except
+    Result := False;
+  end;
+end;
+
 // -----------------------------------------------------------------------------
 // Master Depacker Dispatcher
 // -----------------------------------------------------------------------------
 
 function DepackBuffer(const InBuf: PByte; InSize: Integer; out OutBuf: TBytes; out DetectedPacker: string): Boolean;
+var
+  DummyPal, DummyVRAM: TBytes;
+  DummyRes: Integer;
 begin
   Result := False;
   SetLength(OutBuf, 0);
@@ -3345,6 +3954,58 @@ begin
   if (Pos('FIRE', UpperCase(DetectedPacker)) > 0) or (Pos('PACK-FIRE', UpperCase(DetectedPacker)) > 0) then
   begin
     if DecompressFire(InBuf, InSize, OutBuf) then Exit(True);
+  end;
+
+  // 10. STOS Squasher / Picture Compactor
+  if (Pos('STOS', UpperCase(DetectedPacker)) > 0) or (Pos('SQUASH', UpperCase(DetectedPacker)) > 0) or (Pos('COMPACTOR', UpperCase(DetectedPacker)) > 0) then
+  begin
+    if DecompressStosSquash(InBuf, InSize, OutBuf) then
+    begin
+      if (Length(OutBuf) >= 4) and (ReadBE32(@OutBuf[0], 0) = $06071963) then
+      begin
+        if DecompressStosCompact(@OutBuf[0], Length(OutBuf), DummyPal, DummyVRAM, DummyRes) then
+        begin
+          SetLength(OutBuf, 32034);
+          OutBuf[0] := 0; OutBuf[1] := Byte(DummyRes);
+          Move(DummyPal[0], OutBuf[2], 32);
+          Move(DummyVRAM[0], OutBuf[34], 32000);
+          DetectedPacker := 'STOS Packed Picture';
+        end;
+      end;
+      Exit(True);
+    end;
+
+    if CheckLong(InBuf, InSize, 0, $06071963) then
+    begin
+      if DecompressStosCompact(InBuf, InSize, DummyPal, DummyVRAM, DummyRes) then
+      begin
+        SetLength(OutBuf, 32034);
+        OutBuf[0] := 0; OutBuf[1] := Byte(DummyRes);
+        Move(DummyPal[0], OutBuf[2], 32);
+        Move(DummyVRAM[0], OutBuf[34], 32000);
+        DetectedPacker := 'STOS Picture Compactor';
+        Exit(True);
+      end;
+    end;
+  end;
+
+  // 11. STAD Monochrome Picture
+  if (Pos('STAD', UpperCase(DetectedPacker)) > 0) or CheckString(InBuf, InSize, 0, 'pM85') or CheckString(InBuf, InSize, 0, 'pM86') then
+  begin
+    if DecompressStad(InBuf, InSize, OutBuf) then Exit(True);
+  end;
+
+  // 12. Tiny Stuff Image
+  if Pos('TINY', UpperCase(DetectedPacker)) > 0 then
+  begin
+    if DecompressTiny(InBuf, InSize, 0, DummyPal, DummyVRAM, DummyRes) then
+    begin
+      SetLength(OutBuf, 32034);
+      OutBuf[0] := 0; OutBuf[1] := Byte(DummyRes);
+      Move(DummyPal[0], OutBuf[2], 32);
+      Move(DummyVRAM[0], OutBuf[34], 32000);
+      Exit(True);
+    end;
   end;
 
   // Generic fallback tries if specific packer failed or was unknown

@@ -18,7 +18,14 @@ type
     apfDegasPC3,       // DEGAS Elite Compressed High Res (RLE)
     apfNeoChrome,      // NeoChrome (.NEO) (320x200, 16 colors)
     apfSpectrum512SPU, // Spectrum 512 (.SPU) (320x200, 512 colors per-line palettes)
-    apfRawScreen       // Raw 32,000 or 32,032 bytes Atari ST screen dump
+    apfRawScreen,      // Raw 32,000 or 32,032 bytes Atari ST screen dump
+    apfArtDirector,    // Art Director (.ART) (320x200, 16 colors)
+    apfDoodle,         // Doodle (.DOO) (640x400, monochrome)
+    apfQuantumPaint,   // Quantum Paintbox (.PBX) (320x200, 16 colors)
+    apfTinyStuff,      // Tiny Stuff (.TN1, .TN2, .TN3, .TNY)
+    apfStadPac,        // STAD Monochrome Packed (.PAC - pM85/pM86)
+    apfStosCompactPac, // STOS Picture Compactor / Squashed (.PAC)
+    apfGemImg          // GEM Monochrome Image (.IMG)
   );
 
 { Detects if the given buffer/filename represents a supported Atari ST picture }
@@ -37,6 +44,31 @@ implementation
 function ReadBE16(const P: PByte; Offset: Integer): Word; inline;
 begin
   Result := (Word(P[Offset]) shl 8) or Word(P[Offset + 1]);
+end;
+
+function ReadBE32(const P: PByte; Offset: Integer): LongWord; inline;
+begin
+  Result := (LongWord(P[Offset]) shl 24) or
+            (LongWord(P[Offset + 1]) shl 16) or
+            (LongWord(P[Offset + 2]) shl 8) or
+            LongWord(P[Offset + 3]);
+end;
+
+function CheckString(const P: PByte; Size: Integer; Offset: Integer; const S: string): Boolean;
+var
+  I, L: Integer;
+begin
+  L := Length(S);
+  if (Offset < 0) or (Offset + L > Size) then Exit(False);
+  for I := 1 to L do
+    if P[Offset + I - 1] <> Byte(S[I]) then Exit(False);
+  Result := True;
+end;
+
+function CheckLong(const P: PByte; Size: Integer; Offset: Integer; Val: LongWord): Boolean; inline;
+begin
+  if (Offset < 0) or (Offset + 4 > Size) then Exit(False);
+  Result := ReadBE32(P, Offset) = Val;
 end;
 
 function HasSTEBits(const PaletteBuf: PByte; NumColors: Integer): Boolean;
@@ -112,6 +144,13 @@ begin
     apfNeoChrome:      Result := 'NeoChrome Image (.NEO)';
     apfSpectrum512SPU: Result := 'Spectrum 512 Image (.SPU)';
     apfRawScreen:      Result := 'Raw Atari ST Screen Dump (320x200)';
+    apfArtDirector:    Result := 'Art Director Image (.ART)';
+    apfDoodle:         Result := 'Doodle High Res (.DOO)';
+    apfQuantumPaint:   Result := 'Quantum Paintbox (.PBX)';
+    apfTinyStuff:      Result := 'Tiny Stuff Compressed Image (.TNY)';
+    apfStadPac:        Result := 'STAD Monochrome Image (.PAC)';
+    apfStosCompactPac: Result := 'STOS Packed Picture (.PAC)';
+    apfGemImg:         Result := 'GEM Monochrome Image (.IMG)';
   else
     Result := 'Unknown Picture Format';
   end;
@@ -123,7 +162,7 @@ var
   ResWord: Word;
 begin
   Result := apfUnknown;
-  if (InBuf = nil) or (InSize < 34) then Exit;
+  if (InBuf = nil) or (InSize < 7) then Exit;
 
   Ext := UpperCase(ExtractFileExt(FileName));
 
@@ -132,13 +171,52 @@ begin
   if (Ext = '.PC2') then Exit(apfDegasPC2);
   if (Ext = '.PC3') then Exit(apfDegasPC3);
 
-  // 2. Check Spectrum 512 (.SPU)
-  if (Ext = '.SPU') or (InSize = 51200) then
+  // 1b. Check DEGAS Elite magic resolution words ($8000, $8001, $8002)
+  if InSize >= 34 then
+  begin
+    ResWord := ReadBE16(InBuf, 0);
+    if (ResWord = $8000) then Exit(apfDegasPC1);
+    if (ResWord = $8001) then Exit(apfDegasPC2);
+    if (ResWord = $8002) then Exit(apfDegasPC3);
+  end;
+
+  // 2. Check STAD Monochrome (.PAC) - 'pM85' or 'pM86'
+  if CheckString(InBuf, InSize, 0, 'pM85') or CheckString(InBuf, InSize, 0, 'pM86') then
+    Exit(apfStadPac);
+
+  // 3. Check STOS Picture Compactor ($06071963)
+  if CheckLong(InBuf, InSize, 0, $06071963) then
+    Exit(apfStosCompactPac);
+
+  // 4. Check STOS / STAD by .PAC extension
+  if (Ext = '.PAC') then
+  begin
+    if CheckString(InBuf, InSize, 0, 'pM85') or CheckString(InBuf, InSize, 0, 'pM86') then
+      Exit(apfStadPac)
+    else
+      Exit(apfStosCompactPac);
+  end;
+
+  // 5. Check Tiny Stuff (.TN1, .TN2, .TN3, .TNY)
+  if (Ext = '.TN1') or (Ext = '.TN2') or (Ext = '.TN3') or (Ext = '.TNY') then
+    Exit(apfTinyStuff);
+
+  // 6. Check Art Director (.ART)
+  if (Ext = '.ART') then Exit(apfArtDirector);
+
+  // 7. Check Doodle (.DOO)
+  if (Ext = '.DOO') then Exit(apfDoodle);
+
+  // 8. Check Quantum Paintbox (.PBX)
+  if (Ext = '.PBX') or CheckString(InBuf, InSize, 0, 'PBX') then Exit(apfQuantumPaint);
+
+  // 9. Check Spectrum 512 (.SPU, .SPC, .SPS)
+  if (Ext = '.SPU') or (Ext = '.SPC') or (Ext = '.SPS') or (InSize = 51200) then
   begin
     if InSize = 51200 then Exit(apfSpectrum512SPU);
   end;
 
-  // 3. Check NeoChrome (.NEO) - 32,128 bytes
+  // 10. Check NeoChrome (.NEO) - 32,128 bytes
   if (Ext = '.NEO') or (InSize = 32128) then
   begin
     if InSize = 32128 then
@@ -148,7 +226,7 @@ begin
     end;
   end;
 
-  // 4. Check DEGAS Uncompressed (.PI1, .PI2, .PI3) - 32,034 bytes (or 32,066)
+  // 11. Check DEGAS Uncompressed (.PI1, .PI2, .PI3) - 32,034 bytes (or 32,066)
   if (InSize = 32034) or (InSize = 32066) or (Ext = '.PI1') or (Ext = '.PI2') or (Ext = '.PI3') then
   begin
     ResWord := ReadBE16(InBuf, 0);
@@ -157,10 +235,16 @@ begin
     if (ResWord = 2) or (Ext = '.PI3') then Exit(apfDegasPI3);
   end;
 
-  // 5. Check Raw Atari ST Screen dumps (32,000 or 32,032 bytes)
-  if (InSize = 32000) or (InSize = 32032) then
+  // 12. Check Raw Atari ST Screen dumps (32,000 or 32,032 bytes) or .MUR
+  if (InSize = 32000) or (InSize = 32032) or (Ext = '.MUR') then
   begin
     Exit(apfRawScreen);
+  end;
+
+  // 13. Check GEM Image (.IMG)
+  if (Ext = '.IMG') or ((InSize >= 16) and (ReadBE16(InBuf, 0) = 1) and (ReadBE16(InBuf, 2) >= 8) and (ReadBE16(InBuf, 4) in [1, 4])) then
+  begin
+    Exit(apfGemImg);
   end;
 end;
 
@@ -315,17 +399,170 @@ begin
   end;
 end;
 
+{ Decodes GEM Monochrome .IMG picture }
+function DecodeGemImage(const InBuf: PByte; InSize: Integer; OutBmp: Graphics.TBitmap;
+  out OutW, OutH: Integer): Boolean;
+var
+  Version, HeaderLengthWords, NumPlanes, PatternLength, W, H, HeaderBSize: Integer;
+  RowBytes, DstLen, Src, Dst, Head, RepeatCount, P, R, CopyCount, C, RunCount, LineRepeat, I, LastLineStart: Integer;
+  Val: Byte;
+  Decompressed: TBytes;
+  Pattern: array[0..255] of Byte;
+  Y, X, ByteIdx, BitShift: Integer;
+  Col: TColor;
+begin
+  Result := False;
+  OutW := 0;
+  OutH := 0;
+  if (InBuf = nil) or (InSize < 16) then Exit;
+
+  Version := ReadBE16(InBuf, 0);
+  HeaderLengthWords := ReadBE16(InBuf, 2);
+  NumPlanes := ReadBE16(InBuf, 4);
+  PatternLength := ReadBE16(InBuf, 6);
+  W := ReadBE16(InBuf, 12);
+  H := ReadBE16(InBuf, 14);
+
+  if (W <= 0) or (H <= 0) or (W > 4096) or (H > 4096) then Exit;
+  HeaderBSize := HeaderLengthWords * 2;
+  if InSize < HeaderBSize then Exit;
+
+  RowBytes := (W + 7) div 8;
+  DstLen := H * RowBytes;
+  SetLength(Decompressed, DstLen);
+  FillChar(Decompressed[0], DstLen, 0);
+
+  Src := HeaderBSize;
+  Dst := 0;
+
+  while (Dst < DstLen) and (Src < InSize) do
+  begin
+    Head := InBuf[Src];
+    Inc(Src);
+
+    if Head = 0 then
+    begin
+      // Pattern run
+      if Src >= InSize then Break;
+      RepeatCount := InBuf[Src];
+      Inc(Src);
+      if PatternLength > 256 then PatternLength := 256;
+      for P := 0 to PatternLength - 1 do
+      begin
+        if Src < InSize then
+        begin
+          Pattern[P] := InBuf[Src];
+          Inc(Src);
+        end
+        else
+          Pattern[P] := 0;
+      end;
+
+      for R := 0 to RepeatCount - 1 do
+      begin
+        for P := 0 to PatternLength - 1 do
+        begin
+          if Dst < DstLen then
+          begin
+            Decompressed[Dst] := Pattern[P];
+            Inc(Dst);
+          end;
+        end;
+      end;
+    end
+    else if Head = $80 then
+    begin
+      // Literal run
+      if Src >= InSize then Break;
+      CopyCount := InBuf[Src];
+      Inc(Src);
+      for C := 0 to CopyCount - 1 do
+      begin
+        if (Src < InSize) and (Dst < DstLen) then
+        begin
+          Decompressed[Dst] := InBuf[Src];
+          Inc(Src);
+          Inc(Dst);
+        end;
+      end;
+    end
+    else if (Head and $80) <> 0 then
+    begin
+      // Solid run
+      RunCount := Head and $7F;
+      if (Head and 1) <> 0 then Val := $FF else Val := $00;
+      for R := 0 to RunCount - 1 do
+      begin
+        if Dst < DstLen then
+        begin
+          Decompressed[Dst] := Val;
+          Inc(Dst);
+        end;
+      end;
+    end
+    else
+    begin
+      // Vertical duplication of previous line
+      LineRepeat := Head;
+      if (LineRepeat > 0) and (Dst >= RowBytes) then
+      begin
+        LastLineStart := Dst - RowBytes;
+        for R := 0 to LineRepeat - 1 do
+        begin
+          for I := 0 to RowBytes - 1 do
+          begin
+            if Dst < DstLen then
+            begin
+              Decompressed[Dst] := Decompressed[LastLineStart + I];
+              Inc(Dst);
+            end;
+          end;
+        end;
+      end;
+    end;
+  end;
+
+  OutBmp.SetSize(W, H);
+  OutBmp.PixelFormat := pf24bit;
+
+  for Y := 0 to H - 1 do
+  begin
+    for X := 0 to W - 1 do
+    begin
+      ByteIdx := Y * RowBytes + (X div 8);
+      BitShift := 7 - (X mod 8);
+      if ByteIdx < DstLen then
+      begin
+        if ((Decompressed[ByteIdx] shr BitShift) and 1) <> 0 then
+          Col := clBlack
+        else
+          Col := clWhite;
+      end
+      else
+        Col := clWhite;
+      OutBmp.Canvas.Pixels[X, Y] := Col;
+    end;
+  end;
+
+  OutW := W;
+  OutH := H;
+  Result := True;
+end;
+
 function DecodeAtariPicture(const InBuf: PByte; InSize: Integer; const FileName: string;
   out OutBitmap: Graphics.TBitmap; out FormatDesc: string;
   out OutWidth, OutHeight, OutColors: Integer): Boolean;
 var
   PicFmt: TAtariPicFormat;
   Pal: array[0..15] of TColor;
-  IsSTE: Boolean;
-  I: Integer;
-  UnpackedBuf: TBytes;
+  IsSTE, IsCompressed: Boolean;
+  I, DefRes, PalOffset, ScreenOffset: Integer;
+  UnpackedBuf, StadVRAM, StosPal, StosVRAM, TinyPal, TinyVRAM, UnsquashedBuf: TBytes;
+  StosRes, TinyRes: Integer;
   WorkBuf: PByte;
   WorkSize: Integer;
+  GemW, GemH: Integer;
+  Ext: string;
 begin
   Result := False;
   OutBitmap := nil;
@@ -334,15 +571,25 @@ begin
   OutHeight := 0;
   OutColors := 0;
 
-  if (InBuf = nil) or (InSize < 34) then Exit;
+  if (InBuf = nil) or (InSize < 7) then Exit;
 
   PicFmt := DetectAtariPicFormat(InBuf, InSize, FileName);
   if PicFmt = apfUnknown then Exit;
 
+  IsCompressed := PicFmt in [apfDegasPC1, apfDegasPC2, apfDegasPC3];
+
   // Handle DEGAS Elite RLE Compressed Formats (.PC1, .PC2, .PC3)
-  if PicFmt in [apfDegasPC1, apfDegasPC2, apfDegasPC3] then
+  if IsCompressed then
   begin
-    if not DecompressRLE(InBuf, InSize, UnpackedBuf) then Exit(False);
+    case PicFmt of
+      apfDegasPC1: DefRes := 0;
+      apfDegasPC2: DefRes := 1;
+      apfDegasPC3: DefRes := 2;
+    else
+      DefRes := 0;
+    end;
+
+    if not DecompressDegasElite(InBuf, InSize, DefRes, UnpackedBuf) then Exit(False);
     if Length(UnpackedBuf) < 32034 then Exit(False);
     WorkBuf := @UnpackedBuf[0];
     WorkSize := Length(UnpackedBuf);
@@ -368,7 +615,10 @@ begin
           Pal[I] := ConvertAtariColorWord(ReadBE16(WorkBuf, 2 + I * 2), IsSTE);
 
         DecodeLowResScreen(WorkBuf + 34, Pal, OutBitmap);
-        FormatDesc := 'DEGAS Low Res (320x200, 16 Colors)';
+        if IsCompressed then
+          FormatDesc := 'DEGAS Elite RLE Low Res (320x200, 16 Colors)'
+        else
+          FormatDesc := 'DEGAS Low Res (320x200, 16 Colors)';
         OutWidth := 320;
         OutHeight := 200;
         OutColors := 16;
@@ -382,7 +632,10 @@ begin
           Pal[I] := ConvertAtariColorWord(ReadBE16(WorkBuf, 2 + I * 2), IsSTE);
 
         DecodeMedResScreen(WorkBuf + 34, Pal, OutBitmap);
-        FormatDesc := 'DEGAS Med Res (640x200 / 640x400, 4 Colors)';
+        if IsCompressed then
+          FormatDesc := 'DEGAS Elite RLE Med Res (640x200 / 640x400, 4 Colors)'
+        else
+          FormatDesc := 'DEGAS Med Res (640x200 / 640x400, 4 Colors)';
         OutWidth := 640;
         OutHeight := 400;
         OutColors := 4;
@@ -400,7 +653,10 @@ begin
         end;
 
         DecodeHighResScreen(WorkBuf + 34, Pal[0], Pal[1], OutBitmap);
-        FormatDesc := 'DEGAS High Res (640x400, Monochrome)';
+        if IsCompressed then
+          FormatDesc := 'DEGAS Elite RLE High Res (640x400, Monochrome)'
+        else
+          FormatDesc := 'DEGAS High Res (640x400, Monochrome)';
         OutWidth := 640;
         OutHeight := 400;
         OutColors := 2;
@@ -464,6 +720,180 @@ begin
         OutWidth := 320;
         OutHeight := 200;
         OutColors := 16;
+        Result := True;
+      end;
+
+      apfArtDirector:
+      begin
+        if WorkSize < 32034 then Exit(False);
+        IsSTE := HasSTEBits(WorkBuf + 2, 16);
+        for I := 0 to 15 do
+          Pal[I] := ConvertAtariColorWord(ReadBE16(WorkBuf, 2 + I * 2), IsSTE);
+        DecodeLowResScreen(WorkBuf + 34, Pal, OutBitmap);
+        FormatDesc := 'Art Director (320x200, 16 Colors)';
+        OutWidth := 320;
+        OutHeight := 200;
+        OutColors := 16;
+        Result := True;
+      end;
+
+      apfDoodle:
+      begin
+        if WorkSize < 32000 then Exit(False);
+        Pal[0] := clWhite;
+        Pal[1] := clBlack;
+        DecodeHighResScreen(WorkBuf, Pal[0], Pal[1], OutBitmap);
+        FormatDesc := 'Doodle High Res (640x400, Monochrome)';
+        OutWidth := 640;
+        OutHeight := 400;
+        OutColors := 2;
+        Result := True;
+      end;
+
+      apfQuantumPaint:
+      begin
+        if WorkSize < 32032 then Exit(False);
+        if CheckString(WorkBuf, WorkSize, 0, 'PBX') then
+        begin
+          PalOffset := 4;
+          if WorkSize >= 32064 then
+            ScreenOffset := 64
+          else
+            ScreenOffset := 32;
+        end
+        else
+        begin
+          PalOffset := 0;
+          ScreenOffset := 32;
+        end;
+        IsSTE := HasSTEBits(WorkBuf + PalOffset, 16);
+        for I := 0 to 15 do
+          Pal[I] := ConvertAtariColorWord(ReadBE16(WorkBuf, PalOffset + I * 2), IsSTE);
+        DecodeLowResScreen(WorkBuf + ScreenOffset, Pal, OutBitmap);
+        FormatDesc := 'Quantum Paintbox (320x200, 16 Colors)';
+        OutWidth := 320;
+        OutHeight := 200;
+        OutColors := 16;
+        Result := True;
+      end;
+
+      apfTinyStuff:
+      begin
+        Ext := UpperCase(ExtractFileExt(FileName));
+        if Ext = '.TN1' then DefRes := 0
+        else if Ext = '.TN2' then DefRes := 1
+        else if Ext = '.TN3' then DefRes := 2
+        else DefRes := 0;
+
+        if not DecompressTiny(WorkBuf, WorkSize, DefRes, TinyPal, TinyVRAM, TinyRes) then Exit(False);
+
+        if TinyRes = 0 then
+        begin
+          IsSTE := HasSTEBits(@TinyPal[0], 16);
+          for I := 0 to 15 do
+            Pal[I] := ConvertAtariColorWord(ReadBE16(@TinyPal[0], I * 2), IsSTE);
+          DecodeLowResScreen(@TinyVRAM[0], Pal, OutBitmap);
+          FormatDesc := 'Tiny Stuff Low Res (320x200, 16 Colors)';
+          OutWidth := 320;
+          OutHeight := 200;
+          OutColors := 16;
+          Result := True;
+        end
+        else if TinyRes = 1 then
+        begin
+          IsSTE := HasSTEBits(@TinyPal[0], 4);
+          for I := 0 to 3 do
+            Pal[I] := ConvertAtariColorWord(ReadBE16(@TinyPal[0], I * 2), IsSTE);
+          DecodeMedResScreen(@TinyVRAM[0], Pal, OutBitmap);
+          FormatDesc := 'Tiny Stuff Med Res (640x200 / 640x400, 4 Colors)';
+          OutWidth := 640;
+          OutHeight := 400;
+          OutColors := 4;
+          Result := True;
+        end
+        else
+        begin
+          Pal[0] := clWhite;
+          Pal[1] := clBlack;
+          DecodeHighResScreen(@TinyVRAM[0], Pal[0], Pal[1], OutBitmap);
+          FormatDesc := 'Tiny Stuff High Res (640x400, Monochrome)';
+          OutWidth := 640;
+          OutHeight := 400;
+          OutColors := 2;
+          Result := True;
+        end;
+      end;
+
+      apfStadPac:
+      begin
+        if not DecompressStad(WorkBuf, WorkSize, StadVRAM) then Exit(False);
+        Pal[0] := clWhite;
+        Pal[1] := clBlack;
+        DecodeHighResScreen(@StadVRAM[0], Pal[0], Pal[1], OutBitmap);
+        FormatDesc := 'STAD Monochrome Image (640x400, Monochrome)';
+        OutWidth := 640;
+        OutHeight := 400;
+        OutColors := 2;
+        Result := True;
+      end;
+
+      apfStosCompactPac:
+      begin
+        if CheckLong(WorkBuf, WorkSize, 0, $06071963) then
+        begin
+          if not DecompressStosCompact(WorkBuf, WorkSize, StosPal, StosVRAM, StosRes) then Exit(False);
+        end
+        else
+        begin
+          // Try decompressing with STOS Squasher first
+          if not DecompressStosSquash(WorkBuf, WorkSize, UnsquashedBuf) then Exit(False);
+          if not DecompressStosCompact(@UnsquashedBuf[0], Length(UnsquashedBuf), StosPal, StosVRAM, StosRes) then Exit(False);
+        end;
+
+        if StosRes = 0 then
+        begin
+          IsSTE := HasSTEBits(@StosPal[0], 16);
+          for I := 0 to 15 do
+            Pal[I] := ConvertAtariColorWord(ReadBE16(@StosPal[0], I * 2), IsSTE);
+          DecodeLowResScreen(@StosVRAM[0], Pal, OutBitmap);
+          FormatDesc := 'STOS Packed Screen (320x200, 16 Colors)';
+          OutWidth := 320;
+          OutHeight := 200;
+          OutColors := 16;
+          Result := True;
+        end
+        else if StosRes = 1 then
+        begin
+          IsSTE := HasSTEBits(@StosPal[0], 4);
+          for I := 0 to 3 do
+            Pal[I] := ConvertAtariColorWord(ReadBE16(@StosPal[0], I * 2), IsSTE);
+          DecodeMedResScreen(@StosVRAM[0], Pal, OutBitmap);
+          FormatDesc := 'STOS Packed Screen (640x200 / 640x400, 4 Colors)';
+          OutWidth := 640;
+          OutHeight := 400;
+          OutColors := 4;
+          Result := True;
+        end
+        else
+        begin
+          Pal[0] := clWhite;
+          Pal[1] := clBlack;
+          DecodeHighResScreen(@StosVRAM[0], Pal[0], Pal[1], OutBitmap);
+          FormatDesc := 'STOS Packed Screen (640x400, Monochrome)';
+          OutWidth := 640;
+          OutHeight := 400;
+          OutColors := 2;
+          Result := True;
+        end;
+      end;
+
+      apfGemImg:
+      begin
+        if not DecodeGemImage(WorkBuf, WorkSize, OutBitmap, GemW, GemH) then Exit(False);
+        FormatDesc := Format('GEM Monochrome Image (%dx%d, 1-bit)', [GemW, GemH]);
+        OutWidth := GemW;
+        OutHeight := GemH;
+        OutColors := 2;
         Result := True;
       end;
     end;

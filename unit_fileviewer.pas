@@ -156,7 +156,7 @@ begin
   FPictureHeight := 0;
   FPictureColors := 0;
 
-  if Length(AData) >= 34 then
+  if Length(AData) >= 7 then
   begin
     if DecodeAtariPicture(@AData[0], Length(AData), FFileName, FPictureBitmap,
                           FPictureFormatDesc, FPictureWidth, FPictureHeight, FPictureColors) then
@@ -756,10 +756,7 @@ begin
   LabelFileInfo.Caption := InfoStr;
 
   // If file is an Atari picture, open directly in Picture View mode
-  Ext := UpperCase(ExtractFileExt(FFileName));
-  if FHasPicture and ((Ext = '.PI1') or (Ext = '.PI2') or (Ext = '.PI3') or
-                      (Ext = '.PC1') or (Ext = '.PC2') or (Ext = '.PC3') or
-                      (Ext = '.NEO') or (Ext = '.SPU') or (Ext = '.PAC')) then
+  if FHasPicture then
   begin
     FCurrentMode := 2; // Picture View
     RenderImageView;
