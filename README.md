@@ -1,58 +1,12 @@
 # Atari .ST & MSA File Manager
 
-<img width="560" height="511" alt="image" src="https://github.com/user-attachments/assets/38affcb0-6b13-47d7-9baa-0cdf371e748f" />
+<img width="634" height="529" alt="image" src="https://github.com/user-attachments/assets/3001add6-218b-4dcc-8c10-d4ad69fd99ab" />
+
 
 <img width="766" height="655" alt="image" src="https://github.com/user-attachments/assets/4a273ff5-2dec-4a98-8f0d-ff9a1556e247" />
 
 
-A Lazarus / Free Pascal project for managing and browsing Atari ST disk image files (`.st`, `.msa`).
-
-## Build & Run Chain (Linux + Wine)
-
-This project has been set up with an automated toolchain to compile for Windows Win32 and run under Wine on Linux without needing `sudo` or modifying system packages.
-
-### Prerequisites
-- **Wine** (installed at `/usr/bin/wine`)
-- **Lazarus 32-bit for Windows** (installed at `~/.wine/drive_c/lazarus/`, configured with FPC 3.2.2 and Win32 LCL)
-
-### Available Commands
-
-#### 1. Compile the Windows Executable
-```bash
-./build.sh
-# or
-make
-# or
-make release
-```
-Builds `stimage.exe` (Release mode, optimized, symbols stripped).
-
-#### 2. Compile in Debug Mode
-```bash
-./build.sh --debug
-# or
-make debug
-```
-
-#### 3. Run under Wine
-```bash
-./run.sh
-```
-Runs `wine stimage.exe` using your current X11 display session.
-
-#### 4. Compile and Run in One Step
-```bash
-./compile_and_run.sh
-# or
-make run
-```
-
-#### 5. Clean Build Artifacts
-```bash
-./build.sh --clean
-# or
-make clean
-```
+A Lazarus / Free Pascal project for managing and browsing Atari ST disk image files (`.st`, `.msa`,`.dim`).
 
 ### File List Indicators
 - `*h*` — **Hidden File**: File has the FAT12 hidden attribute bit set (e.g. `R1PP3R.PRG *h*`).
@@ -116,9 +70,3 @@ To recover a deleted file:
 2. Click the **Undelete** button.
 3. Enter the restored filename or missing first character in the dialog prompt.
 4. The tool validates cluster availability in the FAT table, re-links the cluster chain, restores the directory entry, and refreshes the display.
-
----
-
-### How the Toolchain Works
-- **Wine Lazarus (`lazbuild.exe`)**: Builds the project using Free Pascal 3.2.2 with native Win32 LCL bindings.
-- **GVFS / SMB Compatibility Layer**: Because GVFS SMB mounts don't support POSIX file locking required by Wine's intermediate compiler passes (e.g. `.res` resource writing), `build.sh` stages Pascal sources to a local temporary workspace (`/tmp/stimage_build_$USER`), maps it as Wine drive `T:`, compiles in ~1.5s, and syncs `stimage.exe` directly back to the project root.
