@@ -7,7 +7,8 @@ uses
   Classes, SysUtils, Forms, Controls, Graphics, Dialogs, StdCtrls,
   LCLType, ExtCtrls, ComCtrls, StrUtils, Math, DateUtils, LazFileUtils,
   FileUtil, Menus, zipper, unit_clustermap, unit_msa, unit_fileviewer, unit_dragout,
-  unit_depacker, unit_virusscanner, unit_newimage, unit_archivevault;
+  unit_depacker, unit_virusscanner, unit_newimage, unit_archivevault,
+  unit_dim, unit_search;
 
 type
   { TDiskItemInfo represents a single file or directory in the Atari disk image }
@@ -90,9 +91,20 @@ type
     MenuItemExtractAll: TMenuItem;
     MenuItemSep2: TMenuItem;
     MenuItemConvertMSA: TMenuItem;
+    MenuItemConvertDIM: TMenuItem;
     MenuItemSep3: TMenuItem;
     MenuItemExit: TMenuItem;
     MenuItemEdit: TMenuItem;
+    MenuItemFind: TMenuItem;
+    MenuItemSepEdit0: TMenuItem;
+    MenuItemRename: TMenuItem;
+    MenuItemAttributes: TMenuItem;
+    MenuItemAttrReadOnly: TMenuItem;
+    MenuItemAttrHidden: TMenuItem;
+    MenuItemAttrArchive: TMenuItem;
+    MenuItemAttrSep: TMenuItem;
+    MenuItemAttrProperties: TMenuItem;
+    MenuItemSepEdit1: TMenuItem;
     MenuItemAddFile: TMenuItem;
     MenuItemAddFolder: TMenuItem;
     MenuItemCreateDir: TMenuItem;
@@ -114,13 +126,24 @@ type
     MenuItemClusterMap: TMenuItem;
     MenuItemSepTools: TMenuItem;
     MenuItemVirusScanner: TMenuItem;
+    MenuItemSepTools2: TMenuItem;
+    MenuItemMakePCBoot: TMenuItem;
     MenuItemHelp: TMenuItem;
     MenuItemAbout: TMenuItem;
     PopupMenuFiles: TPopupMenu;
     MenuItemPopupOpenArchive: TMenuItem;
     MenuItemPopupSep0: TMenuItem;
     MenuItemPopupView: TMenuItem;
+    MenuItemPopupFind: TMenuItem;
     MenuItemPopupSep1: TMenuItem;
+    MenuItemPopupRename: TMenuItem;
+    MenuItemPopupAttributes: TMenuItem;
+    MenuItemPopupAttrReadOnly: TMenuItem;
+    MenuItemPopupAttrHidden: TMenuItem;
+    MenuItemPopupAttrArchive: TMenuItem;
+    MenuItemPopupAttrSep: TMenuItem;
+    MenuItemPopupAttrProperties: TMenuItem;
+    MenuItemPopupSepAttr: TMenuItem;
     MenuItemPopupExtract: TMenuItem;
     MenuItemPopupExtractDepacked: TMenuItem;
     MenuItemPopupSep2: TMenuItem;
@@ -171,6 +194,14 @@ type
     procedure MenuItemButtonToolbarClick(Sender: TObject);
     procedure MenuItemAboutClick(Sender: TObject);
     procedure FormResize(Sender: TObject);
+    procedure MenuItemConvertDIMClick(Sender: TObject);
+    procedure MenuItemFindClick(Sender: TObject);
+    procedure MenuItemRenameClick(Sender: TObject);
+    procedure MenuItemAttrReadOnlyClick(Sender: TObject);
+    procedure MenuItemAttrHiddenClick(Sender: TObject);
+    procedure MenuItemAttrArchiveClick(Sender: TObject);
+    procedure MenuItemAttrPropertiesClick(Sender: TObject);
+    procedure MenuItemMakePCBootClick(Sender: TObject);
 
   public
     procedure SetButtonToolbarVisible(AVisible: Boolean);
@@ -214,6 +245,8 @@ type
     FDiskSerial: LongWord;            // 24-bit Atari disk serial number (from boot sector $08..$0A)
     FIsMSAImage: Boolean;             // True if currently loaded from/saving to MSA
     FOriginalMSAPath: string;         // Original host path of the MSA file
+    FIsDIMImage: Boolean;             // True if currently loaded from/saving to FastCopy DIM
+    FOriginalDIMPath: string;         // Original host path of the DIM file
     FOriginalSTPath: string;          // Original host path of single-sided interleaved ST file
     FTempSTPath: string;              // Temporary ST image file when working with MSA or de-interleaved ST
     FTempZipExtractedPath: string;    // Temporary ST/MSA image file extracted from ZIP
@@ -332,6 +365,13 @@ type
       // Updates the Delete/Undelete button caption based on current selection
     procedure UndeleteSelectedFile;
       // Restores a previously deleted file and re-links its FAT chain
+    procedure RenameSelectedItem;
+    procedure ToggleSelectedAttribute(AttrBit: Byte);
+    procedure EditSelectedAttributes;
+    procedure MakePCCompatibleBootSector;
+    procedure OpenSearchDialog;
+    procedure HandleSearchNavigate(const ADirPath, AFileName: string);
+    procedure HandleSearchView(const ADirPath, AFileName: string);
   public
   end;
 
@@ -402,7 +442,10 @@ begin
   AIsDeleted := False;
   AIsMarkedDelete := False;
 
-  if (ListViewFiles = nil) or (ListViewFiles.Selected = nil) then Exit;
+  if (ListViewFiles = nil) then Exit;
+  if (ListViewFiles.Selected = nil) and (ListViewFiles.ItemIndex >= 0) and (ListViewFiles.ItemIndex < ListViewFiles.Items.Count) then
+    ListViewFiles.Selected := ListViewFiles.Items[ListViewFiles.ItemIndex];
+  if (ListViewFiles.Selected = nil) then Exit;
   Idx := ListViewFiles.Selected.Index;
   if (Idx < 0) or (Idx > High(FDiskItems)) then Exit;
 
@@ -564,6 +607,8 @@ begin
   FCurrentPath := '';
   FVolumeLabel := '';
   FDiskSerial := 0;
+  FIsDIMImage := False;
+  FOriginalDIMPath := '';
   Self.Caption := 'Atari .ST Image File Manager';
   ProgressBarFreeSpace.Position := 0;
   LabelFreeSpace.Caption := 'Utilized space: 0%';
@@ -1029,7 +1074,7 @@ end;
 procedure TForm1.ButtonOpenImageClick(Sender: TObject);
 begin
   OpenDialog.Options := [ofFileMustExist];
-  OpenDialog.Filter := 'Atari ST Disk Images (*.st;*.msa;*.zip)|*.st;*.msa;*.zip|ST Image Files (*.st)|*.st|MSA Image Files (*.msa)|*.msa|ZIP Archives (*.zip)|*.zip|All Files (*.*)|*.*';
+  OpenDialog.Filter := 'Atari ST Disk Images (*.st;*.msa;*.dim;*.zip)|*.st;*.msa;*.dim;*.zip|ST Image Files (*.st)|*.st|MSA Image Files (*.msa)|*.msa|FastCopy Pro DIM Files (*.dim)|*.dim|ZIP Archives (*.zip)|*.zip|All Files (*.*)|*.*';
   if OpenDialog.Execute then
   begin
     LoadDiskImage(OpenDialog.FileName);
@@ -1336,9 +1381,11 @@ var
   OriginalSize: Int64;
   TempStr, FileDestDir: string;
 begin
-  SaveDialog.Filter := 'Atari .ST Image (*.st)|*.st|Magic Shadow Archiver (*.msa)|*.msa|All Files (*.*)|*.*';
+  SaveDialog.Filter := 'Atari .ST Image (*.st)|*.st|Magic Shadow Archiver (*.msa)|*.msa|FastCopy Pro Image (*.dim)|*.dim|All Files (*.*)|*.*';
   if FIsMSAImage and (FOriginalMSAPath <> '') then
     SaveDialog.FileName := ExtractFileName(FOriginalMSAPath)
+  else if FIsDIMImage and (FOriginalDIMPath <> '') then
+    SaveDialog.FileName := ExtractFileName(FOriginalDIMPath)
   else if FOriginalSTPath <> '' then
     SaveDialog.FileName := ExtractFileName(FOriginalSTPath)
   else if (FOriginalZipPath <> '') and (FTempZipExtractedPath <> '') then
@@ -1460,14 +1507,32 @@ begin
       end;
       SysUtils.DeleteFile(TempFileName);
       FIsMSAImage := True;
+      FIsDIMImage := False;
       FOriginalMSAPath := SaveFileName;
+      FOriginalDIMPath := '';
+    end
+    else if SameText(ExtractFileExt(SaveFileName), '.dim') then
+    begin
+      if FileExists(SaveFileName) then SysUtils.DeleteFile(SaveFileName);
+      if not PackSTToDIM(TempFileName, SaveFileName, 9, 2, 80) then
+      begin
+        ShowMessage('Error: Failed to encode FastCopy DIM disk image.');
+        Exit;
+      end;
+      SysUtils.DeleteFile(TempFileName);
+      FIsDIMImage := True;
+      FIsMSAImage := False;
+      FOriginalDIMPath := SaveFileName;
+      FOriginalMSAPath := '';
     end
     else
     begin
       if FileExists(SaveFileName) then SysUtils.DeleteFile(SaveFileName);
       RenameFile(TempFileName, SaveFileName);
       FIsMSAImage := False;
+      FIsDIMImage := False;
       FOriginalMSAPath := '';
+      FOriginalDIMPath := '';
     end;
     ShowMessage('Changes successfully written to image.');
 
@@ -1487,7 +1552,7 @@ begin
       FOriginalZipPath := '';
     end;
     FImagePath := SaveFileName;
-    if FIsMSAImage then
+    if FIsMSAImage or FIsDIMImage then
       LoadDiskImage(SaveFileName)
     else
     begin
@@ -1885,6 +1950,8 @@ begin
   FDiskSerial := 0;
   FIsMSAImage := False;
   FOriginalMSAPath := '';
+  FIsDIMImage := False;
+  FOriginalDIMPath := '';
   FOriginalSTPath := '';
   FTempSTPath := '';
   FTempZipExtractedPath := '';
@@ -1975,7 +2042,7 @@ begin
   begin
     ItemPath := FileNames[0];
     Ext := LowerCase(ExtractFileExt(ItemPath));
-    if (Ext = '.st') or (Ext = '.msa') or (Ext = '.zip') then
+    if (Ext = '.st') or (Ext = '.msa') or (Ext = '.zip') or (Ext = '.dim') then
     begin
       if (FFilePaths.Count > 0) or (FNewDirectories.Count > 0) or (FFilesToDelete.Count > 0) or (FDirsToDelete.Count > 0) then
       begin
@@ -3108,7 +3175,7 @@ begin
   BpbScore := -1;
   if (FRootDirStart >= 512) and (FRootDirStart + (Int64(FRootEntries) * FAT12_DIR_ENTRY_SIZE) <= AImageFile.Size) and
      (ReservedSectors in [1..10]) and (FNumberOfFATs in [1..2]) and (FSectorsPerFAT in [1..32]) and
-     ((FRootEntries in [64, 112, 224]) or (FRootEntries = 576)) then
+     (FRootEntries >= 16) and (FRootEntries <= 1024) and ((FRootEntries mod 16) = 0) then
   begin
     BpbScore := ScoreDirectoryAtOffset(AImageFile, FRootDirStart, Min(FRootEntries, 16));
   end;
@@ -3714,7 +3781,36 @@ begin
       Exit;
     end;
     FIsMSAImage := True;
+    FIsDIMImage := False;
     FOriginalMSAPath := AFileName;
+    FOriginalDIMPath := '';
+    FOriginalSTPath := '';
+
+    if CheckAndDeinterleaveSingleSidedST(TempFile, DeintTempFile) then
+    begin
+      SysUtils.DeleteFile(TempFile);
+      FTempSTPath := DeintTempFile;
+      FImagePath := DeintTempFile;
+    end
+    else
+    begin
+      FTempSTPath := TempFile;
+      FImagePath := TempFile;
+    end;
+  end
+  else if (Ext = '.dim') or IsDIMFile(AFileName) then
+  begin
+    TempFile := GetTempFile(GetTempDir, 'st-dim-') + '.st';
+    if not UnpackDIMToST(AFileName, TempFile) then
+    begin
+      ShowMessage('Error: Failed to unpack FastCopy DIM disk image.' + sLineBreak +
+        'Please verify that the file is a valid FastCopy Pro disk image.');
+      Exit;
+    end;
+    FIsDIMImage := True;
+    FIsMSAImage := False;
+    FOriginalDIMPath := AFileName;
+    FOriginalMSAPath := '';
     FOriginalSTPath := '';
 
     if CheckAndDeinterleaveSingleSidedST(TempFile, DeintTempFile) then
@@ -3732,7 +3828,9 @@ begin
   else
   begin
     FIsMSAImage := False;
+    FIsDIMImage := False;
     FOriginalMSAPath := '';
+    FOriginalDIMPath := '';
     if CheckAndDeinterleaveSingleSidedST(AFileName, TempFile) then
     begin
       FOriginalSTPath := AFileName;
@@ -3756,6 +3854,8 @@ begin
     Self.Caption := 'Atari .ST Image File Manager - ' + ExtractFileName(FOriginalZipPath) + ' [' + ExtractFileName(FTempZipExtractedPath) + ']'
   else if FIsMSAImage and (FOriginalMSAPath <> '') then
     Self.Caption := 'Atari .ST Image File Manager - ' + ExtractFileName(FOriginalMSAPath)
+  else if FIsDIMImage and (FOriginalDIMPath <> '') then
+    Self.Caption := 'Atari .ST Image File Manager - ' + ExtractFileName(FOriginalDIMPath)
   else if FOriginalSTPath <> '' then
     Self.Caption := 'Atari .ST Image File Manager - ' + ExtractFileName(FOriginalSTPath)
   else
@@ -4140,7 +4240,7 @@ begin
       if UnZip.Entries[I].IsDirectory then Continue;
       EntryName := UnZip.Entries[I].ArchiveFileName;
       Ext := LowerCase(ExtractFileExt(EntryName));
-      if (Ext = '.st') or (Ext = '.msa') then
+      if (Ext = '.st') or (Ext = '.msa') or (Ext = '.dim') then
       begin
         EntrySizeKB := (UnZip.Entries[I].Size + 1023) div 1024;
         MatchingEntries.AddObject(Format('%s (%d KB)', [EntryName, EntrySizeKB]), TObject(PtrUInt(I)));
@@ -4149,7 +4249,7 @@ begin
 
     if MatchingEntries.Count = 0 then
     begin
-      ShowMessage('No Atari ST disk images (.st, .msa) were found inside this ZIP archive:' + sLineBreak +
+      ShowMessage('No Atari ST disk images (.st, .msa, .dim) were found inside this ZIP archive:' + sLineBreak +
         ExtractFileName(AZipPath));
       Exit;
     end
@@ -4702,6 +4802,617 @@ begin
 end;
 
 {------------------------------------------------------------------
+  Procedure: MenuItemConvertDIMClick
+  Purpose:  Converts between uncompressed .ST and FastCopy .DIM disk images
+ ------------------------------------------------------------------}
+procedure TForm1.MenuItemConvertDIMClick(Sender: TObject);
+var
+  SrcFile, DstFile, Ext: string;
+begin
+  OpenDialog.Title := 'Select Disk Image to Convert (.ST or .DIM)';
+  OpenDialog.Filter := 'Atari Disk Images (*.st;*.dim)|*.st;*.dim|FastCopy DIM Image (*.dim)|*.dim|ST Image (*.st)|*.st|All Files (*.*)|*.*';
+  if not OpenDialog.Execute then Exit;
+  SrcFile := OpenDialog.FileName;
+  if not FileExists(SrcFile) then Exit;
+
+  Ext := LowerCase(ExtractFileExt(SrcFile));
+  if (Ext = '.dim') or IsDIMFile(SrcFile) then
+  begin
+    SaveDialog.Title := 'Convert FastCopy DIM to Standard ST Disk Image';
+    SaveDialog.Filter := 'ST Image (*.st)|*.st|All Files (*.*)|*.*';
+    SaveDialog.FileName := ChangeFileExt(ExtractFileName(SrcFile), '.st');
+    if not SaveDialog.Execute then Exit;
+    DstFile := SaveDialog.FileName;
+    if FileExists(DstFile) then SysUtils.DeleteFile(DstFile);
+
+    if UnpackDIMToST(SrcFile, DstFile) then
+      ShowMessage('Conversion complete!' + sLineBreak + 'Unpacked FastCopy DIM image to: ' + DstFile)
+    else
+      ShowMessage('Error: Failed to convert FastCopy DIM image to ST.');
+  end
+  else if Ext = '.st' then
+  begin
+    SaveDialog.Title := 'Convert ST to FastCopy DIM Disk Image';
+    SaveDialog.Filter := 'FastCopy DIM Image (*.dim)|*.dim|All Files (*.*)|*.*';
+    SaveDialog.FileName := ChangeFileExt(ExtractFileName(SrcFile), '.dim');
+    if not SaveDialog.Execute then Exit;
+    DstFile := SaveDialog.FileName;
+    if FileExists(DstFile) then SysUtils.DeleteFile(DstFile);
+
+    if PackSTToDIM(SrcFile, DstFile, 9, 2, 80) then
+      ShowMessage('Conversion complete!' + sLineBreak + 'Packed ST image to FastCopy DIM: ' + DstFile)
+    else
+      ShowMessage('Error: Failed to convert ST image to FastCopy DIM.');
+  end
+  else
+  begin
+    ShowMessage('Please select either a .DIM or .ST disk image file.');
+  end;
+end;
+
+procedure TForm1.MenuItemFindClick(Sender: TObject);
+begin
+  OpenSearchDialog;
+end;
+
+procedure TForm1.MenuItemRenameClick(Sender: TObject);
+begin
+  RenameSelectedItem;
+end;
+
+procedure TForm1.MenuItemAttrReadOnlyClick(Sender: TObject);
+begin
+  ToggleSelectedAttribute($01);
+end;
+
+procedure TForm1.MenuItemAttrHiddenClick(Sender: TObject);
+begin
+  ToggleSelectedAttribute($02);
+end;
+
+procedure TForm1.MenuItemAttrArchiveClick(Sender: TObject);
+begin
+  ToggleSelectedAttribute($20);
+end;
+
+procedure TForm1.MenuItemAttrPropertiesClick(Sender: TObject);
+begin
+  EditSelectedAttributes;
+end;
+
+procedure TForm1.MenuItemMakePCBootClick(Sender: TObject);
+begin
+  MakePCCompatibleBootSector;
+end;
+
+procedure TForm1.OpenSearchDialog;
+begin
+  if (FImagePath = '') or (not FileExists(FImagePath)) then
+  begin
+    ShowMessage('Please open a disk image first before searching.');
+    Exit;
+  end;
+
+  FormSearch.OnNavigateToFile := @HandleSearchNavigate;
+  FormSearch.OnViewFile := @HandleSearchView;
+  FormSearch.OpenForSearch(FImagePath, FCurrentPath);
+end;
+
+procedure TForm1.HandleSearchNavigate(const ADirPath, AFileName: string);
+var
+  I: Integer;
+  TargetName: string;
+begin
+  if ADirPath <> FCurrentPath then
+  begin
+    FCurrentPath := ADirPath;
+    ReadSTImage(FImagePath, FCurrentPath);
+    UpdateFileListDisplay;
+    UpdateStatusBar;
+  end;
+
+  TargetName := StringReplace(AFileName, '\', '', [rfReplaceAll]);
+  for I := 0 to ListViewFiles.Items.Count - 1 do
+  begin
+    if SameText(ListViewFiles.Items[I].Caption, TargetName) or
+       SameText(ListViewFiles.Items[I].Caption, TargetName + '\') then
+    begin
+      ListViewFiles.Items[I].Selected := True;
+      ListViewFiles.Items[I].Focused := True;
+      ListViewFiles.Items[I].MakeVisible(False);
+      Break;
+    end;
+  end;
+end;
+
+procedure TForm1.HandleSearchView(const ADirPath, AFileName: string);
+var
+  SavedPath: string;
+begin
+  SavedPath := FCurrentPath;
+  try
+    HandleSearchNavigate(ADirPath, AFileName);
+    ButtonViewFileClick(nil);
+  finally
+    if FCurrentPath <> SavedPath then
+    begin
+      FCurrentPath := SavedPath;
+      ReadSTImage(FImagePath, FCurrentPath);
+      UpdateFileListDisplay;
+    end;
+  end;
+end;
+
+procedure TForm1.RenameSelectedItem;
+var
+  RawName, OldName, NewName, BaseName, ExtName: string;
+  IsDir, IsStaged, IsDel, IsMarkedDel: Boolean;
+  ImageFile: TFileStream;
+  DirCluster, DirEntryPos, ExistingPos: Int64;
+  FormattedName: array[0..10] of Byte;
+  DotPos, I: Integer;
+begin
+  if FInArchiveMode then
+  begin
+    ShowMessage('Renaming files inside archives is not supported.');
+    Exit;
+  end;
+
+  if not GetSelectedFileName(RawName, OldName, IsDir, IsStaged, IsDel, IsMarkedDel) then
+  begin
+    ShowMessage('Please select a file or folder to rename.');
+    Exit;
+  end;
+
+  if (OldName = '..') or (OldName = '..\') or (OldName = '.') then Exit;
+
+  if IsDel then
+  begin
+    ShowMessage('Cannot rename a deleted file. Undelete it first.');
+    Exit;
+  end;
+
+  // Strip trailing backslash for display and prompt
+  OldName := StringReplace(OldName, '\', '', [rfReplaceAll]);
+
+  NewName := InputBox('Rename File / Directory', 'Enter new name for "' + OldName + '":', OldName);
+  NewName := Trim(NewName);
+  if (NewName = '') or SameText(NewName, OldName) then Exit;
+
+  // Sanitize and validate 8.3 filename
+  for I := 1 to Length(NewName) do
+  begin
+    if NewName[I] in ['/', '\', ':', '*', '?', '"', '<', '>', '|', ';', ','] then
+    begin
+      ShowMessage('Error: Filename contains invalid characters (' + NewName[I] + ').');
+      Exit;
+    end;
+  end;
+
+  NewName := UpperCase(NewName);
+  DotPos := Pos('.', NewName);
+  if DotPos > 0 then
+  begin
+    BaseName := Copy(NewName, 1, DotPos - 1);
+    ExtName := Copy(NewName, DotPos + 1, Length(NewName));
+  end
+  else
+  begin
+    BaseName := NewName;
+    ExtName := '';
+  end;
+
+  if Length(BaseName) > 8 then BaseName := Copy(BaseName, 1, 8);
+  if Length(ExtName) > 3 then ExtName := Copy(ExtName, 1, 3);
+
+  if ExtName <> '' then
+    NewName := BaseName + '.' + ExtName
+  else
+    NewName := BaseName;
+
+  if SameText(NewName, OldName) then Exit;
+
+  // Case 1: Staged file addition
+  if IsStaged then
+  begin
+    ShowMessage('Rename the file on your computer before adding, or write changes first.');
+    Exit;
+  end;
+
+  // Case 2: On-disk file or directory
+  if (FImagePath = '') or (not FileExists(FImagePath)) then Exit;
+
+  ImageFile := TFileStream.Create(FImagePath, fmOpenReadWrite or fmShareDenyNone);
+  try
+    GetFATDetails(ImageFile);
+    DirCluster := FindDirectoryInPath(ImageFile, FCurrentPath);
+
+    // Check if new name already exists
+    ExistingPos := FindFileInDirectory(ImageFile, DirCluster, NewName);
+    if ExistingPos <> -1 then
+    begin
+      ShowMessage(Format('Error: An item named "%s" already exists in this folder.', [NewName]));
+      Exit;
+    end;
+
+    // Find original entry
+    DirEntryPos := FindFileInDirectory(ImageFile, DirCluster, OldName);
+    if DirEntryPos = -1 then
+    begin
+      ShowMessage(Format(ERR_FILE_NOT_FOUND, [OldName]));
+      Exit;
+    end;
+
+    // Format new 8.3 name into 11 bytes space-padded
+    FillChar(FormattedName, 11, $20);
+    Move(PAnsiChar(BaseName)^, FormattedName[0], Length(BaseName));
+    if ExtName <> '' then
+      Move(PAnsiChar(ExtName)^, FormattedName[8], Length(ExtName));
+
+    // Update directory entry on disk
+    ImageFile.Position := DirEntryPos;
+    ImageFile.WriteBuffer(FormattedName, 11);
+  finally
+    ImageFile.Free;
+  end;
+
+  // Refresh display
+  ReadSTImage(FImagePath, FCurrentPath);
+  UpdateFileListDisplay;
+
+  // Find and select the renamed item
+  for I := 0 to ListViewFiles.Items.Count - 1 do
+  begin
+    if SameText(ListViewFiles.Items[I].Caption, NewName) or
+       SameText(ListViewFiles.Items[I].Caption, NewName + '\') then
+    begin
+      ListViewFiles.Items[I].Selected := True;
+      ListViewFiles.Items[I].Focused := True;
+      ListViewFiles.Items[I].MakeVisible(False);
+      Break;
+    end;
+  end;
+
+  UpdateStatusBar;
+end;
+
+procedure TForm1.ToggleSelectedAttribute(AttrBit: Byte);
+var
+  RawName, CleanName: string;
+  IsDir, IsStaged, IsDel, IsMarkedDel: Boolean;
+  ImageFile: TFileStream;
+  DirCluster, DirEntryPos: Int64;
+  CurrentAttr, NewAttr: Byte;
+  I: Integer;
+  TargetName: string;
+begin
+  if FInArchiveMode then
+  begin
+    ShowMessage('Cannot modify attributes of files inside archives.');
+    Exit;
+  end;
+
+  if not GetSelectedFileName(RawName, CleanName, IsDir, IsStaged, IsDel, IsMarkedDel) then
+  begin
+    ShowMessage('Please select a file or directory first.');
+    Exit;
+  end;
+
+  if (CleanName = '..') or (CleanName = '..\') or (CleanName = '.') then Exit;
+
+  if IsDel then
+  begin
+    ShowMessage('Cannot change attributes of a deleted file.');
+    Exit;
+  end;
+
+  if IsStaged then
+  begin
+    ShowMessage('Save the image first to change attributes of newly added files.');
+    Exit;
+  end;
+
+  TargetName := StringReplace(CleanName, '\', '', [rfReplaceAll]);
+
+  if (FImagePath = '') or (not FileExists(FImagePath)) then Exit;
+
+  ImageFile := TFileStream.Create(FImagePath, fmOpenReadWrite or fmShareDenyNone);
+  try
+    GetFATDetails(ImageFile);
+    DirCluster := FindDirectoryInPath(ImageFile, FCurrentPath);
+    DirEntryPos := FindFileInDirectory(ImageFile, DirCluster, TargetName);
+    if DirEntryPos = -1 then
+    begin
+      ShowMessage(Format(ERR_FILE_NOT_FOUND, [TargetName]));
+      Exit;
+    end;
+
+    // Read attribute byte at offset 11 of entry
+    ImageFile.Position := DirEntryPos + 11;
+    ImageFile.ReadBuffer(CurrentAttr, 1);
+
+    // Toggle bit
+    NewAttr := CurrentAttr xor AttrBit;
+
+    // Write back
+    ImageFile.Position := DirEntryPos + 11;
+    ImageFile.WriteBuffer(NewAttr, 1);
+  finally
+    ImageFile.Free;
+  end;
+
+  // Refresh
+  ReadSTImage(FImagePath, FCurrentPath);
+  UpdateFileListDisplay;
+
+  // Restore selection
+  for I := 0 to ListViewFiles.Items.Count - 1 do
+  begin
+    if SameText(ListViewFiles.Items[I].Caption, CleanName) or
+       SameText(ListViewFiles.Items[I].Caption, CleanName + '\') then
+    begin
+      ListViewFiles.Items[I].Selected := True;
+      ListViewFiles.Items[I].Focused := True;
+      Break;
+    end;
+  end;
+  UpdateStatusBar;
+end;
+
+procedure TForm1.EditSelectedAttributes;
+var
+  RawName, CleanName: string;
+  IsDir, IsStaged, IsDel, IsMarkedDel: Boolean;
+  ImageFile: TFileStream;
+  DirCluster, DirEntryPos: Int64;
+  Attr: Byte;
+  AttrStr: string;
+  NewAttrStr: string;
+  NewAttr: Byte;
+  I: Integer;
+begin
+  if FInArchiveMode then
+  begin
+    ShowMessage('Cannot modify attributes of files inside archives.');
+    Exit;
+  end;
+
+  if not GetSelectedFileName(RawName, CleanName, IsDir, IsStaged, IsDel, IsMarkedDel) then
+  begin
+    ShowMessage('Please select a file or folder first.');
+    Exit;
+  end;
+
+  if (CleanName = '..') or (CleanName = '..\') or (CleanName = '.') then Exit;
+
+  if IsDel then
+  begin
+    ShowMessage('Cannot edit attributes of a deleted file.');
+    Exit;
+  end;
+
+  if IsStaged then
+  begin
+    ShowMessage('Save the image first to edit attributes of newly added files.');
+    Exit;
+  end;
+
+  CleanName := StringReplace(CleanName, '\', '', [rfReplaceAll]);
+
+  if (FImagePath = '') or not FileExists(FImagePath) then Exit;
+
+  ImageFile := TFileStream.Create(FImagePath, fmOpenReadWrite or fmShareDenyNone);
+  try
+    GetFATDetails(ImageFile);
+    DirCluster := FindDirectoryInPath(ImageFile, FCurrentPath);
+    DirEntryPos := FindFileInDirectory(ImageFile, DirCluster, CleanName);
+    if DirEntryPos = -1 then
+    begin
+      ShowMessage(Format(ERR_FILE_NOT_FOUND, [CleanName]));
+      Exit;
+    end;
+
+    ImageFile.Position := DirEntryPos + 11;
+    ImageFile.ReadBuffer(Attr, 1);
+
+    AttrStr := '';
+    if (Attr and $01) <> 0 then AttrStr := AttrStr + 'R';
+    if (Attr and $02) <> 0 then AttrStr := AttrStr + 'H';
+    if (Attr and $20) <> 0 then AttrStr := AttrStr + 'A';
+
+    NewAttrStr := InputBox('Edit Attributes for "' + CleanName + '"',
+      'Enter attribute letters to enable (R = Read-Only, H = Hidden, A = Archive):', AttrStr);
+    NewAttrStr := UpperCase(Trim(NewAttrStr));
+
+    // Preserve directory bit and other system bits
+    NewAttr := Attr and not ($01 or $02 or $20);
+    if Pos('R', NewAttrStr) > 0 then NewAttr := NewAttr or $01;
+    if Pos('H', NewAttrStr) > 0 then NewAttr := NewAttr or $02;
+    if Pos('A', NewAttrStr) > 0 then NewAttr := NewAttr or $20;
+
+    ImageFile.Position := DirEntryPos + 11;
+    ImageFile.WriteBuffer(NewAttr, 1);
+  finally
+    ImageFile.Free;
+  end;
+
+  ReadSTImage(FImagePath, FCurrentPath);
+  UpdateFileListDisplay;
+
+  for I := 0 to ListViewFiles.Items.Count - 1 do
+  begin
+    if SameText(ListViewFiles.Items[I].Caption, CleanName) or
+       SameText(ListViewFiles.Items[I].Caption, CleanName + '\') then
+    begin
+      ListViewFiles.Items[I].Selected := True;
+      ListViewFiles.Items[I].Focused := True;
+      Break;
+    end;
+  end;
+  UpdateStatusBar;
+end;
+
+procedure TForm1.MakePCCompatibleBootSector;
+var
+  FS: TFileStream;
+  BootSec: array[0..511] of Byte;
+  BytesPerSec, SecPerFAT, TotalSec, ReservedSec, RootEntries, SecPerTrack, Sides: Word;
+  SecPerClust, NumFATs, MediaByte: Byte;
+  I: Integer;
+  BootSum: Word;
+begin
+  if (FImagePath = '') or not FileExists(FImagePath) then
+  begin
+    ShowMessage('Please open a disk image first.');
+    Exit;
+  end;
+
+  if FInArchiveMode then
+  begin
+    ShowMessage('Cannot modify boot sector while browsing an archive.');
+    Exit;
+  end;
+
+  if MessageDlg('Make PC-Compatible Boot Sector',
+    'This tool installs a standard MS-DOS / PC compatible BIOS Parameter Block (BPB)' + sLineBreak +
+    'with standard x86 jump instruction ($EB $3C $90), "MSDOS5.0" OEM string, and $55AA signature.' + sLineBreak + sLineBreak +
+    'This allows modern Windows, Linux, and Mac systems to read the disk seamlessly,' + sLineBreak +
+    'while remaining 100% compatible with Atari ST TOS.' + sLineBreak + sLineBreak +
+    'Do you want to proceed?', mtConfirmation, [mbYes, mbNo], 0) <> mrYes then
+    Exit;
+
+  FS := TFileStream.Create(FImagePath, fmOpenReadWrite or fmShareDenyNone);
+  try
+    if FS.Size < 512 then
+    begin
+      ShowMessage('Error: Image size is less than 512 bytes.');
+      Exit;
+    end;
+
+    FS.Position := 0;
+    FS.ReadBuffer(BootSec, 512);
+
+    // Read current BPB values
+    Move(BootSec[$0B], BytesPerSec, 2);
+    SecPerClust := BootSec[$0D];
+    Move(BootSec[$0E], ReservedSec, 2);
+    NumFATs := BootSec[$10];
+    Move(BootSec[$11], RootEntries, 2);
+    Move(BootSec[$13], TotalSec, 2);
+    MediaByte := BootSec[$15];
+    Move(BootSec[$16], SecPerFAT, 2);
+    Move(BootSec[$18], SecPerTrack, 2);
+    Move(BootSec[$1A], Sides, 2);
+
+    // Validate and fallback to standard geometry if unformatted/invalid
+    if BytesPerSec <> 512 then BytesPerSec := 512;
+    if SecPerClust = 0 then
+    begin
+      if TotalSec <= 720 then SecPerClust := 1 else SecPerClust := 2;
+    end;
+    if ReservedSec = 0 then ReservedSec := 1;
+    if NumFATs = 0 then NumFATs := 2;
+    if RootEntries = 0 then
+    begin
+      if TotalSec <= 720 then RootEntries := 64 else RootEntries := 112;
+    end;
+    if TotalSec = 0 then
+    begin
+      TotalSec := Word(Min(65535, FS.Size div BytesPerSec));
+    end;
+    if (MediaByte < $F0) then
+    begin
+      if TotalSec <= 720 then MediaByte := $F7 else MediaByte := $F9;
+    end;
+    if SecPerFAT = 0 then
+    begin
+      if TotalSec <= 720 then SecPerFAT := 2 else SecPerFAT := 5;
+    end;
+    if SecPerTrack = 0 then SecPerTrack := 9;
+    if Sides = 0 then
+    begin
+      if TotalSec <= 720 then Sides := 1 else Sides := 2;
+    end;
+
+    // 1. Jump instruction (JMP SHORT $3C; NOP -> lands at offset $3E)
+    BootSec[0] := $EB;
+    BootSec[1] := $3C;
+    BootSec[2] := $90;
+
+    // 2. OEM Name: "MSDOS5.0"
+    Move(PAnsiChar('MSDOS5.0')^, BootSec[3], 8);
+
+    // 3. BPB
+    Move(BytesPerSec, BootSec[$0B], 2);
+    BootSec[$0D] := SecPerClust;
+    Move(ReservedSec, BootSec[$0E], 2);
+    BootSec[$10] := NumFATs;
+    Move(RootEntries, BootSec[$11], 2);
+    Move(TotalSec, BootSec[$13], 2);
+    BootSec[$15] := MediaByte;
+    Move(SecPerFAT, BootSec[$16], 2);
+    Move(SecPerTrack, BootSec[$18], 2);
+    Move(Sides, BootSec[$1A], 2);
+    FillChar(BootSec[$1C], 8, 0); // Hidden sectors + 32-bit total sectors = 0
+
+    // 4. Extended BPB
+    BootSec[$24] := $00; // Physical drive 0
+    BootSec[$25] := $00; // Reserved
+    BootSec[$26] := $29; // Extended boot signature
+    // Serial number at $27..$2A (if 0, generate random)
+    if (BootSec[$27] = 0) and (BootSec[$28] = 0) and (BootSec[$29] = 0) and (BootSec[$2A] = 0) then
+    begin
+      BootSec[$27] := Byte(Random(256));
+      BootSec[$28] := Byte(Random(256));
+      BootSec[$29] := Byte(Random(256));
+      BootSec[$2A] := Byte(Random(256));
+    end;
+    // Volume label at $2B..$35 (11 bytes)
+    if FVolumeLabel <> '' then
+      Move(PAnsiChar(PadRight(FVolumeLabel, 11))^, BootSec[$2B], 11)
+    else
+      Move(PAnsiChar('NO NAME    ')^, BootSec[$2B], 11);
+
+    // File System Type: "FAT12   "
+    Move(PAnsiChar('FAT12   ')^, BootSec[$36], 8);
+
+    // 5. Clear remainder of boot code up to signature with dummy code
+    FillChar(BootSec[$3E], 510 - $3E, 0);
+    BootSec[$3E] := $FA; // x86 CLI
+    BootSec[$3F] := $F4; // x86 HLT
+    BootSec[$40] := $CB; // x86 RETF
+
+    // 6. MS-DOS Boot Signature: $55 $AA at offset 510..511
+    BootSec[510] := $55;
+    BootSec[511] := $AA;
+
+    // 7. Ensure Atari TOS does NOT treat this as an executable boot sector
+    // TOS sums 256 16-bit big-endian words. If sum = $1234, TOS executes it!
+    BootSum := 0;
+    for I := 0 to 255 do
+      Inc(BootSum, (Word(BootSec[I * 2]) shl 8) or BootSec[I * 2 + 1]);
+
+    if BootSum = $1234 then
+    begin
+      Inc(BootSec[508]);
+    end;
+
+    // Write updated Sector 0
+    FS.Position := 0;
+    FS.WriteBuffer(BootSec, 512);
+
+    GetFATDetails(FS);
+  finally
+    FS.Free;
+  end;
+
+  UpdateFreeSpaceDisplay;
+  ShowMessage('Boot sector updated successfully!' + sLineBreak + sLineBreak +
+    'The disk image now features a standard PC/TOS dual-compatible BPB' + sLineBreak +
+    'with valid OEM identification, extended parameters, and $55AA boot signature.');
+end;
+
+{------------------------------------------------------------------
   Procedure: ButtonSaveFileClick
   Purpose:  Event handler for extracting/saving the selected file
  ------------------------------------------------------------------}
@@ -5003,6 +5714,23 @@ begin
     Exit;
   end;
 
+  if (Key = VK_F) and (ssCtrl in Shift) then
+  begin
+    Key := 0;
+    OpenSearchDialog;
+    Exit;
+  end;
+
+  if Key = VK_F2 then
+  begin
+    if (ListViewFiles.Selected <> nil) then
+    begin
+      Key := 0;
+      RenameSelectedItem;
+      Exit;
+    end;
+  end;
+
   if (Key = VK_BACK) or ((ssAlt in Shift) and (Key = VK_UP)) then
   begin
     if FInArchiveMode or (FCurrentPath <> '') then
@@ -5028,10 +5756,24 @@ end;
   Procedure: ListViewFilesKeyDown
   Purpose:  Keyboard navigation inside the file list:
             Enter: open dir or view file, Delete: delete/undelete,
-            Backspace / Alt+Up: parent dir
+            F2: rename, Ctrl+F: find, Backspace / Alt+Up: parent dir
  ------------------------------------------------------------------}
 procedure TForm1.ListViewFilesKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
 begin
+  if (Key = VK_F) and (ssCtrl in Shift) then
+  begin
+    Key := 0;
+    OpenSearchDialog;
+    Exit;
+  end;
+
+  if Key = VK_F2 then
+  begin
+    Key := 0;
+    RenameSelectedItem;
+    Exit;
+  end;
+
   if Key = VK_RETURN then
   begin
     ListViewFilesDblClick(nil);
@@ -5187,17 +5929,36 @@ begin
 
   HasSelection := GetSelectedFileName(RawName, CleanName, IsDir, IsStaged, IsDel, IsMarkedDel);
 
+  MenuItemPopupFind.Enabled := (FImagePath <> '') and FileExists(FImagePath);
+
   if not HasSelection or (CleanName = '..') or (CleanName = '..\') then
   begin
     MenuItemPopupOpenArchive.Visible := False;
     MenuItemPopupSep0.Visible := False;
     MenuItemPopupView.Enabled := False;
+    MenuItemPopupRename.Enabled := False;
+    MenuItemPopupAttributes.Enabled := False;
     MenuItemPopupExtract.Enabled := False;
     MenuItemPopupExtractDepacked.Enabled := False;
     MenuItemPopupClusterMap.Enabled := False;
     MenuItemPopupDelete.Enabled := False;
     MenuItemPopupDelete.Caption := '&Delete';
     Exit;
+  end;
+
+  // Rename and Attributes
+  MenuItemPopupRename.Enabled := not IsDel and not FInArchiveMode;
+  MenuItemPopupAttributes.Enabled := not IsDel and not IsStaged and not FInArchiveMode;
+
+  if (ListViewFiles.Selected <> nil) and (ListViewFiles.Selected.SubItems.Count >= 4) then
+  begin
+    MenuItemPopupAttrArchive.Checked := (Length(ListViewFiles.Selected.SubItems[3]) >= 2) and (ListViewFiles.Selected.SubItems[3][2] = 'A');
+    MenuItemPopupAttrReadOnly.Checked := (Length(ListViewFiles.Selected.SubItems[3]) >= 3) and (ListViewFiles.Selected.SubItems[3][3] = 'R');
+    MenuItemPopupAttrHidden.Checked := (Length(ListViewFiles.Selected.SubItems[3]) >= 4) and (ListViewFiles.Selected.SubItems[3][4] = 'H');
+
+    MenuItemAttrArchive.Checked := MenuItemPopupAttrArchive.Checked;
+    MenuItemAttrReadOnly.Checked := MenuItemPopupAttrReadOnly.Checked;
+    MenuItemAttrHidden.Checked := MenuItemPopupAttrHidden.Checked;
   end;
 
   // Open archive option
@@ -5562,6 +6323,11 @@ begin
     ListViewFiles.Items.EndUpdate;
   end;
   UpdateLayout;
+  if (ListViewFiles.Items.Count > 0) and (ListViewFiles.Selected = nil) then
+  begin
+    ListViewFiles.ItemIndex := 0;
+    ListViewFiles.Selected := ListViewFiles.Items[0];
+  end;
 end;
 
 {------------------------------------------------------------------
@@ -5796,6 +6562,8 @@ begin
   begin
     if FIsMSAImage then
       FormatStr := '[MSA] '
+    else if FIsDIMImage then
+      FormatStr := '[DIM] '
     else
       FormatStr := '[ST] ';
 

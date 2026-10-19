@@ -6,7 +6,7 @@ interface
 
 uses
   Classes, SysUtils, Forms, Controls, Graphics, Dialogs, StdCtrls, ExtCtrls, Math,
-  unit_depacker, unit_ataripic;
+  unit_depacker, unit_ataripic, unit_atariaudio;
 
 type
   { TFormFileViewer }
@@ -21,6 +21,7 @@ type
     ButtonDepack: TButton;
     ButtonSaveCopy: TButton;
     ButtonSaveDepacked: TButton;
+    ButtonPlayAudio: TButton;
     MemoContent: TMemo;
     ScrollBoxImage: TScrollBox;
     ImagePicture: TImage;
@@ -35,6 +36,7 @@ type
     procedure ButtonDepackClick(Sender: TObject);
     procedure ButtonSaveCopyClick(Sender: TObject);
     procedure ButtonSaveDepackedClick(Sender: TObject);
+    procedure ButtonPlayAudioClick(Sender: TObject);
 
   private
     FData: TBytes;
@@ -55,10 +57,15 @@ type
     FHasPicture: Boolean;
     FZoomMode: Integer; // 0 = 2x, 1 = 1x, 2 = Fit
 
+    FAudioInfo: TAtariAudioInfo;
+    FHasAudio: Boolean;
+    FIsAudioPlaying: Boolean;
+
     procedure RenderHexView;
     procedure RenderTextView;
     procedure RenderImageView;
     procedure CheckAndDecodePicture(const AData: TBytes);
+    procedure CheckAndDecodeAudio(const AData: TBytes);
     function DecodePRGHeader: string;
     function TryPerformDepack: Boolean;
 
@@ -97,10 +104,13 @@ begin
   FPictureBitmap := nil;
   FHasPicture := False;
   FZoomMode := 0; // Default to 2x zoom
+  FHasAudio := False;
+  FIsAudioPlaying := False;
 end;
 
 procedure TFormFileViewer.FormDestroy(Sender: TObject);
 begin
+  StopAudio;
   if FPictureBitmap <> nil then
   begin
     FPictureBitmap.Free;
@@ -167,6 +177,50 @@ begin
 
   ButtonImageMode.Visible := FHasPicture;
   ButtonImageMode.Enabled := FHasPicture;
+end;
+
+procedure TFormFileViewer.CheckAndDecodeAudio(const AData: TBytes);
+begin
+  StopAudio;
+  FIsAudioPlaying := False;
+  FHasAudio := False;
+  if Length(AData) >= 12 then
+  begin
+    FHasAudio := DetectAndInspectAudio(@AData[0], Length(AData), FFileName, FAudioInfo);
+  end;
+
+  if FHasAudio and FAudioInfo.CanPlay then
+  begin
+    ButtonPlayAudio.Caption := '▶ Play Audio';
+    ButtonPlayAudio.Visible := True;
+    ButtonPlayAudio.Enabled := True;
+  end
+  else
+  begin
+    ButtonPlayAudio.Visible := False;
+    ButtonPlayAudio.Enabled := False;
+  end;
+end;
+
+procedure TFormFileViewer.ButtonPlayAudioClick(Sender: TObject);
+begin
+  if not FHasAudio then Exit;
+
+  if FIsAudioPlaying then
+  begin
+    StopAudio;
+    FIsAudioPlaying := False;
+    ButtonPlayAudio.Caption := '▶ Play Audio';
+  end
+  else
+  begin
+    if Length(FAudioInfo.WaveformData) > 0 then
+    begin
+      PlayAudioBuffer(FAudioInfo.WaveformData);
+      FIsAudioPlaying := True;
+      ButtonPlayAudio.Caption := '⏹ Stop Audio';
+    end;
+  end;
 end;
 
 procedure TFormFileViewer.RenderImageView;
@@ -263,6 +317,7 @@ begin
     ButtonDepack.Caption := 'View Packed';
 
     CheckAndDecodePicture(FData);
+    CheckAndDecodeAudio(FData);
 
     InfoStr := Format('DEPACKED [%s] | Size: %s bytes (Packed: %s bytes, Ratio: %.1f%%)',
       [FDetectedPacker,
@@ -272,6 +327,14 @@ begin
 
     if FHasPicture then
       InfoStr := InfoStr + ' | Picture: ' + FPictureFormatDesc;
+
+    if FHasAudio then
+    begin
+      if FAudioInfo.DurationSec > 0 then
+        InfoStr := InfoStr + Format(' | Audio: %s (%.1fs)', [FAudioInfo.FormatName, FAudioInfo.DurationSec])
+      else
+        InfoStr := InfoStr + ' | Audio: ' + FAudioInfo.FormatName;
+    end;
 
     LabelFileInfo.Caption := InfoStr;
 
@@ -291,6 +354,7 @@ begin
     ButtonDepack.Caption := 'View Depacked';
 
     CheckAndDecodePicture(FData);
+    CheckAndDecodeAudio(FData);
 
     InfoStr := Format('PACKED [%s] | Size: %s bytes', [FDetectedPacker, FormatFloat('#,##0', Length(FOriginalData))]);
     if FStartCluster > 0 then
@@ -298,6 +362,14 @@ begin
 
     if FHasPicture then
       InfoStr := InfoStr + ' | Picture: ' + FPictureFormatDesc;
+
+    if FHasAudio then
+    begin
+      if FAudioInfo.DurationSec > 0 then
+        InfoStr := InfoStr + Format(' | Audio: %s (%.1fs)', [FAudioInfo.FormatName, FAudioInfo.DurationSec])
+      else
+        InfoStr := InfoStr + ' | Audio: ' + FAudioInfo.FormatName;
+    end;
 
     LabelFileInfo.Caption := InfoStr;
 
@@ -557,6 +629,12 @@ begin
                      '================================' + sLineBreak + sLineBreak,
                      [StatusDesc, FormatFloat('#,##0', Length(FData))]);
   end;
+
+  // 4. ATARI AUDIO & CHIPTUNE FILE
+  if FHasAudio then
+  begin
+    Result := FormatAudioInspectorHeader(FAudioInfo, Length(FData)) + Result;
+  end;
 end;
 
 procedure TFormFileViewer.RenderHexView;
@@ -741,6 +819,9 @@ begin
   // Check if file is an Atari ST picture
   CheckAndDecodePicture(ABytes);
 
+  // Check if file is an Atari audio / chiptune
+  CheckAndDecodeAudio(ABytes);
+
   InfoStr := Format('Size: %s bytes', [FormatFloat('#,##0', Length(FData))]);
   if FStartCluster > 0 then
     InfoStr := InfoStr + Format(' | Cluster: #%d ($%.3X)', [FStartCluster, FStartCluster]);
@@ -752,6 +833,14 @@ begin
 
   if FHasPicture then
     InfoStr := InfoStr + ' | Picture: ' + FPictureFormatDesc;
+
+  if FHasAudio then
+  begin
+    if FAudioInfo.DurationSec > 0 then
+      InfoStr := InfoStr + Format(' | Audio: %s (%.1fs)', [FAudioInfo.FormatName, FAudioInfo.DurationSec])
+    else
+      InfoStr := InfoStr + ' | Audio: ' + FAudioInfo.FormatName;
+  end;
 
   LabelFileInfo.Caption := InfoStr;
 

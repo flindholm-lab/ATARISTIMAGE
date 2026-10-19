@@ -1,0 +1,172 @@
+object FormSearch: TFormSearch
+  Left = 400
+  Height = 460
+  Top = 200
+  Width = 720
+  Caption = 'Find Files in Disk Image'
+  ClientHeight = 460
+  ClientWidth = 720
+  Color = clBtnFace
+  Font.Color = clWindowText
+  Font.Height = -11
+  Font.Name = 'Tahoma'
+  Position = poScreenCenter
+  OnCreate = FormCreate
+  LCLVersion = '2.2.6.0'
+  object PanelTop: TPanel
+    Left = 0
+    Height = 88
+    Top = 0
+    Width = 720
+    Align = alTop
+    BevelOuter = bvNone
+    ClientHeight = 88
+    ClientWidth = 720
+    TabOrder = 0
+    object LabelPrompt: TLabel
+      Left = 14
+      Height = 14
+      Top = 10
+      Width = 236
+      Caption = 'Search for filename or pattern (e.g. *.PRG, PAC):'
+      Font.Color = clWindowText
+      Font.Height = -11
+      Font.Name = 'Tahoma'
+      Font.Style = [fsBold]
+      ParentColor = False
+      ParentFont = False
+    end
+    object EditQuery: TEdit
+      Left = 14
+      Height = 23
+      Top = 28
+      Width = 570
+      OnKeyDown = EditQueryKeyDown
+      TabOrder = 0
+    end
+    object ButtonSearch: TButton
+      Left = 594
+      Height = 25
+      Top = 27
+      Width = 112
+      Caption = '&Search'
+      Default = True
+      OnClick = ButtonSearchClick
+      TabOrder = 1
+    end
+    object CheckBoxRecursive: TCheckBox
+      Left = 14
+      Height = 19
+      Top = 58
+      Width = 190
+      Caption = 'Search subdirectories recursively'
+      Checked = True
+      State = cbChecked
+      TabOrder = 2
+    end
+    object CheckBoxCaseSensitive: TCheckBox
+      Left = 220
+      Height = 19
+      Top = 58
+      Width = 92
+      Caption = 'Case sensitive'
+      TabOrder = 3
+    end
+    object CheckBoxIncludeDeleted: TCheckBox
+      Left = 330
+      Height = 19
+      Top = 58
+      Width = 125
+      Caption = 'Include deleted (*d*)'
+      TabOrder = 4
+    end
+  end
+  object ListViewResults: TListView
+    Left = 0
+    Height = 328
+    Top = 88
+    Width = 720
+    Align = alClient
+    Columns = <    
+      item
+        Caption = 'File Name'
+        Width = 170
+      end    
+      item
+        Caption = 'Directory Path'
+        Width = 180
+      end    
+      item
+        Alignment = taRightJustify
+        Caption = 'Size'
+        Width = 85
+      end    
+      item
+        Alignment = taRightJustify
+        Caption = 'Cluster'
+        Width = 60
+      end    
+      item
+        Caption = 'Date / Time'
+        Width = 125
+      end    
+      item
+        Caption = 'Attr'
+        Width = 70
+      end>
+    GridLines = True
+    ReadOnly = True
+    RowSelect = True
+    TabOrder = 1
+    ViewStyle = vsReport
+    OnDblClick = ListViewResultsDblClick
+    OnKeyDown = ListViewResultsKeyDown
+  end
+  object PanelBottom: TPanel
+    Left = 0
+    Height = 44
+    Top = 416
+    Width = 720
+    Align = alBottom
+    BevelOuter = bvNone
+    ClientHeight = 44
+    ClientWidth = 720
+    TabOrder = 2
+    object LabelStatus: TLabel
+      Left = 14
+      Height = 13
+      Top = 15
+      Width = 260
+      Caption = 'Enter a search term above and click Search (or Enter)'
+      ParentColor = False
+    end
+    object ButtonGoTo: TButton
+      Left = 404
+      Height = 27
+      Top = 8
+      Width = 110
+      Caption = '&Go to Location'
+      OnClick = ButtonGoToClick
+      TabOrder = 0
+    end
+    object ButtonView: TButton
+      Left = 522
+      Height = 27
+      Top = 8
+      Width = 90
+      Caption = '&View (F3)'
+      OnClick = ButtonViewClick
+      TabOrder = 1
+    end
+    object ButtonClose: TButton
+      Left = 620
+      Height = 27
+      Top = 8
+      Width = 86
+      Cancel = True
+      Caption = '&Close'
+      OnClick = ButtonCloseClick
+      TabOrder = 2
+    end
+  end
+end

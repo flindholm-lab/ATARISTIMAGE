@@ -25,8 +25,14 @@ type
     apfTinyStuff,      // Tiny Stuff (.TN1, .TN2, .TN3, .TNY)
     apfStadPac,        // STAD Monochrome Packed (.PAC - pM85/pM86)
     apfStosCompactPac, // STOS Picture Compactor / Squashed (.PAC)
-    apfGemImg          // GEM Monochrome Image (.IMG)
+    apfGemImg,         // GEM Monochrome Image (.IMG)
+    apfTitusPC1,       // Titus / Extended Compressed Picture (.PC1)
+    apfTitusSQ         // Titus SQZ Compressed Screen (.SQ)
   );
+
+const
+  apfDuckTalesPC1: TAtariPicFormat = apfTitusPC1;
+
 
 { Detects if the given buffer/filename represents a supported Atari ST picture }
 function DetectAtariPicFormat(const InBuf: PByte; InSize: Integer; const FileName: string): TAtariPicFormat;
@@ -151,6 +157,8 @@ begin
     apfStadPac:        Result := 'STAD Monochrome Image (.PAC)';
     apfStosCompactPac: Result := 'STOS Packed Picture (.PAC)';
     apfGemImg:         Result := 'GEM Monochrome Image (.IMG)';
+    apfTitusPC1:       Result := 'Compressed Low Res Picture (.PC1)';
+    apfTitusSQ:        Result := 'Titus Compressed Screen (.SQ)';
   else
     Result := 'Unknown Picture Format';
   end;
@@ -160,18 +168,14 @@ function DetectAtariPicFormat(const InBuf: PByte; InSize: Integer; const FileNam
 var
   Ext: string;
   ResWord: Word;
+  UncompVal: LongWord;
 begin
   Result := apfUnknown;
   if (InBuf = nil) or (InSize < 7) then Exit;
 
   Ext := UpperCase(ExtractFileExt(FileName));
 
-  // 1. Check DEGAS Elite RLE extensions
-  if (Ext = '.PC1') then Exit(apfDegasPC1);
-  if (Ext = '.PC2') then Exit(apfDegasPC2);
-  if (Ext = '.PC3') then Exit(apfDegasPC3);
-
-  // 1b. Check DEGAS Elite magic resolution words ($8000, $8001, $8002)
+  // 1a. Check DEGAS Elite magic resolution words ($8000, $8001, $8002)
   if InSize >= 34 then
   begin
     ResWord := ReadBE16(InBuf, 0);
@@ -179,6 +183,42 @@ begin
     if (ResWord = $8001) then Exit(apfDegasPC2);
     if (ResWord = $8002) then Exit(apfDegasPC3);
   end;
+
+  // 1b. Check Titus Compressed Picture (.PC1 Method 1 Huffman or Method 2 LZW)
+  if (InSize >= 10) then
+  begin
+    if (InBuf[0] in [1, 2]) and (InBuf[1] = 0) then
+    begin
+      UncompVal := LongWord(InBuf[2]) or (LongWord(InBuf[3]) shl 8) or (LongWord(InBuf[4]) shl 16) or (LongWord(InBuf[5]) shl 24);
+      if (Ext = '.PC1') or ((UncompVal >= 1000) and (UncompVal <= 500000)) then
+        Exit(apfTitusPC1);
+    end;
+  end;
+
+  // 1c. Check Titus SQ Compressed Screen (.SQ / .SQZ / .SQH)
+  if (InSize >= 8) and ((Ext = '.SQ') or (Ext = '.SQZ') or (Ext = '.SQH')) then
+  begin
+    UncompVal := ((LongWord(InBuf[0]) and $0F) shl 16) or (LongWord(InBuf[3]) shl 8) or LongWord(InBuf[2]);
+    if (UncompVal = 32000) or (UncompVal = 32032) or (UncompVal = 40000) or (UncompVal = 64000) then
+      Exit(apfTitusSQ);
+  end;
+
+  // Generic check for Titus SQ (header: out_len and tree_size)
+  if (InSize >= 16) and (InBuf[1] in [$84, $04, $80, $00]) then
+  begin
+    UncompVal := ((LongWord(InBuf[0]) and $0F) shl 16) or (LongWord(InBuf[3]) shl 8) or LongWord(InBuf[2]);
+    if (UncompVal = 32000) or (UncompVal = 32032) or (UncompVal = 40000) then
+    begin
+      ResWord := Word(InBuf[4]) or (Word(InBuf[5]) shl 8); // TreeSize
+      if (ResWord > 0) and (ResWord < 4000) and (6 + ResWord < InSize) then
+        Exit(apfTitusSQ);
+    end;
+  end;
+
+  // 1d. Check DEGAS Elite RLE extensions
+  if (Ext = '.PC1') then Exit(apfDegasPC1);
+  if (Ext = '.PC2') then Exit(apfDegasPC2);
+  if (Ext = '.PC3') then Exit(apfDegasPC3);
 
   // 2. Check STAD Monochrome (.PAC) - 'pM85' or 'pM86'
   if CheckString(InBuf, InSize, 0, 'pM85') or CheckString(InBuf, InSize, 0, 'pM86') then
@@ -248,20 +288,20 @@ begin
   end;
 end;
 
-{ Decodes 320x200 Low Resolution 4-plane Atari ST screen }
-procedure DecodeLowResScreen(const BitmapBuf: PByte; const Palette: array of TColor;
-  OutBmp: Graphics.TBitmap);
+{ Decodes Low Resolution 4-plane Atari ST screen with variable dimensions }
+procedure DecodeLowResScreenEx(const BitmapBuf: PByte; const Palette: array of TColor;
+  OutBmp: Graphics.TBitmap; AWidth, AHeight: Integer);
 var
   Y, Block, X, Shift, ColorIdx, PixelX, LineOffset, BlockOffset: Integer;
   P0, P1, P2, P3: Word;
 begin
-  OutBmp.SetSize(320, 200);
+  OutBmp.SetSize(AWidth, AHeight);
   OutBmp.PixelFormat := pf24bit;
 
-  for Y := 0 to 199 do
+  for Y := 0 to AHeight - 1 do
   begin
-    LineOffset := Y * 160;
-    for Block := 0 to 19 do
+    LineOffset := Y * (AWidth div 2);
+    for Block := 0 to (AWidth div 16) - 1 do
     begin
       BlockOffset := LineOffset + Block * 8;
       P0 := ReadBE16(BitmapBuf, BlockOffset);
@@ -282,6 +322,13 @@ begin
       end;
     end;
   end;
+end;
+
+{ Decodes 320x200 Low Resolution 4-plane Atari ST screen }
+procedure DecodeLowResScreen(const BitmapBuf: PByte; const Palette: array of TColor;
+  OutBmp: Graphics.TBitmap);
+begin
+  DecodeLowResScreenEx(BitmapBuf, Palette, OutBmp, 320, 200);
 end;
 
 { Decodes 640x200 Medium Resolution 2-plane Atari ST screen (doubled vertically to 640x400 for square pixels) }
@@ -549,18 +596,549 @@ begin
   Result := True;
 end;
 
+type
+  TDTHuffNode = record
+    Left, Right: SmallInt;
+  end;
+
+function DecodeTitusPC1(const InBuf: PByte; InSize: Integer;
+  out OutScreen: TBytes; out OutPal: array of TColor): Boolean;
+var
+  Method: Word;
+  UncompressedSize: LongWord;
+  Pos: Integer;
+  TreeSize: SmallInt;
+  Tree: array of TDTHuffNode;
+  BitBuf: Byte;
+  BitCnt: Integer;
+  Node: SmallInt;
+  Val: Integer;
+  StreamBuf: TBytes;
+  StreamLen: Integer;
+
+  NextCode, NBits, MaxCode: Integer;
+  ForceReload: Boolean;
+  LZWBlock: array[0..15] of Byte;
+  LZWBlockLen: Integer;
+  LZWBitOff, LZWBitLim: Integer;
+  Prefix: array[0..5002] of Word;
+  Suffix: array[0..5002] of Byte;
+  Stack: array[0..5002] of Byte;
+  StackPtr: Integer;
+  Code, OldCode, InCode: Integer;
+  FinChar: Byte;
+  D6, D5, ByteIdx, BitIdx: Integer;
+  D0Val, D7Val, D0Len, D6Shift, D1Val: Integer;
+  I: Integer;
+
+  function LZWReadCode: Integer;
+  var
+    J: Integer;
+  begin
+    if ForceReload or (LZWBitOff >= LZWBitLim) or (NextCode > MaxCode) then
+    begin
+      if NextCode > MaxCode then
+      begin
+        Inc(NBits);
+        if NBits = 12 then
+          MaxCode := 4096
+        else
+          MaxCode := (1 shl NBits) - 1;
+      end;
+      ForceReload := False;
+      LZWBlockLen := 0;
+      for J := 0 to NBits - 1 do
+      begin
+        if Pos < InSize then
+        begin
+          LZWBlock[LZWBlockLen] := InBuf[Pos];
+          Inc(Pos);
+          Inc(LZWBlockLen);
+        end
+        else
+          Break;
+      end;
+      if LZWBlockLen = 0 then Exit(-1);
+      LZWBitOff := 0;
+      LZWBitLim := LZWBlockLen * 8 - (NBits - 1);
+    end;
+
+    D6 := LZWBitOff;
+    D5 := NBits;
+    ByteIdx := D6 shr 3;
+    BitIdx := D6 and 7;
+    if ByteIdx >= LZWBlockLen then Exit(-1);
+
+    D0Val := LZWBlock[ByteIdx];
+    Inc(ByteIdx);
+    D7Val := D0Val shr BitIdx;
+    D0Len := 8 - BitIdx;
+    Dec(D5, D0Len);
+    D6Shift := D0Len;
+
+    if D5 >= 8 then
+    begin
+      if ByteIdx < LZWBlockLen then
+      begin
+        D1Val := LZWBlock[ByteIdx];
+        Inc(ByteIdx);
+        D7Val := D7Val or (D1Val shl D6Shift);
+        Inc(D6Shift, 8);
+        Dec(D5, 8);
+      end;
+    end;
+
+    if D5 > 0 then
+    begin
+      if ByteIdx < LZWBlockLen then
+      begin
+        D7Val := D7Val or ((LZWBlock[ByteIdx] and ((1 shl D5) - 1)) shl D6Shift);
+      end;
+    end;
+
+    Inc(LZWBitOff, NBits);
+    Result := D7Val;
+  end;
+
+var
+  SPos: Integer;
+  Red, Green, Blue: array[0..15] of Byte;
+  Ctrl: TBytes;
+  CtrlLen: Integer;
+  B, Cnt, Rep: Byte;
+  Plane, Col, Block, Bit, CIdx, Addr: Integer;
+  D3, D0: Byte;
+begin
+  Result := False;
+  SetLength(OutScreen, 0);
+  if (InBuf = nil) or (InSize < 10) then Exit;
+
+  Method := Word(InBuf[0]) or (Word(InBuf[1]) shl 8);
+  UncompressedSize := LongWord(InBuf[2]) or (LongWord(InBuf[3]) shl 8) or
+                      (LongWord(InBuf[4]) shl 16) or (LongWord(InBuf[5]) shl 24);
+
+  if (UncompressedSize = 0) or (UncompressedSize > 1000000) then Exit;
+  SetLength(StreamBuf, UncompressedSize);
+  StreamLen := 0;
+
+  if Method = 1 then
+  begin
+    Pos := 10;
+    while (Pos < InSize) and (InBuf[Pos] <> 0) do Inc(Pos);
+    Inc(Pos);
+    if Pos + 2 > InSize then Exit;
+    TreeSize := SmallInt(Word(InBuf[Pos]) or (Word(InBuf[Pos+1]) shl 8));
+    Inc(Pos, 2);
+    if (TreeSize <= 0) or (Pos + TreeSize * 4 > InSize) then Exit;
+
+    SetLength(Tree, TreeSize);
+    for I := 0 to TreeSize - 1 do
+    begin
+      Tree[I].Left := SmallInt(Word(InBuf[Pos]) or (Word(InBuf[Pos+1]) shl 8));
+      Tree[I].Right := SmallInt(Word(InBuf[Pos+2]) or (Word(InBuf[Pos+3]) shl 8));
+      Inc(Pos, 4);
+    end;
+
+    BitBuf := 0;
+    BitCnt := 8;
+    while (StreamLen < UncompressedSize) and (Pos < InSize) do
+    begin
+      Node := 0;
+      while Node >= 0 do
+      begin
+        if BitCnt >= 8 then
+        begin
+          if Pos >= InSize then Break;
+          BitBuf := InBuf[Pos];
+          Inc(Pos);
+          BitCnt := 0;
+        end;
+        Bit := (BitBuf shr BitCnt) and 1;
+        Inc(BitCnt);
+        if Bit = 0 then
+          Node := Tree[Node].Left
+        else
+          Node := Tree[Node].Right;
+      end;
+      if Node < 0 then
+      begin
+        Val := -(Node + 1);
+        if Val = 256 then Break;
+        StreamBuf[StreamLen] := Byte(Val and $FF);
+        Inc(StreamLen);
+      end;
+    end;
+  end
+  else if Method = 2 then
+  begin
+    Pos := 7;
+    NBits := 9;
+    MaxCode := 511;
+    NextCode := $101;
+    LZWBlockLen := 0;
+    LZWBitOff := 0;
+    LZWBitLim := 0;
+    ForceReload := False;
+
+    for I := 0 to 255 do
+      Suffix[I] := Byte(I);
+    FillChar(Prefix, SizeOf(Prefix), 0);
+
+    Code := LZWReadCode;
+    if Code = -1 then Exit;
+    FinChar := Byte(Code and $FF);
+    OldCode := FinChar;
+    StreamBuf[StreamLen] := FinChar;
+    Inc(StreamLen);
+    StackPtr := 0;
+
+    while StreamLen < UncompressedSize do
+    begin
+      Code := LZWReadCode;
+      if Code = -1 then Break;
+      if Code = $100 then
+      begin
+        NextCode := $100;
+        ForceReload := True;
+        NBits := 9;
+        MaxCode := 511;
+        Code := LZWReadCode;
+        if Code = -1 then Break;
+      end;
+
+      InCode := Code;
+      if Code >= NextCode then
+      begin
+        Stack[StackPtr] := FinChar;
+        Inc(StackPtr);
+        Code := OldCode;
+      end;
+
+      while Code >= $100 do
+      begin
+        Stack[StackPtr] := Suffix[Code];
+        Inc(StackPtr);
+        Code := Prefix[Code];
+      end;
+
+      FinChar := Suffix[Code] and $FF;
+      Stack[StackPtr] := FinChar;
+      Inc(StackPtr);
+
+      while (StackPtr > 0) and (StreamLen < UncompressedSize) do
+      begin
+        Dec(StackPtr);
+        StreamBuf[StreamLen] := Stack[StackPtr];
+        Inc(StreamLen);
+      end;
+
+      if NextCode < 4096 then
+      begin
+        Prefix[NextCode] := OldCode;
+        Suffix[NextCode] := FinChar;
+        Inc(NextCode);
+      end;
+      OldCode := InCode;
+    end;
+  end
+  else
+    Exit(False);
+
+  if StreamLen < 48 + 4 then Exit(False);
+
+  SPos := 0;
+  Move(StreamBuf[SPos], Red[0], 16); Inc(SPos, 16);
+  Move(StreamBuf[SPos], Green[0], 16); Inc(SPos, 16);
+  Move(StreamBuf[SPos], Blue[0], 16); Inc(SPos, 16);
+  for I := 0 to 15 do
+  begin
+    OutPal[I] := RGBToColor(
+      (Integer(Red[I] shr 5) * 255) div 7,
+      (Integer(Green[I] shr 5) * 255) div 7,
+      (Integer(Blue[I] shr 5) * 255) div 7
+    );
+  end;
+  Inc(SPos, 4);
+
+  SetLength(Ctrl, 4000);
+  CtrlLen := 0;
+  while (CtrlLen < 4000) and (SPos < StreamLen) do
+  begin
+    B := StreamBuf[SPos];
+    Inc(SPos);
+    if B = $80 then Continue;
+    if B < $80 then
+    begin
+      Cnt := B + 1;
+      while (Cnt > 0) and (SPos < StreamLen) and (CtrlLen < 4000) do
+      begin
+        Ctrl[CtrlLen] := StreamBuf[SPos];
+        Inc(SPos);
+        Inc(CtrlLen);
+        Dec(Cnt);
+      end;
+    end
+    else
+    begin
+      Cnt := (256 - B) + 1;
+      if SPos < StreamLen then
+      begin
+        Rep := StreamBuf[SPos];
+        Inc(SPos);
+        while (Cnt > 0) and (CtrlLen < 4000) do
+        begin
+          Ctrl[CtrlLen] := Rep;
+          Inc(CtrlLen);
+          Dec(Cnt);
+        end;
+      end;
+    end;
+  end;
+  Inc(SPos, 4);
+
+  if CtrlLen < 4000 then Exit(False);
+
+  SetLength(OutScreen, 32000);
+  FillChar(OutScreen[0], 32000, 0);
+  CIdx := 0;
+
+  for Plane := 0 to 3 do
+  begin
+    for Col := 0 to 19 do
+    begin
+      for Block := 0 to 24 do
+      begin
+        D3 := Ctrl[CIdx]; Inc(CIdx);
+        for Bit := 0 to 7 do
+        begin
+          Addr := (Block * 8 + Bit) * 160 + Col * 8 + Plane * 2;
+          if ((D3 shr Bit) and 1) = 0 then
+          begin
+            if SPos < StreamLen then
+            begin
+              D0 := StreamBuf[SPos];
+              Inc(SPos);
+            end;
+          end;
+          OutScreen[Addr] := D0;
+        end;
+      end;
+
+      for Block := 0 to 24 do
+      begin
+        D3 := Ctrl[CIdx]; Inc(CIdx);
+        for Bit := 0 to 7 do
+        begin
+          Addr := (Block * 8 + Bit) * 160 + Col * 8 + Plane * 2 + 1;
+          if ((D3 shr Bit) and 1) = 0 then
+          begin
+            if SPos < StreamLen then
+            begin
+              D0 := StreamBuf[SPos];
+              Inc(SPos);
+            end;
+          end;
+          OutScreen[Addr] := D0;
+        end;
+      end;
+    end;
+  end;
+
+  Result := True;
+end;
+
+function DecodeDuckTalesPC1(const InBuf: PByte; InSize: Integer;
+  out OutScreen: TBytes; out OutPal: array of TColor): Boolean;
+begin
+  Result := DecodeTitusPC1(InBuf, InSize, OutScreen, OutPal);
+end;
+
+{ Decodes Titus SQ compressed 4-plane screen (.SQ / .SQZ / .SQH) }
+function DecodeTitusSQ(const InBuf: PByte; InSize: Integer;
+  out OutScreen: TBytes; out OutPal: array of TColor; out OutW, OutH: Integer): Boolean;
+const
+  TitusDefaultPalWords: array[0..15] of Word = (
+    $0FFF, $0000, $0688, $0455, $0FCC, $0F88, $0C02, $0A00,
+    $0800, $0400, $0899, $09AA, $0ABB, $0BCC, $0CDD, $0DEE
+  );
+var
+  B1, B3, B4: Byte;
+  OutLen, TreeSize, OutPos: Integer;
+  Node, BinTree, Count, J: Word;
+  NodeL, Bit, LastVal: Byte;
+  State, I, Y, Block, LineOffset, BlockOffset: Integer;
+  RawOutput: TBytes;
+  W: Word;
+  R, G, B: Byte;
+begin
+  Result := False;
+  SetLength(OutScreen, 0);
+  OutW := 0;
+  OutH := 0;
+  if (InBuf = nil) or (InSize < 8) then Exit;
+
+  B1 := InBuf[0];
+  B3 := InBuf[2];
+  B4 := InBuf[3];
+  OutLen := ((Integer(B1) and $0F) shl 16) or (Integer(B4) shl 8) or Integer(B3);
+
+  if (OutLen <= 0) or (OutLen > 500000) then Exit;
+
+  TreeSize := (Word(InBuf[5]) shl 8) or Word(InBuf[4]);
+  if (TreeSize <= 0) or (6 + TreeSize > InSize) then Exit;
+
+  SetLength(RawOutput, OutLen);
+  Node := 0;
+  State := 0;
+  OutPos := 0;
+  LastVal := 0;
+
+  for I := 6 + TreeSize to InSize - 1 do
+  begin
+    Bit := 128;
+    while Bit >= 1 do
+    begin
+      if (InBuf[I] and Bit) <> 0 then
+        Inc(Node);
+
+      if 7 + Node * 2 >= InSize then Exit(False);
+      BinTree := (Word(InBuf[7 + Node * 2]) shl 8) or Word(InBuf[6 + Node * 2]);
+
+      if BinTree <= $7FFF then
+        Node := BinTree shr 1
+      else
+      begin
+        Node := BinTree and $7FFF;
+        NodeL := Byte(Node and $FF);
+
+        case State of
+          0:
+          begin
+            if Node < $100 then
+            begin
+              LastVal := NodeL;
+              if OutPos < OutLen then
+              begin
+                RawOutput[OutPos] := LastVal;
+                Inc(OutPos);
+              end;
+            end
+            else if NodeL = 0 then
+              State := 1
+            else if NodeL = 1 then
+              State := 2
+            else
+            begin
+              for J := 1 to NodeL do
+              begin
+                if OutPos < OutLen then
+                begin
+                  RawOutput[OutPos] := LastVal;
+                  Inc(OutPos);
+                end;
+              end;
+            end;
+          end;
+          1:
+          begin
+            for J := 1 to Node do
+            begin
+              if OutPos < OutLen then
+              begin
+                RawOutput[OutPos] := LastVal;
+                Inc(OutPos);
+              end;
+            end;
+            State := 0;
+          end;
+          2:
+          begin
+            Count := 256 * NodeL;
+            State := 3;
+          end;
+          3:
+          begin
+            Inc(Count, NodeL);
+            for J := 1 to Count do
+            begin
+              if OutPos < OutLen then
+              begin
+                RawOutput[OutPos] := LastVal;
+                Inc(OutPos);
+              end;
+            end;
+            State := 0;
+          end;
+        end;
+        Node := 0;
+      end;
+      Bit := Bit shr 1;
+    end;
+  end;
+
+  if OutPos < OutLen then Exit(False);
+
+  // Set default Titus palette
+  for I := 0 to 15 do
+  begin
+    W := TitusDefaultPalWords[I];
+    R := (((W shr 8) and 7) * 2 + ((W shr 11) and 1)) * 255 div 15;
+    G := (((W shr 4) and 7) * 2 + ((W shr 7) and 1)) * 255 div 15;
+    B := ((W and 7) * 2 + ((W shr 3) and 1)) * 255 div 15;
+    OutPal[I] := RGBToColor(R, G, B);
+  end;
+
+  OutW := 320;
+  if OutLen >= 40000 then
+    OutH := 250
+  else
+    OutH := 200;
+
+  // Interleave planar scanlines into standard Atari ST format (160 bytes per scanline)
+  SetLength(OutScreen, OutH * 160);
+  FillChar(OutScreen[0], Length(OutScreen), 0);
+
+  for Y := 0 to OutH - 1 do
+  begin
+    LineOffset := Y * 160;
+    if LineOffset + 160 > OutLen then Break;
+
+    for Block := 0 to 19 do
+    begin
+      BlockOffset := LineOffset + Block * 8;
+      // Word 0 (Plane 0)
+      OutScreen[BlockOffset]     := RawOutput[LineOffset + Block * 2];
+      OutScreen[BlockOffset + 1] := RawOutput[LineOffset + Block * 2 + 1];
+      // Word 1 (Plane 1)
+      OutScreen[BlockOffset + 2] := RawOutput[LineOffset + 40 + Block * 2];
+      OutScreen[BlockOffset + 3] := RawOutput[LineOffset + 40 + Block * 2 + 1];
+      // Word 2 (Plane 2)
+      OutScreen[BlockOffset + 4] := RawOutput[LineOffset + 80 + Block * 2];
+      OutScreen[BlockOffset + 5] := RawOutput[LineOffset + 80 + Block * 2 + 1];
+      // Word 3 (Plane 3)
+      OutScreen[BlockOffset + 6] := RawOutput[LineOffset + 120 + Block * 2];
+      OutScreen[BlockOffset + 7] := RawOutput[LineOffset + 120 + Block * 2 + 1];
+    end;
+  end;
+
+  Result := True;
+end;
+
 function DecodeAtariPicture(const InBuf: PByte; InSize: Integer; const FileName: string;
   out OutBitmap: Graphics.TBitmap; out FormatDesc: string;
   out OutWidth, OutHeight, OutColors: Integer): Boolean;
 var
   PicFmt: TAtariPicFormat;
   Pal: array[0..15] of TColor;
+  DtPal: array[0..15] of TColor;
+  DtScreen: TBytes;
   IsSTE, IsCompressed: Boolean;
   I, DefRes, PalOffset, ScreenOffset: Integer;
-  UnpackedBuf, StadVRAM, StosPal, StosVRAM, TinyPal, TinyVRAM, UnsquashedBuf: TBytes;
+  UnpackedBuf, StadVRAM, StosPal, StosVRAM, TinyPal, TinyVRAM, UnsquashedBuf, PackedDepackBuf: TBytes;
   StosRes, TinyRes: Integer;
   WorkBuf: PByte;
   WorkSize: Integer;
+  DepackedPacker: string;
   GemW, GemH: Integer;
   Ext: string;
 begin
@@ -589,7 +1167,31 @@ begin
       DefRes := 0;
     end;
 
-    if not DecompressDegasElite(InBuf, InSize, DefRes, UnpackedBuf) then Exit(False);
+    if not DecompressDegasElite(InBuf, InSize, DefRes, UnpackedBuf) then
+    begin
+      // Fallback for Titus PC1 if misclassified as DEGAS
+      if PicFmt = apfDegasPC1 then
+      begin
+        OutBitmap := Graphics.TBitmap.Create;
+        try
+          if DecodeTitusPC1(InBuf, InSize, DtScreen, DtPal) then
+          begin
+            for I := 0 to 15 do
+              Pal[I] := DtPal[I];
+            DecodeLowResScreen(@DtScreen[0], Pal, OutBitmap);
+            FormatDesc := 'Compressed Low Res Picture (320x200, 16 Colors)';
+            OutWidth := 320;
+            OutHeight := 200;
+            OutColors := 16;
+            Exit(True);
+          end;
+        except
+          FreeAndNil(OutBitmap);
+        end;
+      end;
+      Exit(False);
+    end;
+
     if Length(UnpackedBuf) < 32034 then Exit(False);
     WorkBuf := @UnpackedBuf[0];
     WorkSize := Length(UnpackedBuf);
@@ -603,6 +1205,17 @@ begin
   begin
     WorkBuf := InBuf;
     WorkSize := InSize;
+
+    // Auto-depack if buffer is packed with an Atari packer (e.g. Pack-Ice/TSM!, Atomik, Automation, etc.)
+    if (PicFmt in [apfDegasPI1, apfDegasPI2, apfDegasPI3, apfNeoChrome, apfRawScreen]) and
+       ((WorkSize < 32000) or (DetectPackerSignature(WorkBuf, WorkSize) <> 'None')) then
+    begin
+      if DepackBuffer(WorkBuf, WorkSize, PackedDepackBuf, DepackedPacker) and (Length(PackedDepackBuf) >= 32000) then
+      begin
+        WorkBuf := @PackedDepackBuf[0];
+        WorkSize := Length(PackedDepackBuf);
+      end;
+    end;
   end;
 
   OutBitmap := Graphics.TBitmap.Create;
@@ -895,6 +1508,56 @@ begin
         OutHeight := GemH;
         OutColors := 2;
         Result := True;
+      end;
+
+      apfTitusPC1:
+      begin
+        if DecodeTitusPC1(WorkBuf, WorkSize, DtScreen, DtPal) then
+        begin
+          for I := 0 to 15 do
+            Pal[I] := DtPal[I];
+          DecodeLowResScreen(@DtScreen[0], Pal, OutBitmap);
+          FormatDesc := 'Compressed Low Res Picture (320x200, 16 Colors)';
+          OutWidth := 320;
+          OutHeight := 200;
+          OutColors := 16;
+          Result := True;
+        end
+        else
+        begin
+          // Fallback to DEGAS Elite RLE if compressed stream was not Titus format
+          if DecompressDegasElite(WorkBuf, WorkSize, 0, UnpackedBuf) and (Length(UnpackedBuf) >= 32034) then
+          begin
+            IsSTE := HasSTEBits(@UnpackedBuf[2], 16);
+            for I := 0 to 15 do
+              Pal[I] := ConvertAtariColorWord(ReadBE16(@UnpackedBuf[0], 2 + I * 2), IsSTE);
+            DecodeLowResScreen(@UnpackedBuf[34], Pal, OutBitmap);
+            FormatDesc := 'DEGAS Elite RLE Low Res (320x200, 16 Colors)';
+            OutWidth := 320;
+            OutHeight := 200;
+            OutColors := 16;
+            Result := True;
+          end
+          else
+            Exit(False);
+        end;
+      end;
+
+      apfTitusSQ:
+      begin
+        if DecodeTitusSQ(WorkBuf, WorkSize, DtScreen, DtPal, GemW, GemH) then
+        begin
+          for I := 0 to 15 do
+            Pal[I] := DtPal[I];
+          DecodeLowResScreenEx(@DtScreen[0], Pal, OutBitmap, GemW, GemH);
+          FormatDesc := Format('Titus Compressed Screen (%dx%d, 16 Colors)', [GemW, GemH]);
+          OutWidth := GemW;
+          OutHeight := GemH;
+          OutColors := 16;
+          Result := True;
+        end
+        else
+          Exit(False);
       end;
     end;
   except

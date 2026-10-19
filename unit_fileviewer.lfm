@@ -42,6 +42,17 @@ object FormFileViewer: TFormFileViewer
       Caption = 'Size: 0 bytes | Cluster: 0'
       ParentFont = False
     end
+    object ButtonPlayAudio: TButton
+      Left = 148
+      Height = 25
+      Top = 8
+      Width = 92
+      Anchors = [akTop, akRight]
+      Caption = '▶ Play Audio'
+      TabOrder = 7
+      Visible = False
+      OnClick = ButtonPlayAudioClick
+    end
     object ButtonHexMode: TButton
       Left = 246
       Height = 25

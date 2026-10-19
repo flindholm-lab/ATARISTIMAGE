@@ -196,6 +196,29 @@
         <IsPartOfProject Value="True"/>
         <UnitName Value="unit_archivevault"/>
       </Unit>
+      <Unit>
+        <Filename Value="unit_dim.pas"/>
+        <IsPartOfProject Value="True"/>
+        <UnitName Value="unit_dim"/>
+      </Unit>
+      <Unit>
+        <Filename Value="unit_search.pas"/>
+        <IsPartOfProject Value="True"/>
+        <ComponentName Value="FormSearch"/>
+        <HasResources Value="True"/>
+        <ResourceBaseClass Value="Form"/>
+        <UnitName Value="unit_search"/>
+      </Unit>
+      <Unit>
+        <Filename Value="unit_search.lfm"/>
+        <IsPartOfProject Value="True"/>
+        <HasResources Value="True"/>
+      </Unit>
+      <Unit>
+        <Filename Value="unit_atariaudio.pas"/>
+        <IsPartOfProject Value="True"/>
+        <UnitName Value="unit_atariaudio"/>
+      </Unit>
     </Units>
   </ProjectOptions>
   <CompilerOptions>

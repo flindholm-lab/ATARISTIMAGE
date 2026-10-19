@@ -385,92 +385,287 @@ object Form1: TForm1
   OnDropFiles = FormDropFiles
   OnShow = FormShow
   Menu = MainMenu1
-  object Label1: TLabel
-    Left = 16
-    Height = 13
-    Top = 8
-    Width = 141
-    Caption = 'Files in image or to be added:'
-  end
-  object LabelVolume: TLabel
-    Left = 175
-    Height = 13
-    Top = 8
-    Width = 100
-    Caption = 'Volume: [None]'
-  end
-  object ButtonSetLabel: TButton
-    Left = 280
-    Height = 20
-    Top = 5
-    Width = 55
-    Caption = 'Label...'
-    TabOrder = 14
-    OnClick = ButtonSetLabelClick
-  end
-  object LabelCurrentPath: TLabel
-    Left = 16
-    Height = 13
-    Top = 32
-    Width = 69
-    Caption = 'Current Path: '
-  end
-  object ListViewFiles: TListView
-    Left = 16
-    Height = 424
-    Top = 51
-    Width = 590
-    Columns = <    
-      item
-        Caption = 'Name'
-        Width = 145
-      end    
-      item
-        Alignment = taRightJustify
-        Caption = 'Size'
-        Width = 80
-      end    
-      item
-        Alignment = taCenter
-        Caption = 'Cluster'
-        Width = 55
-      end    
-      item
-        Caption = 'Date / Time'
-        Width = 110
-      end    
-      item
-        Caption = 'Attr'
-        Width = 50
-      end    
-      item
-        Caption = 'Status'
-        Width = 75
-      end>
-    GridLines = True
-    ReadOnly = True
-    RowSelect = True
+  object PanelQuickToolbar: TPanel
+    Left = 0
+    Height = 32
+    Top = 0
+    Width = 622
+    Align = alTop
+    BevelOuter = bvNone
+    ClientHeight = 32
+    ClientWidth = 622
     TabOrder = 0
-    ViewStyle = vsReport
-    PopupMenu = PopupMenuFiles
-    OnClick = ListViewFilesClick
-    OnDblClick = ListViewFilesDblClick
-    OnSelectItem = ListViewFilesSelectItem
-    OnMouseDown = ListViewFilesMouseDown
-    OnMouseMove = ListViewFilesMouseMove
-    OnKeyDown = ListViewFilesKeyDown
-    OnCustomDrawItem = ListViewFilesCustomDrawItem
-    OnCustomDrawSubItem = ListViewFilesCustomDrawSubItem
+    object ButtonToolOpen: TButton
+      Left = 6
+      Height = 24
+      Top = 4
+      Width = 46
+      Caption = 'Open'
+      Hint = 'Open Disk Image (Ctrl+O)'
+      ParentShowHint = False
+      ShowHint = True
+      TabOrder = 0
+      OnClick = ButtonOpenImageClick
+    end
+    object ButtonToolNew: TButton
+      Left = 54
+      Height = 24
+      Top = 4
+      Width = 42
+      Caption = 'New'
+      Hint = 'Create Blank Disk Image (Ctrl+N)'
+      ParentShowHint = False
+      ShowHint = True
+      TabOrder = 1
+      OnClick = ButtonCreate720Click
+    end
+    object ButtonToolWrite: TButton
+      Left = 98
+      Height = 24
+      Top = 4
+      Width = 44
+      Caption = 'Save'
+      Hint = 'Save / Write Image (Ctrl+S)'
+      ParentShowHint = False
+      ShowHint = True
+      TabOrder = 2
+      OnClick = ButtonWriteImageClick
+    end
+    object BevelSep1: TBevel
+      Left = 146
+      Height = 20
+      Top = 6
+      Width = 2
+      Shape = bsLeftLine
+    end
+    object ButtonToolAddFile: TButton
+      Left = 152
+      Height = 24
+      Top = 4
+      Width = 56
+      Caption = 'Add File'
+      Hint = 'Add File(s) to Disk'
+      ParentShowHint = False
+      ShowHint = True
+      TabOrder = 3
+      OnClick = ButtonAddFileClick
+    end
+    object ButtonToolAddFolder: TButton
+      Left = 210
+      Height = 24
+      Top = 4
+      Width = 68
+      Caption = 'Add Folder'
+      Hint = 'Add Folder Recursively'
+      ParentShowHint = False
+      ShowHint = True
+      TabOrder = 4
+      OnClick = ButtonAddFolderClick
+    end
+    object ButtonToolCreateDir: TButton
+      Left = 280
+      Height = 24
+      Top = 4
+      Width = 56
+      Caption = 'New Dir'
+      Hint = 'Create New Directory'
+      ParentShowHint = False
+      ShowHint = True
+      TabOrder = 5
+      OnClick = ButtonCreateDirClick
+    end
+    object ButtonToolExtract: TButton
+      Left = 338
+      Height = 24
+      Top = 4
+      Width = 52
+      Caption = 'Extract'
+      Hint = 'Save / Extract Selected File (Ctrl+E)'
+      ParentShowHint = False
+      ShowHint = True
+      TabOrder = 6
+      OnClick = ButtonSaveFileClick
+    end
+    object BevelSep2: TBevel
+      Left = 394
+      Height = 20
+      Top = 6
+      Width = 2
+      Shape = bsLeftLine
+    end
+    object ButtonToolView: TButton
+      Left = 400
+      Height = 24
+      Top = 4
+      Width = 60
+      Caption = 'View (F3)'
+      Hint = 'View File / Hex Inspector (F3)'
+      ParentShowHint = False
+      ShowHint = True
+      TabOrder = 7
+      OnClick = ButtonViewFileClick
+    end
+    object ButtonToolClusterMap: TButton
+      Left = 462
+      Height = 24
+      Top = 4
+      Width = 58
+      Caption = 'Map (F4)'
+      Hint = 'Cluster Map & Sector Editor (F4)'
+      ParentShowHint = False
+      ShowHint = True
+      TabOrder = 8
+      OnClick = ButtonClusterMapClick
+    end
+    object ButtonToolVirusScan: TButton
+      Left = 522
+      Height = 24
+      Top = 4
+      Width = 60
+      Caption = 'Scan (F6)'
+      Hint = 'Anti-Virus Scanner (F6)'
+      ParentShowHint = False
+      ShowHint = True
+      TabOrder = 9
+      OnClick = MenuItemVirusScannerClick
+    end
+  end
+  object PanelHeader: TPanel
+    Left = 0
+    Height = 36
+    Top = 32
+    Width = 622
+    Align = alTop
+    BevelOuter = bvNone
+    ClientHeight = 36
+    ClientWidth = 622
+    TabOrder = 1
+    object ButtonNavUp: TButton
+      Left = 6
+      Height = 24
+      Top = 6
+      Width = 32
+      Caption = '▲'
+      Hint = 'Parent Directory (Backspace)'
+      ParentShowHint = False
+      ShowHint = True
+      TabOrder = 0
+      OnClick = ButtonBackClick
+    end
+    object ButtonNavRoot: TButton
+      Left = 40
+      Height = 24
+      Top = 6
+      Width = 40
+      Caption = 'Root'
+      Hint = 'Return to Root Directory'
+      ParentShowHint = False
+      ShowHint = True
+      TabOrder = 1
+      OnClick = ButtonNavRootClick
+    end
+    object PanelPathBox: TPanel
+      Left = 84
+      Height = 24
+      Top = 6
+      Width = 246
+      Anchors = [akTop, akLeft, akRight]
+      BevelOuter = bvLowered
+      Color = clWindow
+      ParentColor = False
+      ClientHeight = 24
+      ClientWidth = 246
+      TabOrder = 2
+      object LabelCurrentPath: TLabel
+        Left = 6
+        Height = 13
+        Top = 5
+        Width = 234
+        Anchors = [akTop, akLeft, akRight]
+        AutoSize = False
+        Caption = 'Current Path: \'
+      end
+    end
+    object LabelVolume: TLabel
+      Left = 338
+      Height = 13
+      Top = 11
+      Width = 102
+      Alignment = taRightJustify
+      Anchors = [akTop, akRight]
+      Caption = 'Vol: [None]'
+      Font.Color = clWindowText
+      Font.Height = -11
+      Font.Name = 'Tahoma'
+      Font.Style = [fsBold]
+      ParentColor = False
+      ParentFont = False
+    end
+    object ButtonSetLabel: TButton
+      Left = 444
+      Height = 24
+      Top = 6
+      Width = 48
+      Anchors = [akTop, akRight]
+      Caption = 'Label...'
+      TabOrder = 3
+      OnClick = ButtonSetLabelClick
+    end
+    object LabelFreeSpace: TLabel
+      Left = 496
+      Height = 13
+      Top = 11
+      Width = 36
+      Alignment = taRightJustify
+      Anchors = [akTop, akRight]
+      AutoSize = False
+      Caption = '0%'
+    end
+    object ProgressBarFreeSpace: TProgressBar
+      Left = 534
+      Height = 18
+      Top = 9
+      Width = 80
+      Anchors = [akTop, akRight]
+      Smooth = True
+      Step = 5
+      TabOrder = 4
+    end
+  end
+  object StatusBar1: TStatusBar
+    Left = 0
+    Height = 23
+    Top = 464
+    Width = 622
+    Panels = <    
+      item
+        Text = 'No Disk Image Loaded'
+        Width = 200
+      end    
+      item
+        Text = '0 files, 0 folders'
+        Width = 200
+      end    
+      item
+        Text = 'Free: 0 B / 0 B'
+        Width = 140
+      end    
+      item
+        Text = '● Ready'
+        Width = 80
+      end>
+    SimplePanel = False
   end
   object PanelToolbar: TPanel
     Left = 0
     Height = 82
-    Top = 398
+    Top = 382
     Width = 622
+    Align = alBottom
     BevelOuter = bvNone
     ClientHeight = 82
     ClientWidth = 622
-    TabOrder = 1
+    TabOrder = 3
     Visible = False
     object ButtonOpenImage: TButton
       Left = 16
@@ -608,23 +803,55 @@ object Form1: TForm1
       OnClick = ButtonExitClick
     end
   end
-  object ProgressBarFreeSpace: TProgressBar
-    Left = 451
-    Height = 20
-    Top = 25
-    Width = 155
-    Smooth = True
-    Step = 5
-    TabOrder = 2
-  end
-  object LabelFreeSpace: TLabel
-    Left = 338
-    Height = 13
-    Top = 6
-    Width = 268
-    Alignment = taRightJustify
-    AutoSize = False
-    Caption = 'Utilized space: 0%'
+  object ListViewFiles: TListView
+    Left = 0
+    Height = 314
+    Top = 68
+    Width = 622
+    Align = alClient
+    Columns = <    
+      item
+        Caption = 'Name'
+        Width = 180
+      end    
+      item
+        Alignment = taRightJustify
+        Caption = 'Size'
+        Width = 80
+      end    
+      item
+        Alignment = taCenter
+        Caption = 'Cluster'
+        Width = 55
+      end    
+      item
+        Caption = 'Date / Time'
+        Width = 110
+      end    
+      item
+        Caption = 'Attr'
+        Width = 50
+      end    
+      item
+        Caption = 'Status'
+        Width = 75
+      end>
+    AutoWidthLastColumn = True
+    GridLines = True
+    ReadOnly = True
+    RowSelect = True
+    TabOrder = 4
+    ViewStyle = vsReport
+    PopupMenu = PopupMenuFiles
+    OnClick = ListViewFilesClick
+    OnDblClick = ListViewFilesDblClick
+    OnSelectItem = ListViewFilesSelectItem
+    OnMouseDown = ListViewFilesMouseDown
+    OnMouseMove = ListViewFilesMouseMove
+    OnKeyDown = ListViewFilesKeyDown
+    OnColumnClick = ListViewFilesColumnClick
+    OnCustomDrawItem = ListViewFilesCustomDrawItem
+    OnCustomDrawSubItem = ListViewFilesCustomDrawSubItem
   end
   object OpenDialog: TOpenDialog
     Filter = 'All Files (*.*)|*.*'
@@ -688,6 +915,10 @@ object Form1: TForm1
         Caption = '&Convert Image (.ST <-> .MSA)...'
         OnClick = MenuItemConvertMSAClick
       end
+      object MenuItemConvertDIM: TMenuItem
+        Caption = 'Convert Image (.ST <-> .DIM)...'
+        OnClick = MenuItemConvertDIMClick
+      end
       object MenuItemSep3: TMenuItem
         Caption = '-'
       end
@@ -699,6 +930,44 @@ object Form1: TForm1
     end
     object MenuItemEdit: TMenuItem
       Caption = '&Edit'
+      object MenuItemFind: TMenuItem
+        Caption = '&Find Files...'
+        ShortCut = 16454
+        OnClick = MenuItemFindClick
+      end
+      object MenuItemSepEdit0: TMenuItem
+        Caption = '-'
+      end
+      object MenuItemRename: TMenuItem
+        Caption = '&Rename File / Folder...'
+        ShortCut = 113
+        OnClick = MenuItemRenameClick
+      end
+      object MenuItemAttributes: TMenuItem
+        Caption = '&Attributes'
+        object MenuItemAttrReadOnly: TMenuItem
+          Caption = '&Read-Only (R)'
+          OnClick = MenuItemAttrReadOnlyClick
+        end
+        object MenuItemAttrHidden: TMenuItem
+          Caption = '&Hidden (H)'
+          OnClick = MenuItemAttrHiddenClick
+        end
+        object MenuItemAttrArchive: TMenuItem
+          Caption = '&Archive (A)'
+          OnClick = MenuItemAttrArchiveClick
+        end
+        object MenuItemAttrSep: TMenuItem
+          Caption = '-'
+        end
+        object MenuItemAttrProperties: TMenuItem
+          Caption = '&Properties / Edit Attributes...'
+          OnClick = MenuItemAttrPropertiesClick
+        end
+      end
+      object MenuItemSepEdit1: TMenuItem
+        Caption = '-'
+      end
       object MenuItemAddFile: TMenuItem
         Caption = '&Add File(s)...'
         OnClick = ButtonAddFileClick
@@ -733,12 +1002,26 @@ object Form1: TForm1
     end
     object MenuItemView: TMenuItem
       Caption = '&View'
+      object MenuItemQuickToolbar: TMenuItem
+        AutoCheck = True
+        Checked = True
+        Caption = '&Quick Action Toolbar'
+        OnClick = MenuItemQuickToolbarClick
+      end
+      object MenuItemButtonToolbar: TMenuItem
+        AutoCheck = True
+        Caption = 'Classic &Button Toolbar'
+        OnClick = MenuItemButtonToolbarClick
+      end
+      object MenuItemSepView1: TMenuItem
+        Caption = '-'
+      end
       object MenuItemViewFile: TMenuItem
         Caption = '&View File / Hex Inspector...'
         ShortCut = 114
         OnClick = ButtonViewFileClick
       end
-      object MenuItemSepView1: TMenuItem
+      object MenuItemSepView2: TMenuItem
         Caption = '-'
       end
       object MenuItemBrowseArchive: TMenuItem
@@ -752,14 +1035,6 @@ object Form1: TForm1
       object MenuItemBack: TMenuItem
         Caption = '&Parent Directory (Back)'
         OnClick = ButtonBackClick
-      end
-      object MenuItemSepView2: TMenuItem
-        Caption = '-'
-      end
-      object MenuItemButtonToolbar: TMenuItem
-        AutoCheck = True
-        Caption = 'Classic &Button Toolbar'
-        OnClick = MenuItemButtonToolbarClick
       end
     end
     object MenuItemTools: TMenuItem
@@ -776,6 +1051,13 @@ object Form1: TForm1
         Caption = '&Anti-Virus Scanner...'
         ShortCut = 117
         OnClick = MenuItemVirusScannerClick
+      end
+      object MenuItemSepTools2: TMenuItem
+        Caption = '-'
+      end
+      object MenuItemMakePCBoot: TMenuItem
+        Caption = '&Make PC-Compatible Boot Sector (BPB)...'
+        OnClick = MenuItemMakePCBootClick
       end
     end
     object MenuItemHelp: TMenuItem
@@ -802,7 +1084,40 @@ object Form1: TForm1
       Caption = '&View File / Hex Inspector...'
       OnClick = ButtonViewFileClick
     end
+    object MenuItemPopupFind: TMenuItem
+      Caption = '&Find Files... (Ctrl+F)'
+      OnClick = MenuItemFindClick
+    end
     object MenuItemPopupSep1: TMenuItem
+      Caption = '-'
+    end
+    object MenuItemPopupRename: TMenuItem
+      Caption = '&Rename... (F2)'
+      OnClick = MenuItemRenameClick
+    end
+    object MenuItemPopupAttributes: TMenuItem
+      Caption = '&Attributes'
+      object MenuItemPopupAttrReadOnly: TMenuItem
+        Caption = '&Read-Only (R)'
+        OnClick = MenuItemAttrReadOnlyClick
+      end
+      object MenuItemPopupAttrHidden: TMenuItem
+        Caption = '&Hidden (H)'
+        OnClick = MenuItemAttrHiddenClick
+      end
+      object MenuItemPopupAttrArchive: TMenuItem
+        Caption = '&Archive (A)'
+        OnClick = MenuItemAttrArchiveClick
+      end
+      object MenuItemPopupAttrSep: TMenuItem
+        Caption = '-'
+      end
+      object MenuItemPopupAttrProperties: TMenuItem
+        Caption = '&Properties / Edit Attributes...'
+        OnClick = MenuItemAttrPropertiesClick
+      end
+    end
+    object MenuItemPopupSepAttr: TMenuItem
       Caption = '-'
     end
     object MenuItemPopupExtract: TMenuItem

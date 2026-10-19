@@ -230,6 +230,8 @@ begin
     Exit('Pack-Ice v2.0/v2.2 Raw Data');
   if CheckString(Buffer, Size, 0, 'ICE!') then
     Exit('Pack-Ice v2.3/v2.4 Raw Data');
+  if CheckString(Buffer, Size, 0, 'TSM!') then
+    Exit('Pack-Ice v2.4 (TSM!) Raw Data');
   if CheckLong(Buffer, Size, 70, $610000A0) then
     Exit('Pack-Ice v1.1 Executable Packer');
   if CheckWord(Buffer, Size, 54, $2E3C) then
@@ -946,13 +948,14 @@ begin
   SetLength(OutBuf, 0);
   if (InBuf = nil) or (InSize < 12) then Exit;
 
-  // Phase 1: Raw ICE! and Ice! signatures
+  // Phase 1: Raw ICE!, Ice! and TSM! signatures
   SetLength(SearchOffsets, 0);
   for Off := 0 to InSize - 12 do
   begin
-    if (InBuf[Off] = Byte('I')) and
-       (((InBuf[Off+1] = Byte('C')) and (InBuf[Off+2] = Byte('E')) and (InBuf[Off+3] = Byte('!'))) or
-        ((InBuf[Off+1] = Byte('c')) and (InBuf[Off+2] = Byte('e')) and (InBuf[Off+3] = Byte('!')))) then
+    if (((InBuf[Off] = Byte('I')) and
+        (((InBuf[Off+1] = Byte('C')) and (InBuf[Off+2] = Byte('E')) and (InBuf[Off+3] = Byte('!'))) or
+         ((InBuf[Off+1] = Byte('c')) and (InBuf[Off+2] = Byte('e')) and (InBuf[Off+3] = Byte('!'))))) or
+        ((InBuf[Off] = Byte('T')) and (InBuf[Off+1] = Byte('S')) and (InBuf[Off+2] = Byte('M')) and (InBuf[Off+3] = Byte('!')))) then
     begin
       SetLength(SearchOffsets, Length(SearchOffsets) + 1);
       SearchOffsets[High(SearchOffsets)] := Off;
