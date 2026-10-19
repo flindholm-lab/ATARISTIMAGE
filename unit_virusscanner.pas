@@ -5,7 +5,7 @@ unit unit_virusscanner;
 interface
 
 uses
-  Classes, SysUtils, Forms, Controls, Graphics, Dialogs, ComCtrls,
+  Classes, SysUtils, FileUtil, Forms, Controls, Graphics, Dialogs, ComCtrls,
   StdCtrls, ExtCtrls, Math;
 
 type
@@ -480,10 +480,21 @@ begin
   SafeSigs[5].FixedOffset := 0;
   SafeSigs[5].RequiredString := '';
 
-  for I := 0 to High(SafeSigs) do
+  // Specific whitelisted loaders (Rob Northen, FastCopy, Automation)
+  for I := 0 to 2 do
   begin
     if FindMaskedPattern(SectorBytes, 512, SafeSigs[I].Bytes, SafeSigs[I].Mask, SafeSigs[I].FixedOffset) <> -1 then
       Exit(False); // Whitelisted and verified safe!
+  end;
+
+  // Generic BRA / JMP instructions are only benign if the sector is NOT executable (checksum <> $1234)
+  if not IsExec then
+  begin
+    for I := 3 to High(SafeSigs) do
+    begin
+      if FindMaskedPattern(SectorBytes, 512, SafeSigs[I].Bytes, SafeSigs[I].Mask, SafeSigs[I].FixedOffset) <> -1 then
+        Exit(False);
+    end;
   end;
 
   // -------------------------------------------------------------------------
@@ -901,12 +912,16 @@ var
   BytesPerSec, SecPerClust, ResSec, NumFATs, RootEntries, SecPerFAT: Word;
   FatStart, RootDirStart, DataStart, RootDirSectors, ClusterBytes: Int64;
   FATBuffer: TBytes;
-  EntriesBuf: TBytes;
+  EntriesBuf, SubEntriesBuf: TBytes;
   NumEntries, I, J, EntryOff, FOff: Integer;
   EntryClust: Word;
   CurrClust, NextClust: Word;
   CleanName: string;
   RawName: string;
+  MatchFound: Boolean;
+  TotalClusters, C, S, SEntryOff: Integer;
+  ClustPos: Int64;
+  SubClust: Word;
 begin
   Result := False;
   if not FileExists(AImagePath) then Exit;
@@ -948,6 +963,7 @@ begin
     FS.Position := RootDirStart;
     FS.ReadBuffer(EntriesBuf[0], NumEntries * 32);
 
+    MatchFound := False;
     for I := 0 to NumEntries - 1 do
     begin
       EntryOff := I * 32;
@@ -966,45 +982,83 @@ begin
             RawName := RawName + Char(EntriesBuf[EntryOff + J]);
       end;
 
-      if (EntryClust = ACluster) or (UpperCase(RawName) = CleanName) then
+      if (ACluster >= 2) and (EntryClust = ACluster) then
+        MatchFound := True
+      else if (ACluster = 0) and (EntryClust = 0) and (UpperCase(RawName) = CleanName) then
+        MatchFound := True;
+
+      if MatchFound then
       begin
         // Mark directory entry as deleted ($E5)
         EntriesBuf[EntryOff] := $E5;
         FS.Position := RootDirStart + EntryOff;
         FS.WriteBuffer(EntriesBuf[EntryOff], 1);
-
-        // Free FAT cluster chain
-        CurrClust := EntryClust;
-        while (CurrClust >= 2) and (CurrClust < $FF8) do
-        begin
-          NextClust := ReadFAT12Entry(@FATBuffer[0], Length(FATBuffer), CurrClust);
-
-          // Zero FAT12 entry
-          FOff := (CurrClust * 3) div 2;
-          if (CurrClust and 1) = 0 then
-          begin
-            FATBuffer[FOff] := $00;
-            FATBuffer[FOff + 1] := FATBuffer[FOff + 1] and $F0;
-          end
-          else
-          begin
-            FATBuffer[FOff] := FATBuffer[FOff] and $0F;
-            FATBuffer[FOff + 1] := $00;
-          end;
-
-          CurrClust := NextClust;
-        end;
-
-        // Write FAT copies back
-        for J := 0 to NumFATs - 1 do
-        begin
-          FS.Position := FatStart + Int64(J) * SecPerFAT * BytesPerSec;
-          FS.WriteBuffer(FATBuffer[0], Length(FATBuffer));
-        end;
-
-        Result := True;
-        Exit;
+        Break;
       end;
+    end;
+
+    // If not found in root and ACluster >= 2, search subdirectory clusters
+    if not MatchFound and (ACluster >= 2) and (ClusterBytes > 0) then
+    begin
+      TotalClusters := (FS.Size - DataStart) div ClusterBytes;
+      for C := 0 to TotalClusters - 1 do
+      begin
+        ClustPos := DataStart + Int64(C) * ClusterBytes;
+        if ClustPos + ClusterBytes > FS.Size then Break;
+        SetLength(SubEntriesBuf, ClusterBytes);
+        FS.Position := ClustPos;
+        FS.ReadBuffer(SubEntriesBuf[0], ClusterBytes);
+        for S := 0 to (ClusterBytes div 32) - 1 do
+        begin
+          SEntryOff := S * 32;
+          if SubEntriesBuf[SEntryOff] = $E5 then Continue;
+          if SubEntriesBuf[SEntryOff] = $00 then Break;
+          SubClust := Word(SubEntriesBuf[SEntryOff + 26]) or (Word(SubEntriesBuf[SEntryOff + 27]) shl 8);
+          if SubClust = ACluster then
+          begin
+            SubEntriesBuf[SEntryOff] := $E5;
+            FS.Position := ClustPos + SEntryOff;
+            FS.WriteBuffer(SubEntriesBuf[SEntryOff], 1);
+            MatchFound := True;
+            Break;
+          end;
+        end;
+        if MatchFound then Break;
+      end;
+    end;
+
+    if MatchFound then
+    begin
+      // Free FAT cluster chain
+      CurrClust := ACluster;
+      while (CurrClust >= 2) and (CurrClust < $FF8) do
+      begin
+        NextClust := ReadFAT12Entry(@FATBuffer[0], Length(FATBuffer), CurrClust);
+
+        // Zero FAT12 entry
+        FOff := (CurrClust * 3) div 2;
+        if (CurrClust and 1) = 0 then
+        begin
+          FATBuffer[FOff] := $00;
+          FATBuffer[FOff + 1] := FATBuffer[FOff + 1] and $F0;
+        end
+        else
+        begin
+          FATBuffer[FOff] := FATBuffer[FOff] and $0F;
+          FATBuffer[FOff + 1] := $00;
+        end;
+
+        CurrClust := NextClust;
+      end;
+
+      // Write FAT copies back
+      for J := 0 to NumFATs - 1 do
+      begin
+        FS.Position := FatStart + Int64(J) * SecPerFAT * BytesPerSec;
+        FS.WriteBuffer(FATBuffer[0], Length(FATBuffer));
+      end;
+
+      Result := True;
     end;
   finally
     FS.Free;
@@ -1167,14 +1221,38 @@ end;
 procedure TFormVirusScanner.ButtonDisinfectBootClick(Sender: TObject);
 var
   I: Integer;
+  HasUnrecBoot: Boolean;
+  BakPath: string;
 begin
   if (FCurrentDiskPath = '') or not FileExists(FCurrentDiskPath) then Exit;
 
-  if MessageDlg('Disinfect Boot Sector',
-    'Are you sure you want to disinfect the boot sector?' + sLineBreak +
-    'The BPB geometry will be kept intact, execution vectors will be safely demoted, ' +
-    'and the execution checksum will be cleared.',
-    mtConfirmation, [mbYes, mbNo], 0) <> mrYes then Exit;
+  HasUnrecBoot := False;
+  for I := 0 to High(FSummary.Threats) do
+    if (FSummary.Threats[I].TargetType = vtBootSector) and
+       (Pos('Unrecognized Executable', FSummary.Threats[I].Name) > 0) then
+      HasUnrecBoot := True;
+
+  if HasUnrecBoot then
+  begin
+    if MessageDlg('Custom Bootloader Warning',
+      'Caution: The boot sector contains an unrecognized custom executable loader.' + sLineBreak +
+      'This is often a legitimate custom loader for Atari games and demos.' + sLineBreak +
+      'Disinfecting will disable the boot code and may prevent the disk from booting!' + sLineBreak + sLineBreak +
+      'A backup (' + ExtractFileName(FCurrentDiskPath) + '.bak) will be created.' + sLineBreak +
+      'Are you sure you want to proceed?',
+      mtWarning, [mbYes, mbNo], 0) <> mrYes then Exit;
+  end
+  else
+  begin
+    if MessageDlg('Disinfect Boot Sector',
+      'Are you sure you want to disinfect the boot sector?' + sLineBreak +
+      'A backup (' + ExtractFileName(FCurrentDiskPath) + '.bak) will be created.' + sLineBreak +
+      'The BPB geometry will be kept intact, execution vectors demoted, and checksum cleared.',
+      mtConfirmation, [mbYes, mbNo], 0) <> mrYes then Exit;
+  end;
+
+  BakPath := FCurrentDiskPath + '.bak';
+  CopyFile(FCurrentDiskPath, BakPath);
 
   if DisinfectBootSector(FCurrentDiskPath) then
   begin
@@ -1187,7 +1265,8 @@ begin
     FSummary.BootIsExecutable := False;
     PopulateThreatsList;
     UpdateUI;
-    ShowMessage('Boot Sector successfully disinfected! The disk is now safe and non-executable.');
+    ShowMessage('Boot Sector successfully disinfected! The disk is now safe and non-executable.' + sLineBreak +
+      'Backup saved to: ' + ExtractFileName(BakPath));
   end
   else
     ShowMessage('Error: Failed to disinfect boot sector.');
@@ -1197,14 +1276,39 @@ procedure TFormVirusScanner.ButtonDisinfectAllClick(Sender: TObject);
 var
   I: Integer;
   CleanedCount: Integer;
+  HasUnrecBoot: Boolean;
+  BakPath: string;
 begin
   if (FCurrentDiskPath = '') or not FileExists(FCurrentDiskPath) then Exit;
 
-  if MessageDlg('Disinfect All Threats',
-    Format('Disinfect %d detected threat(s)?' + sLineBreak +
-      'Boot sector threats will be safely cleared and infected files will be removed.',
-      [Length(FSummary.Threats)]),
-    mtConfirmation, [mbYes, mbNo], 0) <> mrYes then Exit;
+  HasUnrecBoot := False;
+  for I := 0 to High(FSummary.Threats) do
+    if (FSummary.Threats[I].TargetType = vtBootSector) and
+       (Pos('Unrecognized Executable', FSummary.Threats[I].Name) > 0) then
+      HasUnrecBoot := True;
+
+  if HasUnrecBoot then
+  begin
+    if MessageDlg('Custom Bootloader Warning',
+      'Caution: An unrecognized custom executable boot sector was detected.' + sLineBreak +
+      'This is often a legitimate game or demo loader.' + sLineBreak +
+      'Disinfecting all threats will erase this bootloader and may prevent the disk from booting!' + sLineBreak + sLineBreak +
+      'A backup (' + ExtractFileName(FCurrentDiskPath) + '.bak) will be created.' + sLineBreak +
+      'Do you want to proceed with disinfecting all threats?',
+      mtWarning, [mbYes, mbNo], 0) <> mrYes then Exit;
+  end
+  else
+  begin
+    if MessageDlg('Disinfect All Threats',
+      Format('Disinfect %d detected threat(s)?' + sLineBreak +
+        'A backup (' + ExtractFileName(FCurrentDiskPath) + '.bak) will be created.' + sLineBreak +
+        'Boot sector threats will be safely cleared and infected files will be removed.',
+        [Length(FSummary.Threats)]),
+      mtConfirmation, [mbYes, mbNo], 0) <> mrYes then Exit;
+  end;
+
+  BakPath := FCurrentDiskPath + '.bak';
+  CopyFile(FCurrentDiskPath, BakPath);
 
   CleanedCount := 0;
   for I := 0 to High(FSummary.Threats) do
@@ -1231,7 +1335,8 @@ begin
   FSummary.BootIsExecutable := False;
   PopulateThreatsList;
   UpdateUI;
-  ShowMessage(Format('Disinfection complete! %d threat(s) cleaned.', [CleanedCount]));
+  ShowMessage(Format('Disinfection complete! %d threat(s) cleaned.' + sLineBreak +
+    'Backup saved to: %s', [CleanedCount, ExtractFileName(BakPath)]));
 end;
 
 procedure TFormVirusScanner.ButtonInspectHexClick(Sender: TObject);

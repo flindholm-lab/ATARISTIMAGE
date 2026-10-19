@@ -71,6 +71,7 @@ type
     FRootDirSize: Int64;
     FDataAreaOffset: Int64;
     FClusterBytes: Int64;
+    FVisitedDirs: array of Word;
 
     function MatchesQuery(const AFileName, AQuery: string; ACaseSensitive: Boolean): Boolean;
     function ReadFAT12Entry(AStream: TStream; ACluster: Word): Word;
@@ -225,8 +226,16 @@ var
   EntriesInCluster, E: Integer;
   SubDirsToScan: TStringList;
   SubDirClusters: array of Word;
-  I: Integer;
+  I, V, ChainLoops: Integer;
 begin
+  if ADirCluster <> 0 then
+  begin
+    for V := 0 to High(FVisitedDirs) do
+      if FVisitedDirs[V] = ADirCluster then Exit;
+    SetLength(FVisitedDirs, Length(FVisitedDirs) + 1);
+    FVisitedDirs[High(FVisitedDirs)] := ADirCluster;
+  end;
+
   SubDirsToScan := TStringList.Create;
   try
     if ADirCluster = 0 then
@@ -309,8 +318,12 @@ begin
     begin
       // Subdirectory FAT chain
       CurrCluster := ADirCluster;
+      ChainLoops := 0;
       while (CurrCluster >= 2) and (CurrCluster < $FF8) do
       begin
+        Inc(ChainLoops);
+        if ChainLoops > 4096 then Break;
+
         ClusterOffset := FDataAreaOffset + Int64(CurrCluster - 2) * FClusterBytes;
         AStream.Position := ClusterOffset;
         EntriesInCluster := FClusterBytes div 32;
@@ -458,12 +471,14 @@ begin
       Move(BootSec[$13], FTotalSectors, 2);
       Move(BootSec[$16], FSectorsPerFAT, 2);
 
-      if FBytesPerSector = 0 then FBytesPerSector := 512;
+      if FBytesPerSector <> 512 then FBytesPerSector := 512;
       if FSectorsPerCluster = 0 then FSectorsPerCluster := 2;
       if FReservedSectors = 0 then FReservedSectors := 1;
       if FNumberOfFATs = 0 then FNumberOfFATs := 2;
       if FRootEntries = 0 then FRootEntries := 112;
       if FSectorsPerFAT = 0 then FSectorsPerFAT := 5;
+
+      SetLength(FVisitedDirs, 0);
 
       FRootDirOffset := (Int64(FReservedSectors) + Int64(FNumberOfFATs) * Int64(FSectorsPerFAT)) * Int64(FBytesPerSector);
       FRootDirSize := Int64(FRootEntries) * 32;

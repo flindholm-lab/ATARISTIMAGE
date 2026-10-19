@@ -250,10 +250,11 @@ begin
   // 8. Check Quantum Paintbox (.PBX)
   if (Ext = '.PBX') or CheckString(InBuf, InSize, 0, 'PBX') then Exit(apfQuantumPaint);
 
-  // 9. Check Spectrum 512 (.SPU, .SPC, .SPS)
-  if (Ext = '.SPU') or (Ext = '.SPC') or (Ext = '.SPS') or (InSize = 51200) then
+  // 9. Check Spectrum 512 (.SPU, .SPC, .SPS) - uncompressed .SPU is 51,104 bytes (or 51,200)
+  if (InSize = 51104) or (InSize = 51200) or
+     (((Ext = '.SPU') or (Ext = '.SPC') or (Ext = '.SPS')) and (InSize >= 51104)) then
   begin
-    if InSize = 51200 then Exit(apfSpectrum512SPU);
+    Exit(apfSpectrum512SPU);
   end;
 
   // 10. Check NeoChrome (.NEO) - 32,128 bytes
@@ -297,7 +298,6 @@ var
 begin
   OutBmp.SetSize(AWidth, AHeight);
   OutBmp.PixelFormat := pf24bit;
-
   for Y := 0 to AHeight - 1 do
   begin
     LineOffset := Y * (AWidth div 2);
@@ -341,7 +341,6 @@ var
 begin
   OutBmp.SetSize(640, 400);
   OutBmp.PixelFormat := pf24bit;
-
   for Y := 0 to 199 do
   begin
     LineOffset := Y * 160;
@@ -407,11 +406,14 @@ var
 begin
   OutBmp.SetSize(320, 200);
   OutBmp.PixelFormat := pf24bit;
-
   for Y := 0 to 199 do
   begin
     LineOffset := Y * 160;
-    PalOffset := 32000 + Y * 96;
+    // In 51,104 byte .SPU files: line 0 uses first palette (offset 32,000), lines 1..199 use 32000 + (Y - 1) * 96
+    if Y = 0 then
+      PalOffset := 32000
+    else
+      PalOffset := 32000 + (Y - 1) * 96;
 
     for Block := 0 to 19 do
     begin
@@ -430,10 +432,11 @@ begin
                     (((P2 shr Shift) and 1) shl 2) or
                     (((P3 shr Shift) and 1) shl 3);
 
-        // Spectrum 512 horizontal raster beam palette distribution
-        if PixelX < 10 then
+        // Spectrum 512 horizontal raster beam palette distribution:
+        // Palette 0: pixels 0..105, Palette 1: pixels 106..212, Palette 2: pixels 213..319
+        if PixelX < 106 then
           PalIdx := 0
-        else if PixelX < 170 then
+        else if PixelX < 213 then
           PalIdx := 1
         else
           PalIdx := 2;

@@ -234,8 +234,6 @@ begin
     Exit('Pack-Ice v2.4 (TSM!) Raw Data');
   if CheckLong(Buffer, Size, 70, $610000A0) then
     Exit('Pack-Ice v1.1 Executable Packer');
-  if CheckWord(Buffer, Size, 54, $2E3C) then
-    Exit('Pack-Ice v2.0 Executable Packer');
   if CheckString(Buffer, Size, 452, 'Ice!') then
     Exit('Pack-Ice v2.2 Executable Packer');
   if CheckString(Buffer, Size, 448, 'ICE!') then
@@ -425,15 +423,15 @@ begin
   if (Pos('ATOMIC', AsciiContext) > 0) or (Pos('THUNDER', AsciiContext) > 0) then
     Exit('JPM Thunder Packer / ATOMIC');
 
-  if (Pos('ATOM', AsciiContext) > 0) or (Pos('ATM5', AsciiContext) > 0) or
-     (Pos('ATM3', AsciiContext) > 0) or (Pos('Atomik', AsciiContext) > 0) then
+  if (Pos('ATM5', AsciiContext) > 0) or (Pos('ATM3', AsciiContext) > 0) or
+     (Pos('ATOMIK CRUNCHER', AsciiContext) > 0) or (Pos('ATOM', AsciiContext) > 0) then
   begin
     Idx := Pos('ATOM', AsciiContext);
     if (Idx > 0) and (Idx - 1 + 12 <= Size) then
     begin
       ULen := ReadBE32(Buffer, Idx - 1 + 4);
       PLen := ReadBE32(Buffer, Idx - 1 + 8);
-      if (ULen > 0) and (ULen < 16777216) and (Idx - 1 + PLen <= Size) then
+      if (ULen > 0) and (ULen < 16777216) and (PLen > 0) and (Idx - 1 + PLen <= Size) then
       begin
         AbsEnd := Idx - 1 + PLen;
         AbsLitOff := AbsEnd - 4;
@@ -446,16 +444,21 @@ begin
         end;
         if DecompressThunderV1(@Buffer[Idx - 1], Size - (Idx - 1), DummyOut) then
           Exit('Thunder V1 Executable Packer');
-        Exit('Atomik Cruncher Executable Packer');
+        if DecompressAtomik(@Buffer[Idx - 1], Size - (Idx - 1), DummyOut) then
+          Exit('Atomik Cruncher Executable Packer');
       end;
+    end
+    else if (Pos('ATM5', AsciiContext) > 0) or (Pos('ATM3', AsciiContext) > 0) or
+            (Pos('ATOMIK CRUNCHER', AsciiContext) > 0) then
+    begin
+      Exit('Atomik Cruncher Executable Packer');
     end;
-    Exit('Atomik Cruncher Executable Packer');
   end;
 
   if Pos('AUTOMATION PACKER V2.3', AsciiContext) > 0 then Exit('Automation 2.3 Packer');
   if (Pos('AUTOMATION PACKER', AsciiContext) > 0) or (Pos('AUTOMATION COMPACTER', AsciiContext) > 0) then
     Exit('Automation Compacter');
-  if (Pos('POMPEY PIRATES', AsciiContext) > 0) or (Pos('POMPEY', AsciiContext) > 0) then Exit('Pompey Pirates Packer');
+  if (Pos('POMPEY PIRATES', AsciiContext) > 0) then Exit('Pompey Pirates Packer');
   if (Pos('JEK PACKER', AsciiContext) > 0) or (Pos('JEK!', AsciiContext) > 0) then Exit('JEK Packer / Byte Killer');
 
   // Tail-end scanning fallback
@@ -936,12 +939,14 @@ begin
 end;
 
 function DecompressPackIce(const InBuf: PByte; InSize: Integer; out OutBuf: TBytes): Boolean;
+const
+  IceDeltas: array[0..4] of Integer = (0, -2, 2, -4, 4);
 var
   SearchOffsets: array of Integer;
   PossibleEnds: array of Integer;
   TrialOrigSizes: array of Integer;
   Ts, Ds, Ss, PackedSize, OrigSize: LongWord;
-  PrgEnd, Off, I, Delta, SrcIdx, Op, Mode, ImmVal, EndIdx: Integer;
+  PrgEnd, Off, I, Delta, DIdx, SrcIdx, Op, Mode, ImmVal, EndIdx: Integer;
   IsIce21, UseBytes, IsOld: Boolean;
 begin
   Result := False;
@@ -970,10 +975,11 @@ begin
     OrigSize := ReadBE32(InBuf, Off + 8);
     if (PackedSize > 0) and (PackedSize <= LongWord(InSize)) and (OrigSize > 0) and (OrigSize <= $800000) then
     begin
-      for Delta := -256 to 256 do
+      for DIdx := 0 to High(IceDeltas) do
       begin
-        for IsOld in [False, True] do
-          for UseBytes in [True, False] do
+        Delta := IceDeltas[DIdx];
+        for IsOld := False to True do
+          for UseBytes := False to True do
           begin
             // 1. Try bitstream ending at Off + PackedSize + Delta with data start at Off + 12
             EndIdx := Off + Integer(PackedSize) + Delta;
@@ -1008,7 +1014,8 @@ begin
       end;
     end;
   end;
-// Phase 2: PRG executables without raw ICE header
+
+  // Phase 2: PRG executables without raw ICE header
   if (InSize >= 28) and (InBuf[0] = $60) and (InBuf[1] in [$1A, $1C, $00]) then
   begin
     Ts := ReadBE32(InBuf, 2);
@@ -1085,8 +1092,8 @@ begin
         if (OrigSize <= 1000) or (OrigSize > $800000) then Continue;
 
         // Try old/new, useBytes
-        for IsOld in [True, False] do
-          for UseBytes in [False, True] do
+        for IsOld := False to True do
+          for UseBytes := False to True do
           begin
             // Sweep deltas near PrgEnd
             for Delta := -8 to 8 do
@@ -1121,8 +1128,8 @@ var
       Inc(InPos);
       BitsLeft := 8;
     end;
-    Result := BitBuf and 1;
-    BitBuf := BitBuf shr 1;
+    Result := (BitBuf shr 7) and 1;
+    BitBuf := (BitBuf shl 1) and $FF;
     Dec(BitsLeft);
   end;
 
@@ -1260,7 +1267,7 @@ begin
     end;
   end;
 
-  Result := (OutPos > 0);
+  Result := (OutPos = OutSize) and (OutSize > 0);
 end;
 
 type
@@ -1311,14 +1318,15 @@ var
     while Idx < NumSymbols do
     begin
       Len := 0;
-      while GetBit = 0 do Inc(Len);
+      while (GetBit = 0) and (Len < 32) and (InPos <= InSize + 2) do Inc(Len);
       Inc(Len);
+      if Len > 32 then Len := 32;
       Count := GetBits(4);
       if Count = 15 then
       repeat
         Extra := GetBits(4);
         Inc(Count, Extra);
-      until Extra <> 15;
+      until (Extra <> 15) or (InPos > InSize + 2);
       Inc(Count);
       for I := 1 to Count do
       begin
@@ -1332,11 +1340,16 @@ var
 
     Result.MaxLen := 1;
     for I := 0 to NumSymbols - 1 do
+    begin
+      if Result.Lengths[I] > 32 then Result.Lengths[I] := 32;
       if Result.Lengths[I] > Result.MaxLen then Result.MaxLen := Result.Lengths[I];
+    end;
+    if Result.MaxLen > 32 then Result.MaxLen := 32;
 
     FillChar(BLCount, SizeOf(BLCount), 0);
     for I := 0 to NumSymbols - 1 do
-      if Result.Lengths[I] > 0 then Inc(BLCount[Result.Lengths[I]]);
+      if (Result.Lengths[I] > 0) and (Result.Lengths[I] <= 32) then
+        Inc(BLCount[Result.Lengths[I]]);
 
     Code := 0;
     BLCount[0] := 0;
@@ -1421,16 +1434,39 @@ begin
         end;
       end;
     end;
-    Result := (OutPos > 0);
+    Result := (OutPos = OutSize) and (OutSize > 0);
   except
     Result := False;
   end;
+end;
+
+function CalculateRNCCRC16(const Buffer: PByte; ALength: Integer): Word;
+var
+  CRC: Word;
+  I, J: Integer;
+  B: Byte;
+begin
+  CRC := 0;
+  for I := 0 to ALength - 1 do
+  begin
+    B := Buffer[I];
+    CRC := CRC xor B;
+    for J := 0 to 7 do
+    begin
+      if (CRC and 1) <> 0 then
+        CRC := (CRC shr 1) xor $A001
+      else
+        CRC := CRC shr 1;
+    end;
+  end;
+  Result := CRC;
 end;
 
 function DecompressRNC(const InBuf: PByte; InSize: Integer; out OutBuf: TBytes): Boolean;
 var
   RNCStart, Method: Integer;
   OutSize: LongWord;
+  ExpectedCRC: Word;
 begin
   Result := False;
   SetLength(OutBuf, 0);
@@ -1445,10 +1481,21 @@ begin
   OutSize := ReadBE32(InBuf, RNCStart + 4);
   if (OutSize = 0) or (OutSize > 16 * 1024 * 1024) then Exit;
 
+  ExpectedCRC := (Word(InBuf[RNCStart + 12]) shl 8) or InBuf[RNCStart + 13];
+
   if Method = 2 then
     Result := DecompressRNCMethod2(@InBuf[RNCStart], InSize - RNCStart, OutSize, OutBuf)
   else if Method = 1 then
     Result := DecompressRNCMethod1(@InBuf[RNCStart], InSize - RNCStart, OutSize, OutBuf);
+
+  if Result and (ExpectedCRC <> 0) and (Length(OutBuf) = OutSize) then
+  begin
+    if CalculateRNCCRC16(@OutBuf[0], OutSize) <> ExpectedCRC then
+    begin
+      SetLength(OutBuf, 0);
+      Result := False;
+    end;
+  end;
 end;
 
 // -----------------------------------------------------------------------------
@@ -1803,7 +1850,7 @@ begin
       Dec(PicCnt);
     end;
 
-    Result := True;
+    Result := (DstIdx = 0) and (Length(OutBuf) > 0);
   except
     Result := False;
   end;
@@ -2380,18 +2427,18 @@ begin
         if IsLsd then Inc(PackedSize, 4)
         else if IsLzh then Inc(PackedSize, 12);
 
-        if (Off + Integer(PackedSize) <= InSize) and (RawSize > 0) and (RawSize <= $800000) then
+        if (PackedSize > 0) and (PackedSize <= LongWord(InSize)) and (Off <= InSize - Integer(PackedSize)) and (RawSize > 0) and (RawSize <= $800000) then
         begin
           try
             if IsLsd then
             begin
               OutBuf := DecompressInternalV2(@InBuf[Off], RawSize, PackedSize);
-              Exit(True);
+              if Length(OutBuf) = RawSize then Exit(True);
             end
             else if IsLzh then
             begin
               OutBuf := DecompressInternalLZH(@InBuf[Off], RawSize, PackedSize);
-              Exit(True);
+              if Length(OutBuf) = RawSize then Exit(True);
             end;
           except
           end;
@@ -2500,10 +2547,11 @@ begin
       end;
     end;
 
-    Result := (A4 > 0);
-    if Result and (A4 < Length(OutBuf)) then
-      SetLength(OutBuf, A4);
+    Result := (A4 = Length(OutBuf)) and (A4 > 0);
+    if not Result then
+      SetLength(OutBuf, 0);
   except
+    SetLength(OutBuf, 0);
     Result := False;
   end;
 end;
@@ -2697,8 +2745,11 @@ begin
       end;
     end;
 
-    Result := (A4 > 0);
+    Result := (A4 = Length(OutBuf)) and (A4 > 0);
+    if not Result then
+      SetLength(OutBuf, 0);
   except
+    SetLength(OutBuf, 0);
     Result := False;
   end;
 end;

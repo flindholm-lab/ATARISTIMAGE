@@ -199,6 +199,7 @@ begin
 
       // 1. Temp tree
       N := Reader.ReadBits(5);
+      if N > Length(TempLens) then Exit(False);
       FillChar(TempLens, SizeOf(TempLens), 0);
       if N = 0 then
       begin
@@ -209,7 +210,7 @@ begin
       else
       begin
         I := 0;
-        while I < N do
+        while (I < N) and (I <= High(TempLens)) do
         begin
           TempLens[I] := ReadLenVal(Reader);
           if I = 2 then
@@ -218,7 +219,7 @@ begin
             for J := 1 to Skip do
             begin
               Inc(I);
-              if I < N then TempLens[I] := 0;
+              if (I < N) and (I <= High(TempLens)) then TempLens[I] := 0;
             end;
           end;
           Inc(I);
@@ -228,6 +229,7 @@ begin
 
       // 2. Code tree
       N := Reader.ReadBits(9);
+      if N > Length(CodeLens) then Exit(False);
       FillChar(CodeLens, SizeOf(CodeLens), 0);
       if N = 0 then
       begin
@@ -238,7 +240,7 @@ begin
       else
       begin
         I := 0;
-        while I < N do
+        while (I < N) and (I <= High(CodeLens)) do
         begin
           C := ReadFromTree(Reader, TempTree);
           if C <= 2 then
@@ -248,7 +250,7 @@ begin
             else Skip := Reader.ReadBits(9) + 20;
             for J := 1 to Skip do
             begin
-              if I < N then CodeLens[I] := 0;
+              if (I < N) and (I <= High(CodeLens)) then CodeLens[I] := 0;
               Inc(I);
             end;
           end
@@ -263,6 +265,7 @@ begin
 
       // 3. Offset tree
       N := Reader.ReadBits(4);
+      if N > Length(OffLens) then Exit(False);
       FillChar(OffLens, SizeOf(OffLens), 0);
       if N = 0 then
       begin
@@ -272,7 +275,7 @@ begin
       end
       else
       begin
-        for I := 0 to N - 1 do
+        for I := 0 to Min(N - 1, High(OffLens)) do
           OffLens[I] := ReadLenVal(Reader);
         BuildTree(Slice(OffLens, N), OffTree);
       end;
@@ -904,16 +907,8 @@ begin
         end
         else
         begin
-          // Method not directly supported, extract raw stream as fallback
-          BytesToRead := FItems[TargetIndex].CompressedSize;
-          while BytesToRead > 0 do
-          begin
-            Chunk := Min(BytesToRead, SizeOf(Buffer));
-            Fs.ReadBuffer(Buffer[0], Chunk);
-            AOutStream.WriteBuffer(Buffer[0], Chunk);
-            Dec(BytesToRead, Chunk);
-          end;
-          Result := True;
+          // Method not supported; do not report success on raw compressed dump
+          Result := False;
         end;
       finally
         Fs.Free;
@@ -970,16 +965,8 @@ begin
         end
         else
         begin
-          // Stored copy fallback
-          BytesToRead := FItems[TargetIndex].CompressedSize;
-          while BytesToRead > 0 do
-          begin
-            Chunk := Min(BytesToRead, SizeOf(Buffer));
-            Fs.ReadBuffer(Buffer[0], Chunk);
-            AOutStream.WriteBuffer(Buffer[0], Chunk);
-            Dec(BytesToRead, Chunk);
-          end;
-          Result := True;
+          // Method not supported; do not report success on raw compressed dump
+          Result := False;
         end;
       finally
         Fs.Free;

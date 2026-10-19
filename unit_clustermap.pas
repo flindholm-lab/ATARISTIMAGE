@@ -152,6 +152,7 @@ type
     FReadOnly: Boolean;
     FSelectedByteOffset: Integer;
     FHighlightedClusters: array of Boolean;
+    FVisitedDirs: array of Word;
 
     procedure InitHexGrid;
     procedure ReadFATDetails(const AImageFile: TFileStream);
@@ -264,7 +265,7 @@ begin
   AImageFile.Read(BootSector, FAT12_BOOT_SECTOR_SIZE);
 
   FBytesPerSector := Word(BootSector[$0B]) + (Word(BootSector[$0C]) shl 8);
-  if FBytesPerSector = 0 then FBytesPerSector := 512;
+  if FBytesPerSector <> 512 then FBytesPerSector := 512;
   FSectorsPerCluster := BootSector[$0D];
   if FSectorsPerCluster = 0 then FSectorsPerCluster := 2;
   FReservedSectors := Word(BootSector[$0E]) + (Word(BootSector[$0F]) shl 8);
@@ -354,15 +355,23 @@ end;
 
 procedure TFormClusterMap.ScanDirectoryForClusterOwners(const AImageFile: TFileStream; DirCluster: Int64; const CurrentPath: string);
 var
-  EntriesToRead, I: Integer;
+  EntriesToRead, I, V: Integer;
   DirEntry: array[0..31] of Byte;
   DirOffset, EntryPos: Int64;
   NameStr, ExtStr, FullName: string;
   Attr: Byte;
   StartCluster, CurrCluster: Word;
   NextClust: Int64;
-  ChainIndex: Integer;
+  ChainIndex, DirChainIndex: Integer;
 begin
+  if DirCluster <> 0 then
+  begin
+    for V := 0 to High(FVisitedDirs) do
+      if FVisitedDirs[V] = DirCluster then Exit;
+    SetLength(FVisitedDirs, Length(FVisitedDirs) + 1);
+    FVisitedDirs[High(FVisitedDirs)] := DirCluster;
+  end;
+
   if DirCluster = 0 then
   begin
     EntriesToRead := FRootEntries;
@@ -398,7 +407,7 @@ begin
           else
             Break;
           Inc(ChainIndex);
-          if CurrCluster >= $FF8 then Break;
+          if (ChainIndex > FTotalClusters + 2) or (CurrCluster >= $FF8) then Break;
         end;
       end;
     end;
@@ -406,8 +415,12 @@ begin
   else
   begin
     CurrCluster := DirCluster;
+    DirChainIndex := 0;
     while (CurrCluster >= 2) and (CurrCluster <= FTotalClusters + 1) do
     begin
+      Inc(DirChainIndex);
+      if DirChainIndex > FTotalClusters + 2 then Break;
+
       DirOffset := FDataAreaStart + (Int64(CurrCluster) - 2) * FBytesPerCluster;
       if DirOffset + FBytesPerCluster > AImageFile.Size then Break;
       EntriesToRead := FBytesPerCluster div 32;
@@ -442,7 +455,7 @@ begin
             else
               Break;
             Inc(ChainIndex);
-            if NextClust >= $FF8 then Break;
+            if (ChainIndex > FTotalClusters + 2) or (NextClust >= $FF8) then Break;
           end;
         end;
       end;
@@ -463,6 +476,7 @@ var
   UtilPercent: Double;
 begin
   FImagePath := AImagePath;
+  SetLength(FVisitedDirs, 0);
   if not FileExists(FImagePath) then Exit;
 
   ImageFile := TFileStream.Create(FImagePath, fmOpenRead or fmShareDenyNone);
@@ -969,7 +983,7 @@ begin
       if PhysOffset + FBytesPerSector <= ImageFile.Size then
       begin
         ImageFile.Position := PhysOffset;
-        ImageFile.Read(FSectorBuffer, FBytesPerSector);
+        ImageFile.Read(FSectorBuffer, Min(SizeOf(FSectorBuffer), FBytesPerSector));
       end
       else
         FillChar(FSectorBuffer, 512, 0);
@@ -1010,20 +1024,20 @@ begin
   ImageFile := TFileStream.Create(FImagePath, fmOpenReadWrite or fmShareDenyNone);
   try
     ImageFile.Position := PhysOffset;
-    ImageFile.Write(FSectorBuffer, FBytesPerSector);
+    ImageFile.Write(FSectorBuffer, Min(SizeOf(FSectorBuffer), FBytesPerSector));
 
     // If modifying FAT 1, mirror to FAT 2
     if (FCurrentSector >= 1) and (FCurrentSector <= FSectorsPerFAT) then
     begin
       Fat2Offset := PhysOffset + (FSectorsPerFAT * FBytesPerSector);
       ImageFile.Position := Fat2Offset;
-      ImageFile.Write(FSectorBuffer, FBytesPerSector);
+      ImageFile.Write(FSectorBuffer, Min(SizeOf(FSectorBuffer), FBytesPerSector));
     end
     else if (FCurrentSector > FSectorsPerFAT) and (FCurrentSector <= FSectorsPerFAT * 2) then
     begin
       Fat1Offset := PhysOffset - (FSectorsPerFAT * FBytesPerSector);
       ImageFile.Position := Fat1Offset;
-      ImageFile.Write(FSectorBuffer, FBytesPerSector);
+      ImageFile.Write(FSectorBuffer, Min(SizeOf(FSectorBuffer), FBytesPerSector));
     end;
   finally
     ImageFile.Free;

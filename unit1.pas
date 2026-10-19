@@ -243,6 +243,9 @@ type
     FRootEntries: Word;               // Number of root directory entries
     FVolumeLabel: string;             // Atari ST volume label (from root directory Attr = $08)
     FDiskSerial: LongWord;            // 24-bit Atari disk serial number (from boot sector $08..$0A)
+    FSectorsPerTrack: Word;           // Sectors per track (e.g. 9, 10, 11, 18)
+    FSides: Word;                     // Number of sides (1 or 2)
+    FTracks: Word;                    // Number of tracks (e.g. 80)
     FIsMSAImage: Boolean;             // True if currently loaded from/saving to MSA
     FOriginalMSAPath: string;         // Original host path of the MSA file
     FIsDIMImage: Boolean;             // True if currently loaded from/saving to FastCopy DIM
@@ -255,6 +258,7 @@ type
     FDragPending: Boolean;            // Flag indicating left button pressed on an item
     FDragActive: Boolean;             // Flag indicating active outgoing OLE drag operation
     FDragSourcePath: string;          // Full host path of currently dragged-out file
+    FIsModified: Boolean;             // True if unwritten direct edits (undelete, rename, attr, etc.) were made
 
     // Archive navigation state
     FInArchiveMode: Boolean;          // True when currently browsing inside an archive
@@ -332,10 +336,14 @@ type
     procedure AddFolderToZipper(const ABaseDir, ARelPath: string; AZip: TZipper);
     procedure ZipListDblClick(Sender: TObject);
     procedure ZipListKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
-    procedure ExtractDiskDirectory(const AImageFile: TFileStream; const ADirCluster: Int64; const AHostPath: string; var AFileCount: Integer; var AByteCount: Int64);
+    procedure ExtractDiskDirectory(const AImageFile: TFileStream; const ADirCluster: Int64; const AHostPath: string; var AFileCount: Integer; var AByteCount: Int64; AVisitedDirs: TList = nil; ADepth: Integer = 0);
     procedure WriteVolumeLabelToImage(const AImageFile: TFileStream; const ALabel: string);
     function ExtractFileToStream(const AFileName: string; AOutStream: TStream; out AStartCluster: Word): Boolean;
     function ExtractFileToTemp(const AFileName: string): string;
+    procedure FreeClusterChain(const AImageFile: TFileStream; StartCluster: Word);
+    procedure DeleteDirectoryRecursive(const AImageFile: TFileStream; const ADirCluster: Word);
+    function CanCloseOrOpenImage: Boolean;
+    procedure FormCloseQuery(Sender: TObject; var CanClose: Boolean);
     function CheckAndDeinterleaveSingleSidedST(const ASourceFile: string; out ADeinterleavedFile: string): Boolean;
     function ScoreDirectoryAtOffset(const AStream: TStream; AOffset: Int64; AMaxEntries: Integer): Integer;
     function DiscoverDirectoryContent(const AStream: TStream; out ARootDirStart: Int64; out ARootDirEntries: Word): Integer;
@@ -526,6 +534,16 @@ begin
   Item.SubItems.Add(AInfo.StatusStr);
 end;
 
+function GetFullItemPath(const ADir, AName: string): string;
+begin
+  if (ADir = '') or (ADir = '\') then
+    Result := AName
+  else if (Length(ADir) > 0) and (ADir[Length(ADir)] = '\') then
+    Result := ADir + AName
+  else
+    Result := ADir + '\' + AName;
+end;
+
 {------------------------------------------------------------------
   Function: DateTimeToFatTime
   Purpose:  Converts a TDateTime to FAT time format (16-bit)
@@ -535,9 +553,9 @@ end;
  ------------------------------------------------------------------}
 function TForm1.DateTimeToFatTime(const ADateTime: TDateTime): Word;
 var
-  H, M, S: Word;
+  H, M, S, MS: Word;
 begin
-  DecodeTime(ADateTime, H, M, S, S);
+  DecodeTime(ADateTime, H, M, S, MS);
   Result := (H shl 11) or (M shl 5) or (S div 2);
 end;
 
@@ -607,8 +625,12 @@ begin
   FCurrentPath := '';
   FVolumeLabel := '';
   FDiskSerial := 0;
+  FSectorsPerTrack := 9;
+  FSides := 2;
+  FTracks := 80;
   FIsDIMImage := False;
   FOriginalDIMPath := '';
+  FIsModified := False;
   Self.Caption := 'Atari .ST Image File Manager';
   ProgressBarFreeSpace.Position := 0;
   LabelFreeSpace.Caption := 'Utilized space: 0%';
@@ -929,7 +951,8 @@ end;
 function TForm1.ExtractFileNameFromEntry(const DirEntry: array of Byte): string;
 var
   I: Integer;
-  FileName, FileExt: string;
+  FileName, FileExt, CleanPart: string;
+  C: AnsiChar;
 begin
   FileName := '';
   for I := 0 to FAT12_MAX_DIR_NAME_LEN - 1 do
@@ -945,6 +968,38 @@ begin
   for I := 8 to 10 do
     FileExt := FileExt + AnsiChar(DirEntry[I]);
   FileExt := Trim(FileExt);
+
+  // Preserve standard DOS '.' and '..' special entries
+  if (FileName = '.') and (FileExt = '') then Exit('.');
+  if (FileName = '..') and (FileExt = '') then Exit('..');
+
+  // Sanitize FileName
+  CleanPart := '';
+  for I := 1 to Length(FileName) do
+  begin
+    C := FileName[I];
+    if C in ['/', '\', ':', '*', '?', '"', '<', '>', '|', ';', ',', #0..#31, #127] then
+      CleanPart := CleanPart + '_'
+    else
+      CleanPart := CleanPart + C;
+  end;
+  FileName := CleanPart;
+
+  // Sanitize FileExt
+  CleanPart := '';
+  for I := 1 to Length(FileExt) do
+  begin
+    C := FileExt[I];
+    if C in ['/', '\', ':', '*', '?', '"', '<', '>', '|', ';', ',', #0..#31, #127] then
+      CleanPart := CleanPart + '_'
+    else
+      CleanPart := CleanPart + C;
+  end;
+  FileExt := CleanPart;
+
+  // Disallow names that are or start with '..'
+  if (FileName = '..') or (FileName = '.') then
+    FileName := '_' + FileName;
 
   if FileExt <> '' then
     Result := FileName + '.' + FileExt
@@ -1003,6 +1058,10 @@ begin
 
   ParentCluster := FindDirectoryInPath(AImageFile, ParentPath);
   if ParentCluster = -1 then Exit;
+
+  // Prevent creating duplicate folder entries if folder already exists
+  if FindFileInDirectory(AImageFile, ParentCluster, DirName) <> -1 then
+    Exit;
 
   DirEntryPos := FindFreeDirectoryEntry(AImageFile, ParentCluster);
   if DirEntryPos = -1 then Exit;
@@ -1073,6 +1132,7 @@ end;
  ------------------------------------------------------------------}
 procedure TForm1.ButtonOpenImageClick(Sender: TObject);
 begin
+  if not CanCloseOrOpenImage then Exit;
   OpenDialog.Options := [ofFileMustExist];
   OpenDialog.Filter := 'Atari ST Disk Images (*.st;*.msa;*.dim;*.zip)|*.st;*.msa;*.dim;*.zip|ST Image Files (*.st)|*.st|MSA Image Files (*.msa)|*.msa|FastCopy Pro DIM Files (*.dim)|*.dim|ZIP Archives (*.zip)|*.zip|All Files (*.*)|*.*';
   if OpenDialog.Execute then
@@ -1127,11 +1187,11 @@ begin
   end;
 
   // Case 2: On-disk directory -> toggle deletion marking
-  DirName := StringReplace(DirName, '\', '', [rfReplaceAll]);
-  if FDirsToDelete.IndexOf(DirName) = -1 then
-    FDirsToDelete.Add(DirName)
+  TargetDir := GetFullItemPath(FCurrentPath, StringReplace(DirName, '\', '', [rfReplaceAll]));
+  if FDirsToDelete.IndexOf(TargetDir) = -1 then
+    FDirsToDelete.Add(TargetDir)
   else
-    FDirsToDelete.Delete(FDirsToDelete.IndexOf(DirName));
+    FDirsToDelete.Delete(FDirsToDelete.IndexOf(TargetDir));
   UpdateFileListDisplay;
 end;
 
@@ -1143,7 +1203,7 @@ end;
  ------------------------------------------------------------------}
 procedure TForm1.ButtonRemoveFileClick(Sender: TObject);
 var
-  RawName, FileName: string;
+  RawName, FileName, TargetFull: string;
   IsDir, IsStaged, IsDel, IsMarkedDel: Boolean;
   Index, I, SavedIdx: Integer;
 begin
@@ -1203,11 +1263,12 @@ begin
   if ListViewFiles.Selected <> nil then
     SavedIdx := ListViewFiles.Selected.Index;
 
-  Index := FFilesToDelete.IndexOf(FileName);
+  TargetFull := GetFullItemPath(FCurrentPath, FileName);
+  Index := FFilesToDelete.IndexOf(TargetFull);
   if Index <> -1 then
     FFilesToDelete.Delete(Index)
   else
-    FFilesToDelete.Add(FileName);
+    FFilesToDelete.Add(TargetFull);
 
   UpdateFileListDisplay;
   if (SavedIdx >= 0) and (SavedIdx < ListViewFiles.Items.Count) then
@@ -1244,6 +1305,9 @@ begin
   TotalSectors := ASides * ASectorsPerTrack * ATracks;
   TotalSize := Int64(TotalSectors) * 512;
   ReservedSectors := 1;
+  FSectorsPerTrack := ASectorsPerTrack;
+  FSides := ASides;
+  FTracks := ATracks;
 
   // Determine media descriptor and Sectors Per FAT based on format
   if ASides = 1 then
@@ -1376,10 +1440,12 @@ var
   SaveFileName: string;
   TempFileName: string;
   TempImageFile, OriginalImageFile, SourceFile: TFileStream;
-  DirEntryPos: Int64;
+  DirEntryPos, DirCluster: Int64;
   I, J: Integer;
   OriginalSize: Int64;
   TempStr, FileDestDir: string;
+  TargetFile, FileDir, DelName, TargetDir, ParentDir, TempOutFile, BakFileName: string;
+  HasBackup: Boolean;
 begin
   SaveDialog.Filter := 'Atari .ST Image (*.st)|*.st|Magic Shadow Archiver (*.msa)|*.msa|FastCopy Pro Image (*.dim)|*.dim|All Files (*.*)|*.*';
   if FIsMSAImage and (FOriginalMSAPath <> '') then
@@ -1428,7 +1494,40 @@ begin
     try
       GetFATDetails(TempImageFile);
 
-      // Sort new directories by path depth (length) so parent directories are created first
+      // 1. Delete marked files first so replacing a file frees the slot and does not skip adding
+      for I := 0 to FFilesToDelete.Count - 1 do
+      begin
+        TargetFile := FFilesToDelete[I];
+        FileDir := ExtractFilePath(TargetFile);
+        DelName := ExtractFileName(TargetFile);
+        DirCluster := FindDirectoryInPath(TempImageFile, FileDir);
+        if DirCluster <> -1 then
+        begin
+          DirEntryPos := FindFileInDirectory(TempImageFile, DirCluster, DelName);
+          if DirEntryPos <> -1 then
+            DeleteFileFromImage(TempImageFile, DirEntryPos, DelName);
+        end;
+      end;
+      FFilesToDelete.Clear;
+
+      // 2. Delete marked directories
+      for I := 0 to FDirsToDelete.Count - 1 do
+      begin
+        TargetDir := FDirsToDelete[I];
+        ParentDir := ExtractFilePath(TargetDir);
+        DelName := ExtractFileName(TargetDir);
+        if DelName = '' then DelName := TargetDir;
+        DirCluster := FindDirectoryInPath(TempImageFile, ParentDir);
+        if DirCluster <> -1 then
+        begin
+          DirEntryPos := FindFileInDirectory(TempImageFile, DirCluster, DelName);
+          if DirEntryPos <> -1 then
+            DeleteFileFromImage(TempImageFile, DirEntryPos, DelName);
+        end;
+      end;
+      FDirsToDelete.Clear;
+
+      // 3. Sort new directories by path depth (length) so parent directories are created first
       for I := 0 to FNewDirectories.Count - 2 do
         for J := I + 1 to FNewDirectories.Count - 1 do
           if Length(FNewDirectories[I]) > Length(FNewDirectories[J]) then
@@ -1443,48 +1542,26 @@ begin
         CreateDirectoryInImage(TempImageFile, FNewDirectories[I]);
       FNewDirectories.Clear;
 
-      // Write new files
+      // 4. Write new files
       for I := 0 to FFilePaths.Count - 1 do
       begin
         if (Trim(FFilePaths[I]) = '') or (not FileExists(FFilePaths[I])) then
           Continue;
 
-        if FFilesToDelete.IndexOf(UpperCase(ExtractFileName(FFilePaths[I]))) = -1 then
-        begin
-          if I < FFileDestDirs.Count then
-            FileDestDir := FFileDestDirs[I]
-          else
-            FileDestDir := FCurrentPath;
+        if I < FFileDestDirs.Count then
+          FileDestDir := FFileDestDirs[I]
+        else
+          FileDestDir := FCurrentPath;
 
-          SourceFile := TFileStream.Create(FFilePaths[I], fmOpenRead or fmShareDenyNone);
-          try
-            WriteFileToImage(TempImageFile, ExtractFileName(FFilePaths[I]), SourceFile, FileDestDir);
-          finally
-            SourceFile.Free;
-          end;
+        SourceFile := TFileStream.Create(FFilePaths[I], fmOpenRead or fmShareDenyNone);
+        try
+          WriteFileToImage(TempImageFile, ExtractFileName(FFilePaths[I]), SourceFile, FileDestDir);
+        finally
+          SourceFile.Free;
         end;
       end;
-
-      // Delete directories
-      for I := 0 to FDirsToDelete.Count - 1 do
-      begin
-        DirEntryPos := FindFileInDirectory(TempImageFile, FindDirectoryInPath(TempImageFile, FCurrentPath), FDirsToDelete[I]);
-        if DirEntryPos <> -1 then
-          DeleteFileFromImage(TempImageFile, DirEntryPos, FDirsToDelete[I])
-        else
-          ShowMessage(Format(ERR_DIR_NOT_FOUND, [FDirsToDelete[I]]));
-      end;
-      FDirsToDelete.Clear;
-
-      // Delete files
-      for I := 0 to FFilesToDelete.Count - 1 do
-      begin
-        DirEntryPos := FindFileInDirectory(TempImageFile, FindDirectoryInPath(TempImageFile, FCurrentPath), FFilesToDelete[I]);
-        if DirEntryPos <> -1 then
-          DeleteFileFromImage(TempImageFile, DirEntryPos, FFilesToDelete[I])
-        else
-          ShowMessage(Format(ERR_FILE_NOT_FOUND, [FFilesToDelete[I]]));
-      end;
+      FFilePaths.Clear;
+      FFileDestDirs.Clear;
 
       // Write / update Atari ST volume label in root directory
       if FVolumeLabel <> '' then
@@ -1497,15 +1574,21 @@ begin
     end;
 
     // Handle MSA compression vs raw ST saving
+    BakFileName := SaveFileName + '.bak';
+    if FileExists(BakFileName) then SysUtils.DeleteFile(BakFileName);
+
     if SameText(ExtractFileExt(SaveFileName), '.msa') then
     begin
-      if FileExists(SaveFileName) then SysUtils.DeleteFile(SaveFileName);
-      if not PackSTToMSA(TempFileName, SaveFileName, 9, 2) then
+      TempOutFile := TempFileName + '.msa';
+      if FileExists(TempOutFile) then SysUtils.DeleteFile(TempOutFile);
+      if not PackSTToMSA(TempFileName, TempOutFile, FSectorsPerTrack, FSides) then
       begin
+        SysUtils.DeleteFile(TempFileName);
         ShowMessage('Error: Failed to encode compressed MSA disk image.');
         Exit;
       end;
       SysUtils.DeleteFile(TempFileName);
+      TempFileName := TempOutFile;
       FIsMSAImage := True;
       FIsDIMImage := False;
       FOriginalMSAPath := SaveFileName;
@@ -1513,13 +1596,16 @@ begin
     end
     else if SameText(ExtractFileExt(SaveFileName), '.dim') then
     begin
-      if FileExists(SaveFileName) then SysUtils.DeleteFile(SaveFileName);
-      if not PackSTToDIM(TempFileName, SaveFileName, 9, 2, 80) then
+      TempOutFile := TempFileName + '.dim';
+      if FileExists(TempOutFile) then SysUtils.DeleteFile(TempOutFile);
+      if not PackSTToDIM(TempFileName, TempOutFile, FSectorsPerTrack, FSides, FTracks) then
       begin
+        SysUtils.DeleteFile(TempFileName);
         ShowMessage('Error: Failed to encode FastCopy DIM disk image.');
         Exit;
       end;
       SysUtils.DeleteFile(TempFileName);
+      TempFileName := TempOutFile;
       FIsDIMImage := True;
       FIsMSAImage := False;
       FOriginalDIMPath := SaveFileName;
@@ -1527,14 +1613,39 @@ begin
     end
     else
     begin
-      if FileExists(SaveFileName) then SysUtils.DeleteFile(SaveFileName);
-      RenameFile(TempFileName, SaveFileName);
       FIsMSAImage := False;
       FIsDIMImage := False;
       FOriginalMSAPath := '';
       FOriginalDIMPath := '';
     end;
+
+    // Atomic replacement with backup rollback on failure
+    HasBackup := False;
+    if FileExists(SaveFileName) then
+    begin
+      HasBackup := RenameFile(SaveFileName, BakFileName);
+      if not HasBackup then
+        HasBackup := CopyFile(PChar(SaveFileName), PChar(BakFileName), False);
+    end;
+
+    if not RenameFile(TempFileName, SaveFileName) then
+    begin
+      if not CopyFile(PChar(TempFileName), PChar(SaveFileName), False) then
+      begin
+        if HasBackup and FileExists(BakFileName) then
+          RenameFile(BakFileName, SaveFileName);
+        ShowMessage('Error: Failed to write to image: ' + SaveFileName);
+        Exit;
+      end;
+      SysUtils.DeleteFile(TempFileName);
+    end;
+
+    // Successful write: clean up backup
+    if HasBackup and FileExists(BakFileName) then
+      SysUtils.DeleteFile(BakFileName);
+
     ShowMessage('Changes successfully written to image.');
+    FIsModified := False;
 
     // Clear pending lists after writing
     FNewDirectories.Clear;
@@ -1574,6 +1685,7 @@ var
   Sides, Spt, Tracks, RootEntries, Spc: Integer;
   DefFileName, FormatName, SaveFileName, TempFileName: string;
 begin
+  if not CanCloseOrOpenImage then Exit;
   FormNewImage := TFormNewImage.Create(Application);
   try
     if FormNewImage.ShowModal <> mrOK then
@@ -1627,6 +1739,7 @@ var
   DirEntry: array[0..31] of Byte;
   StartCluster, CurrCluster: Word;
   ClusterList: array of Word;
+  LoopGuard: Integer;
 begin
   if FInArchiveMode then
   begin
@@ -1672,8 +1785,11 @@ begin
           ImageFile.Read(DirEntry[0], 32);
           StartCluster := DirEntry[26] or (DirEntry[27] shl 8);
           CurrCluster := StartCluster;
+          LoopGuard := 0;
           while (CurrCluster >= 2) and (CurrCluster <= FTotalClusters + 1) do
           begin
+            Inc(LoopGuard);
+            if LoopGuard > FTotalClusters + 2 then Break;
             SetLength(ClusterList, Length(ClusterList) + 1);
             ClusterList[High(ClusterList)] := CurrCluster;
             CurrCluster := GetNextCluster(ImageFile, CurrCluster);
@@ -1767,6 +1883,11 @@ begin
   try
     GetFATDetails(ImageFile);
     DirCluster := FindDirectoryInPath(ImageFile, FCurrentPath);
+    if DirCluster = -1 then
+    begin
+      ShowMessage(Format(ERR_DIR_NOT_FOUND, [FCurrentPath]));
+      Exit;
+    end;
 
     // Locate the deleted directory entry in the image
     DirEntryPos := FindDeletedFileInDirectory(ImageFile, DirCluster, CleanName);
@@ -1805,8 +1926,7 @@ begin
           Break;
         end;
         NextVal := ReadFAT12Entry(ImageFile, CurrCluster);
-        if (NextVal <> FAT12_FREE) and (NextVal <> CurrCluster + 1) and
-           (not ((I = ClustersNeeded - 1) and (NextVal >= $FF8))) then
+        if NextVal <> FAT12_FREE then
         begin
           OverwriteWarning := True;
           Break;
@@ -1857,6 +1977,7 @@ begin
     // Write directory entry back to image
     ImageFile.Position := DirEntryPos;
     ImageFile.Write(DirEntry, FAT12_DIR_ENTRY_SIZE);
+    FIsModified := True;
   finally
     ImageFile.Free;
   end;
@@ -1924,6 +2045,26 @@ begin
   end;
 end;
 
+function TForm1.CanCloseOrOpenImage: Boolean;
+begin
+  Result := True;
+  if (FFilePaths.Count > 0) or (FNewDirectories.Count > 0) or
+     (FFilesToDelete.Count > 0) or (FDirsToDelete.Count > 0) or FIsModified then
+  begin
+    if MessageDlg('Unsaved Changes',
+      'You have pending changes staged or modified in the current image.' + sLineBreak +
+      'Opening, creating, or closing an image will discard any unwritten changes.' + sLineBreak + sLineBreak +
+      'Do you want to discard changes and continue?',
+      mtConfirmation, [mbYes, mbNo], 0) <> mrYes then
+      Result := False;
+  end;
+end;
+
+procedure TForm1.FormCloseQuery(Sender: TObject; var CanClose: Boolean);
+begin
+  CanClose := CanCloseOrOpenImage;
+end;
+
 {------------------------------------------------------------------
   Procedure: FormCreate
   Purpose:  Event handler for form creation
@@ -1932,6 +2073,8 @@ end;
 procedure TForm1.FormCreate(Sender: TObject);
 begin
   AllowDropFiles := True;
+  OnCloseQuery := @FormCloseQuery;
+  FIsModified := False;
   {$IFDEF WINDOWS}
   DragAcceptFiles(Handle, True);
   DragAcceptFiles(ListViewFiles.Handle, True);
@@ -2007,6 +2150,13 @@ end;
  ------------------------------------------------------------------}
 procedure TForm1.FormDestroy(Sender: TObject);
 begin
+  if FInArchiveMode then
+  begin
+    FInArchiveMode := False;
+    if (FArchiveTempFile <> '') and FileExists(FArchiveTempFile) then
+      SysUtils.DeleteFile(FArchiveTempFile);
+  end;
+  FreeAndNil(FArchiveVault);
   if (FTempSTPath <> '') and FileExists(FTempSTPath) then
     SysUtils.DeleteFile(FTempSTPath);
   if (FTempZipExtractedPath <> '') and FileExists(FTempZipExtractedPath) then
@@ -2014,14 +2164,12 @@ begin
     SysUtils.DeleteFile(FTempZipExtractedPath);
     RemoveDir(ExtractFilePath(FTempZipExtractedPath));
   end;
-  FFilePaths.Free;
-  FFileDestDirs.Free;
-  FFilesToDelete.Free;
-  FDisplayItems.Free;
-  FNewDirectories.Free;
-  FDirsToDelete.Free;
-  CloseArchiveMode;
-  FArchiveVault.Free;
+  FreeAndNil(FFilePaths);
+  FreeAndNil(FFileDestDirs);
+  FreeAndNil(FFilesToDelete);
+  FreeAndNil(FDisplayItems);
+  FreeAndNil(FNewDirectories);
+  FreeAndNil(FDirsToDelete);
 end;
 
 {------------------------------------------------------------------
@@ -2382,7 +2530,7 @@ end;
 procedure TForm1.UpdateFileListDisplay;
 var
   I: Integer;
-  CleanName, ChildName, HostFile: string;
+  CleanName, ChildName, HostFile, TargetFull, TargetDirFull: string;
   Info: TDiskItemInfo;
 begin
   if FInArchiveMode then
@@ -2417,8 +2565,10 @@ begin
     begin
       Info := FDiskItemsRaw[I];
       CleanName := Info.CleanName;
-      if (FFilesToDelete.IndexOf(CleanName) <> -1) or
-         (FDirsToDelete.IndexOf(StringReplace(CleanName, '\', '', [rfReplaceAll])) <> -1) then
+      TargetFull := GetFullItemPath(FCurrentPath, CleanName);
+      TargetDirFull := GetFullItemPath(FCurrentPath, StringReplace(CleanName, '\', '', [rfReplaceAll]));
+      if (FFilesToDelete.IndexOf(TargetFull) <> -1) or
+         (FDirsToDelete.IndexOf(TargetDirFull) <> -1) then
       begin
         Info.IsMarkedDelete := True;
         Info.StatusStr := 'Marked [D]';
@@ -2568,6 +2718,8 @@ var
   DirCluster, CurrentCluster: Int64;
   DirEntry: array[0..FAT12_DIR_ENTRY_SIZE - 1] of Byte;
   DirName: string;
+  LoopGuard, MaxEntriesInCluster, EntryIdx: Integer;
+  DirTerminated: Boolean;
 begin
   Result := 0;
   if APath = '' then Exit;
@@ -2584,20 +2736,41 @@ begin
       if PathParts[I] = '' then Continue;
       DirFound := False;
       CurrentCluster := DirCluster;
+      LoopGuard := 0;
 
       while True do
       begin
-        // Position to the current cluster
-        if CurrentCluster = 0 then
-          AImageFile.Position := FRootDirStart
-        else
-          AImageFile.Position := FDataAreaStart + (CurrentCluster - 2) * FBytesPerCluster;
+        Inc(LoopGuard);
+        if LoopGuard > 4096 then Break;
 
-        // Search through directory entries
-        while True do
+        if CurrentCluster = 0 then
         begin
-          if AImageFile.Read(DirEntry, FAT12_DIR_ENTRY_SIZE) <> FAT12_DIR_ENTRY_SIZE then Break;
-          if IsEndOfDirectory(DirEntry) then Break;
+          AImageFile.Position := FRootDirStart;
+          MaxEntriesInCluster := FRootEntries;
+        end
+        else
+        begin
+          if (CurrentCluster < 2) or (CurrentCluster >= $FF8) then Break;
+          AImageFile.Position := FDataAreaStart + (CurrentCluster - 2) * FBytesPerCluster;
+          if FBytesPerCluster >= FAT12_DIR_ENTRY_SIZE then
+            MaxEntriesInCluster := FBytesPerCluster div FAT12_DIR_ENTRY_SIZE
+          else
+            MaxEntriesInCluster := 16;
+        end;
+
+        DirTerminated := False;
+        for EntryIdx := 0 to MaxEntriesInCluster - 1 do
+        begin
+          if AImageFile.Read(DirEntry, FAT12_DIR_ENTRY_SIZE) <> FAT12_DIR_ENTRY_SIZE then
+          begin
+            DirTerminated := True;
+            Break;
+          end;
+          if IsEndOfDirectory(DirEntry) then
+          begin
+            DirTerminated := True;
+            Break;
+          end;
           if IsDeleted(DirEntry) or not IsDirectoryEntryValid(DirEntry) then Continue;
 
           DirName := ExtractFileNameFromEntry(DirEntry);
@@ -2609,10 +2782,10 @@ begin
           end;
         end;
 
-        if DirFound then Break;
+        if DirFound or DirTerminated then Break;
         if CurrentCluster = 0 then Break;
         CurrentCluster := GetNextCluster(AImageFile, CurrentCluster);
-        if CurrentCluster >= $FF8 then Break;
+        if (CurrentCluster < 2) or (CurrentCluster >= $FF8) then Break;
       end;
 
       if not DirFound then
@@ -2646,7 +2819,8 @@ var
   EntryStartClust: Word;
   EntrySize: Int64;
   EntrySizeStr, EntryDateStr, EntryAttrStr: string;
-  J: Integer;
+  J, LoopGuard, MaxEntriesInCluster, EntryIdx: Integer;
+  DirTerminated: Boolean;
 begin
   FDisplayItems.Clear;
   SetLength(FDiskItemsRaw, 0);
@@ -2676,22 +2850,44 @@ begin
     end;
 
     CurrentCluster := DirStartCluster;
+    LoopGuard := 0;
     while True do
     begin
-      // Position to the current cluster
-      if CurrentCluster = 0 then
-        ImageFile.Position := FRootDirStart
-      else
-        ImageFile.Position := FDataAreaStart + (CurrentCluster - 2) * FBytesPerCluster;
+      Inc(LoopGuard);
+      if LoopGuard > 4096 then Break;
 
-      // Read directory entries
-      while True do
+      if CurrentCluster = 0 then
       begin
-        if ImageFile.Read(DirEntry, FAT12_DIR_ENTRY_SIZE) <> FAT12_DIR_ENTRY_SIZE then Break;
-        if IsEndOfDirectory(DirEntry) then Break;
+        ImageFile.Position := FRootDirStart;
+        MaxEntriesInCluster := FRootEntries;
+      end
+      else
+      begin
+        if (CurrentCluster < 2) or (CurrentCluster >= $FF8) then Break;
+        ImageFile.Position := FDataAreaStart + (CurrentCluster - 2) * FBytesPerCluster;
+        if FBytesPerCluster >= FAT12_DIR_ENTRY_SIZE then
+          MaxEntriesInCluster := FBytesPerCluster div FAT12_DIR_ENTRY_SIZE
+        else
+          MaxEntriesInCluster := 16;
+      end;
+
+      DirTerminated := False;
+      for EntryIdx := 0 to MaxEntriesInCluster - 1 do
+      begin
+        if ImageFile.Read(DirEntry, FAT12_DIR_ENTRY_SIZE) <> FAT12_DIR_ENTRY_SIZE then
+        begin
+          DirTerminated := True;
+          Break;
+        end;
+        if IsEndOfDirectory(DirEntry) then
+        begin
+          DirTerminated := True;
+          Break;
+        end;
 
         // Skip volume labels in file list, but store label if in root directory
-        if (DirEntry[11] and $08) <> 0 then
+        // Real volume label: bit $08 is set AND it is NOT an LFN entry ($0F)
+        if ((DirEntry[11] and $08) <> 0) and ((DirEntry[11] and $0F) <> $0F) then
         begin
           if DirStartCluster = 0 then
           begin
@@ -2701,6 +2897,7 @@ begin
           end;
           Continue;
         end;
+        if (DirEntry[11] and $0F) = $0F then Continue; // Skip LFN entries
 
         FileName := ExtractFileNameFromEntry(DirEntry);
         if IsDirectory(DirEntry) and ((FileName = '.') or (FileName = '..')) then
@@ -2759,9 +2956,10 @@ begin
           FDiskItemsRaw[High(FDiskItemsRaw)].StatusStr := 'OK';
       end;
 
+      if DirTerminated then Break;
       if DirStartCluster = 0 then Break;
       CurrentCluster := GetNextCluster(ImageFile, CurrentCluster);
-      if CurrentCluster >= $FF8 then Break;
+      if (CurrentCluster < 2) or (CurrentCluster >= $FF8) then Break;
     end;
   finally
     ImageFile.Free;
@@ -2779,27 +2977,50 @@ end;
  ------------------------------------------------------------------}
 function TForm1.FindFileInDirectory(const AImageFile: TFileStream; const ADirCluster: Int64; const AFileName: string): Int64;
 var
-  CurrentCluster: Int64;
+  CurrentCluster, NextClust: Int64;
   DirEntry: array[0..FAT12_DIR_ENTRY_SIZE - 1] of Byte;
   FileName: string;
-  J: Integer;
+  LoopGuard, MaxEntriesInCluster, EntryIdx: Integer;
+  DirTerminated: Boolean;
 begin
   Result := -1;
   CurrentCluster := ADirCluster;
+  LoopGuard := 0;
   while True do
   begin
-    // Position to the current cluster
-    if CurrentCluster = 0 then
-      AImageFile.Position := FRootDirStart
-    else
-      AImageFile.Position := FDataAreaStart + (CurrentCluster - 2) * FBytesPerCluster;
+    Inc(LoopGuard);
+    if LoopGuard > 4096 then Break;
 
-    // Search through directory entries
-    while True do
+    // Position to the current cluster and set entry limits
+    if CurrentCluster = 0 then
     begin
-      if AImageFile.Read(DirEntry, FAT12_DIR_ENTRY_SIZE) <> FAT12_DIR_ENTRY_SIZE then Break;
-      if IsEndOfDirectory(DirEntry) then Break;
-      if IsDeleted(DirEntry) then Continue;
+      AImageFile.Position := FRootDirStart;
+      MaxEntriesInCluster := FRootEntries;
+    end
+    else
+    begin
+      if (CurrentCluster < 2) or (CurrentCluster >= $FF8) then Break;
+      AImageFile.Position := FDataAreaStart + (CurrentCluster - 2) * FBytesPerCluster;
+      if FBytesPerCluster >= FAT12_DIR_ENTRY_SIZE then
+        MaxEntriesInCluster := FBytesPerCluster div FAT12_DIR_ENTRY_SIZE
+      else
+        MaxEntriesInCluster := 16;
+    end;
+
+    DirTerminated := False;
+    for EntryIdx := 0 to MaxEntriesInCluster - 1 do
+    begin
+      if AImageFile.Read(DirEntry, FAT12_DIR_ENTRY_SIZE) <> FAT12_DIR_ENTRY_SIZE then
+      begin
+        DirTerminated := True;
+        Break;
+      end;
+      if IsEndOfDirectory(DirEntry) then
+      begin
+        DirTerminated := True;
+        Break;
+      end;
+      if IsDeleted(DirEntry) or ((DirEntry[11] and $0F) = $0F) then Continue;
 
       FileName := ExtractFileNameFromEntry(DirEntry);
       if UpperCase(FileName) = UpperCase(AFileName) then
@@ -2809,9 +3030,11 @@ begin
       end;
     end;
 
+    if DirTerminated then Break;
     if ADirCluster = 0 then Break;
-    CurrentCluster := GetNextCluster(AImageFile, CurrentCluster);
-    if CurrentCluster >= $FF8 then Break;
+    NextClust := GetNextCluster(AImageFile, CurrentCluster);
+    if (NextClust < 2) or (NextClust >= $FF8) or (NextClust = CurrentCluster) then Break;
+    CurrentCluster := NextClust;
   end;
 end;
 
@@ -2821,24 +3044,49 @@ end;
  ------------------------------------------------------------------}
 function TForm1.FindDeletedFileInDirectory(const AImageFile: TFileStream; const ADirCluster: Int64; const AFileName: string): Int64;
 var
-  CurrentCluster: Int64;
+  CurrentCluster, NextClust: Int64;
   DirEntry: array[0..FAT12_DIR_ENTRY_SIZE - 1] of Byte;
   EntryName, SearchName: string;
+  LoopGuard, MaxEntriesInCluster, EntryIdx: Integer;
+  DirTerminated: Boolean;
 begin
   Result := -1;
   CurrentCluster := ADirCluster;
   SearchName := UpperCase(AFileName);
+  LoopGuard := 0;
   while True do
   begin
-    if CurrentCluster = 0 then
-      AImageFile.Position := FRootDirStart
-    else
-      AImageFile.Position := FDataAreaStart + (CurrentCluster - 2) * FBytesPerCluster;
+    Inc(LoopGuard);
+    if LoopGuard > 4096 then Break;
 
-    while True do
+    if CurrentCluster = 0 then
     begin
-      if AImageFile.Read(DirEntry, FAT12_DIR_ENTRY_SIZE) <> FAT12_DIR_ENTRY_SIZE then Break;
-      if IsEndOfDirectory(DirEntry) then Break;
+      AImageFile.Position := FRootDirStart;
+      MaxEntriesInCluster := FRootEntries;
+    end
+    else
+    begin
+      if (CurrentCluster < 2) or (CurrentCluster >= $FF8) then Break;
+      AImageFile.Position := FDataAreaStart + (CurrentCluster - 2) * FBytesPerCluster;
+      if FBytesPerCluster >= FAT12_DIR_ENTRY_SIZE then
+        MaxEntriesInCluster := FBytesPerCluster div FAT12_DIR_ENTRY_SIZE
+      else
+        MaxEntriesInCluster := 16;
+    end;
+
+    DirTerminated := False;
+    for EntryIdx := 0 to MaxEntriesInCluster - 1 do
+    begin
+      if AImageFile.Read(DirEntry, FAT12_DIR_ENTRY_SIZE) <> FAT12_DIR_ENTRY_SIZE then
+      begin
+        DirTerminated := True;
+        Break;
+      end;
+      if IsEndOfDirectory(DirEntry) then
+      begin
+        DirTerminated := True;
+        Break;
+      end;
       if IsDeleted(DirEntry) then
       begin
         EntryName := UpperCase(ExtractFileNameFromEntry(DirEntry));
@@ -2852,9 +3100,11 @@ begin
       end;
     end;
 
+    if DirTerminated then Break;
     if ADirCluster = 0 then Break;
-    CurrentCluster := GetNextCluster(AImageFile, CurrentCluster);
-    if CurrentCluster >= $FF8 then Break;
+    NextClust := GetNextCluster(AImageFile, CurrentCluster);
+    if (NextClust < 2) or (NextClust >= $FF8) or (NextClust = CurrentCluster) then Break;
+    CurrentCluster := NextClust;
   end;
 end;
 
@@ -2868,26 +3118,41 @@ end;
  ------------------------------------------------------------------}
 function TForm1.FindFreeDirectoryEntry(const AImageFile: TFileStream; const ADirCluster: Int64): Int64;
 var
-  CurrentCluster, LastCluster: Int64;
+  CurrentCluster, LastCluster, NextClust: Int64;
   DirEntry: array[0..FAT12_DIR_ENTRY_SIZE - 1] of Byte;
   FreeList: TStringList;
   NewSubCluster: Word;
   ClusterBuffer: array of Byte;
+  LoopGuard, MaxEntriesInCluster, EntryIdx: Integer;
 begin
   Result := -1;
   CurrentCluster := ADirCluster;
   LastCluster := ADirCluster;
+  LoopGuard := 0;
 
   while True do
   begin
-    // Position to the current cluster
-    if CurrentCluster = 0 then
-      AImageFile.Position := FRootDirStart
-    else
-      AImageFile.Position := FDataAreaStart + (CurrentCluster - 2) * FBytesPerCluster;
+    Inc(LoopGuard);
+    if LoopGuard > 4096 then Break;
 
-    // Search for a free entry
-    while True do
+    // Position to the current cluster and enforce strict entry bounds
+    if CurrentCluster = 0 then
+    begin
+      AImageFile.Position := FRootDirStart;
+      MaxEntriesInCluster := FRootEntries;
+    end
+    else
+    begin
+      if (CurrentCluster < 2) or (CurrentCluster >= $FF8) then Break;
+      AImageFile.Position := FDataAreaStart + (CurrentCluster - 2) * FBytesPerCluster;
+      if FBytesPerCluster >= FAT12_DIR_ENTRY_SIZE then
+        MaxEntriesInCluster := FBytesPerCluster div FAT12_DIR_ENTRY_SIZE
+      else
+        MaxEntriesInCluster := 16;
+    end;
+
+    // Search for a free entry within this cluster only
+    for EntryIdx := 0 to MaxEntriesInCluster - 1 do
     begin
       if AImageFile.Read(DirEntry, FAT12_DIR_ENTRY_SIZE) <> FAT12_DIR_ENTRY_SIZE then Break;
       if IsEndOfDirectory(DirEntry) or IsDeleted(DirEntry) then
@@ -2899,12 +3164,13 @@ begin
 
     if ADirCluster = 0 then Break; // Root directory has fixed size, cannot grow
     LastCluster := CurrentCluster;
-    CurrentCluster := GetNextCluster(AImageFile, CurrentCluster);
-    if CurrentCluster >= $FF8 then Break;
+    NextClust := GetNextCluster(AImageFile, CurrentCluster);
+    if (NextClust < 2) or (NextClust >= $FF8) or (NextClust = CurrentCluster) then Break;
+    CurrentCluster := NextClust;
   end;
 
-  // If a subdirectory ran out of entries, allocate a new cluster to expand it
-  if (ADirCluster <> 0) and (LastCluster > 1) then
+  // If a subdirectory ran out of entries after checking all its clusters, allocate a new cluster to expand it
+  if (ADirCluster <> 0) and (LastCluster >= 2) then
   begin
     FreeList := FindFreeClusters(AImageFile, 1);
     try
@@ -3004,6 +3270,16 @@ begin
     Exit;
   end;
 
+  Sanitized := SanitizeDOSName(ExtractFileName(AFileName), False);
+
+  // Check if a file with this sanitized 8.3 name already exists in the destination
+  DirEntryPos := FindFileInDirectory(AImageFile, DirCluster, Sanitized);
+  if DirEntryPos <> -1 then
+  begin
+    // Replace existing file cleanly by freeing its clusters first (prevents duplicate names and leaks)
+    DeleteFileFromImage(AImageFile, DirEntryPos, Sanitized);
+  end;
+
   DirEntryPos := FindFreeDirectoryEntry(AImageFile, DirCluster);
   if DirEntryPos = -1 then
   begin
@@ -3040,7 +3316,6 @@ begin
 
   // Create directory entry
   FillChar(DirEntry, SizeOf(DirEntry), 0);
-  Sanitized := SanitizeDOSName(ExtractFileName(AFileName), False);
   DotPos := Pos('.', Sanitized);
   if DotPos > 0 then
   begin
@@ -3080,9 +3355,78 @@ begin
   FileClusters.Free;
 end;
 
+procedure TForm1.FreeClusterChain(const AImageFile: TFileStream; StartCluster: Word);
+var
+  Curr, NextClust: Word;
+  MaxLoops: Integer;
+begin
+  Curr := StartCluster;
+  MaxLoops := 0;
+  while (Curr >= 2) and (Curr < $FF8) and (MaxLoops < 8192) do
+  begin
+    Inc(MaxLoops);
+    NextClust := ReadFAT12Entry(AImageFile, Curr);
+    WriteFAT12EntryAllCopies(AImageFile, Curr, FAT12_FREE);
+    if (NextClust = Curr) or (NextClust < 2) or (NextClust >= $FF8) then Break;
+    Curr := NextClust;
+  end;
+end;
+
+procedure TForm1.DeleteDirectoryRecursive(const AImageFile: TFileStream; const ADirCluster: Word);
+var
+  CurrCluster, NextClust: Word;
+  DirEntry: array[0..FAT12_DIR_ENTRY_SIZE - 1] of Byte;
+  EntryIdx, MaxEntries: Integer;
+  ChildClust: Word;
+  EntryName: string;
+  LoopGuard: Integer;
+begin
+  if (ADirCluster < 2) or (ADirCluster >= $FF8) then Exit;
+
+  CurrCluster := ADirCluster;
+  LoopGuard := 0;
+  while (CurrCluster >= 2) and (CurrCluster < $FF8) do
+  begin
+    Inc(LoopGuard);
+    if LoopGuard > 4096 then Break;
+
+    AImageFile.Position := FDataAreaStart + (CurrCluster - 2) * FBytesPerCluster;
+    if FBytesPerCluster >= FAT12_DIR_ENTRY_SIZE then
+      MaxEntries := FBytesPerCluster div FAT12_DIR_ENTRY_SIZE
+    else
+      MaxEntries := 16;
+
+    for EntryIdx := 0 to MaxEntries - 1 do
+    begin
+      if AImageFile.Read(DirEntry, FAT12_DIR_ENTRY_SIZE) <> FAT12_DIR_ENTRY_SIZE then Break;
+      if IsEndOfDirectory(DirEntry) then Break;
+      if IsDeleted(DirEntry) or ((DirEntry[11] and $08) <> 0) then Continue;
+
+      EntryName := ExtractFileNameFromEntry(DirEntry);
+      if (EntryName = '.') or (EntryName = '..') then Continue;
+
+      ChildClust := Word(DirEntry[26]) or (Word(DirEntry[27]) shl 8);
+      if ChildClust >= 2 then
+      begin
+        if IsDirectory(DirEntry) then
+          DeleteDirectoryRecursive(AImageFile, ChildClust)
+        else
+          FreeClusterChain(AImageFile, ChildClust);
+      end;
+    end;
+
+    NextClust := ReadFAT12Entry(AImageFile, CurrCluster);
+    if (NextClust < 2) or (NextClust >= $FF8) or (NextClust = CurrCluster) then Break;
+    CurrCluster := NextClust;
+  end;
+
+  // Free directory's own cluster chain
+  FreeClusterChain(AImageFile, ADirCluster);
+end;
+
 {------------------------------------------------------------------
   Procedure: DeleteFileFromImage
-  Purpose:  Deletes a file from the image and updates the FAT
+  Purpose:  Deletes a file or directory from the image and updates the FAT
   Parameters:
     AImageFile   - The image file stream
     ADirEntryPos - Position of the file's directory entry
@@ -3093,8 +3437,6 @@ var
   DeletedMarker: Byte;
   DirEntry: array[0..FAT12_DIR_ENTRY_SIZE - 1] of Byte;
   StartCluster: Word;
-  Curr, Next2: Word;
-  MaxLoops: Integer;
 begin
   StartCluster := 0;
   // Read the directory entry
@@ -3103,17 +3445,13 @@ begin
 
   // Extract starting cluster BEFORE modifying or clearing DirEntry
   Move(DirEntry[26], StartCluster, 2);
-  Curr := StartCluster;
 
-  // Clear the FAT chain for the file in all FAT copies
-  MaxLoops := 0;
-  while (Curr >= 2) and (Curr < $FF8) and (MaxLoops < 8192) do
+  if StartCluster >= 2 then
   begin
-    Inc(MaxLoops);
-    Next2 := ReadFAT12Entry(AImageFile, Curr);
-    WriteFAT12EntryAllCopies(AImageFile, Curr, FAT12_FREE);
-    if (Next2 = Curr) or (Next2 = 0) then Break;
-    Curr := Next2;
+    if IsDirectory(DirEntry) then
+      DeleteDirectoryRecursive(AImageFile, StartCluster)
+    else
+      FreeClusterChain(AImageFile, StartCluster);
   end;
 
   // Mark the first byte as deleted in the directory entry
@@ -3152,18 +3490,60 @@ begin
   FSectorsPerCluster := BootSector[$0D];
   if not (FSectorsPerCluster in [1, 2, 4, 8]) then FSectorsPerCluster := 2;
   ReservedSectors := Word(BootSector[$0E]) + (Word(BootSector[$0F]) shl 8);
+  if (ReservedSectors < 1) or (ReservedSectors > 32) then ReservedSectors := 1;
   FNumberOfFATs := BootSector[$10];
+  if not (FNumberOfFATs in [1, 2]) then FNumberOfFATs := 2;
   RootEntries := Word(BootSector[$11]) + (Word(BootSector[$12]) shl 8);
+  if (RootEntries < 16) or (RootEntries > 1024) then RootEntries := 112;
   FRootEntries := RootEntries;
   TotalSectors := Word(BootSector[$13]) + (Word(BootSector[$14]) shl 8);
   if TotalSectors = 0 then
     TotalSectors := AImageFile.Size div FBytesPerSector;
   FSectorsPerFAT := Word(BootSector[$16]) + (Word(BootSector[$17]) shl 8);
+  if (FSectorsPerFAT < 1) or (FSectorsPerFAT > 32) then FSectorsPerFAT := 5;
 
   // Read Atari ST 24-bit disk serial number at offset $08..$0A of boot sector
   FDiskSerial := (LongWord(BootSector[8]) shl 16) or
                  (LongWord(BootSector[9]) shl 8) or
                  LongWord(BootSector[10]);
+
+  // Read and validate disk geometry
+  if not (FSides in [1, 2]) then
+  begin
+    FSides := Word(BootSector[$1A]) + (Word(BootSector[$1B]) shl 8);
+    if not (FSides in [1, 2]) then
+    begin
+      if TotalSectors <= 720 then FSides := 1 else FSides := 2;
+    end;
+  end;
+
+  if not (FSectorsPerTrack in [8..24]) then
+  begin
+    FSectorsPerTrack := Word(BootSector[$18]) + (Word(BootSector[$19]) shl 8);
+    if not (FSectorsPerTrack in [8..24]) then
+    begin
+      if (TotalSectors > 0) and (FSides > 0) then
+      begin
+        if TotalSectors mod (FSides * 9) = 0 then FSectorsPerTrack := 9
+        else if TotalSectors mod (FSides * 10) = 0 then FSectorsPerTrack := 10
+        else if TotalSectors mod (FSides * 11) = 0 then FSectorsPerTrack := 11
+        else if TotalSectors mod (FSides * 18) = 0 then FSectorsPerTrack := 18
+        else FSectorsPerTrack := 9;
+      end
+      else
+        FSectorsPerTrack := 9;
+    end;
+  end;
+
+  if (FTracks < 40) or (FTracks > 85) then
+  begin
+    if (FSides * FSectorsPerTrack > 0) and (TotalSectors > 0) then
+      FTracks := TotalSectors div (FSides * FSectorsPerTrack)
+    else
+      FTracks := 80;
+    if (FTracks < 40) or (FTracks > 85) then
+      FTracks := 80;
+  end;
 
   // Standard BPB calculation
   FSingleFATSize := FSectorsPerFAT * FBytesPerSector;
@@ -3231,6 +3611,10 @@ begin
     if (MaxClustersInFAT > 0) and (MaxClustersInFAT < FTotalClusters) then
       FTotalClusters := MaxClustersInFAT;
   end;
+
+  // Clamp by FAT12 architectural limit (max 4084 data clusters before $FF7-$FFF markers)
+  if FTotalClusters > 4084 then
+    FTotalClusters := 4084;
 end;
 
 {------------------------------------------------------------------
@@ -3630,15 +4014,9 @@ begin
       ShouldDeinterleave := True;
       UseSpt := SectorsPerTrack;
     end
-    // Case 2: BPB total sectors indicates single-sided disk (e.g. 720 sectors for 360KB) in a double-sided file
-    else if (TotalSectors > 0) and (TotalSectors <= 820) and (SectorsPerTrack in [9..11]) then
-    begin
-      ShouldDeinterleave := True;
-      UseSpt := SectorsPerTrack;
-    end
     else
     begin
-      // Case 3: Heuristic fallback from diskUtils.ts
+      // Case 2: Heuristic fallback from diskUtils.ts
       // Only test deinterleaving if the as-is layout is unreadable (score <= 0)
       AsIsScore := DiscoverDirectoryContent(InStream, AsIsRootStart, AsIsRootEntries);
       if AsIsScore <= 0 then
@@ -3742,6 +4120,7 @@ var
   TempFile, DeintTempFile: string;
   VirusThreatName: string;
   IsBootExec: Boolean;
+  Spt, Sds, StTrack, EndTrack: Integer;
 begin
   Result := False;
   if not FileExists(AFileName) then Exit;
@@ -3773,6 +4152,13 @@ begin
 
   if Ext = '.msa' then
   begin
+    if GetMSAInfo(AFileName, Spt, Sds, StTrack, EndTrack) then
+    begin
+      FSectorsPerTrack := Spt;
+      FSides := Sds;
+      FTracks := (EndTrack - StTrack) + 1;
+    end;
+
     TempFile := GetTempFile(GetTempDir, 'st-msa-') + '.st';
     if not UnpackMSAToST(AFileName, TempFile) then
     begin
@@ -3800,6 +4186,13 @@ begin
   end
   else if (Ext = '.dim') or IsDIMFile(AFileName) then
   begin
+    if GetDIMInfo(AFileName, Spt, Sds, StTrack, EndTrack) then
+    begin
+      FSectorsPerTrack := Spt;
+      FSides := Sds;
+      FTracks := (EndTrack - StTrack) + 1;
+    end;
+
     TempFile := GetTempFile(GetTempDir, 'st-dim-') + '.st';
     if not UnpackDIMToST(AFileName, TempFile) then
     begin
@@ -3887,9 +4280,10 @@ var
   ImageFile: TFileStream;
   DirCluster, DirEntryPos: Int64;
   DirEntry: array[0..FAT12_DIR_ENTRY_SIZE - 1] of Byte;
-  FileSize, BytesToRead, BytesRead: Int64;
+  FileSize, BytesToRead, BytesRead, MaxPossibleSize: Int64;
   CurrCluster: Word;
   Buffer: array[0..4095] of Byte;
+  LoopGuard: Integer;
 begin
   Result := False;
   AStartCluster := 0;
@@ -3924,16 +4318,27 @@ begin
       Exit;
     end;
 
+    if (AStartCluster < 2) or (AStartCluster >= $FF8) then
+      Exit;
+
+    MaxPossibleSize := Int64(FTotalClusters) * FBytesPerCluster;
+    if FileSize > MaxPossibleSize then
+      FileSize := MaxPossibleSize;
+
     CurrCluster := AStartCluster;
+    LoopGuard := 0;
     while (CurrCluster >= 2) and (CurrCluster < $FF8) and (FileSize > 0) do
     begin
+      Inc(LoopGuard);
+      if LoopGuard > 4096 then Break;
+
       BytesToRead := FBytesPerCluster;
       if FileSize < FBytesPerCluster then
         BytesToRead := FileSize;
-      ImageFile.Position := FDataAreaStart + (CurrCluster - 2) * FBytesPerCluster;
+      ImageFile.Position := FDataAreaStart + (Int64(CurrCluster) - 2) * FBytesPerCluster;
       BytesRead := ImageFile.Read(Buffer[0], BytesToRead);
-      if BytesRead > 0 then
-        AOutStream.Write(Buffer[0], BytesRead);
+      if BytesRead <= 0 then Break;
+      AOutStream.Write(Buffer[0], BytesRead);
       Dec(FileSize, BytesRead);
       CurrCluster := GetNextCluster(ImageFile, CurrCluster);
     end;
@@ -3949,18 +4354,23 @@ end;
  ------------------------------------------------------------------}
 function TForm1.ExtractFileToTemp(const AFileName: string): string;
 var
-  CleanName, TempDir, OutPath: string;
+  CleanName, TempDir, OutPath, FullTempDir, FullOutDir: string;
   Fs, SrcFs: TFileStream;
   DummyCluster: Word;
   I: Integer;
 begin
   Result := '';
   CleanName := CleanFileName(AFileName);
-  if (CleanName = '..') or (CleanName = '..\') or CleanName.EndsWith('\') then Exit;
+  CleanName := ExtractFileName(CleanName);
+  if (CleanName = '') or (CleanName = '.') or (CleanName = '..') then Exit;
 
   TempDir := IncludeTrailingPathDelimiter(GetTempDir) + 'stimage_drag';
   ForceDirectories(TempDir);
-  OutPath := TempDir + PathDelim + CleanName;
+  OutPath := IncludeTrailingPathDelimiter(TempDir) + CleanName;
+  FullTempDir := IncludeTrailingPathDelimiter(ExpandFileName(TempDir));
+  FullOutDir := IncludeTrailingPathDelimiter(ExtractFilePath(ExpandFileName(OutPath)));
+  if not SameText(FullTempDir, FullOutDir) then Exit;
+
   if FileExists(OutPath) then SysUtils.DeleteFile(OutPath);
 
   // If file is staged (*A*), copy directly from host source file
@@ -4004,7 +4414,7 @@ end;
   Procedure: ExtractDiskDirectory
   Purpose:  Recursively extracts all files and folders from a disk directory
  ------------------------------------------------------------------}
-procedure TForm1.ExtractDiskDirectory(const AImageFile: TFileStream; const ADirCluster: Int64; const AHostPath: string; var AFileCount: Integer; var AByteCount: Int64);
+procedure TForm1.ExtractDiskDirectory(const AImageFile: TFileStream; const ADirCluster: Int64; const AHostPath: string; var AFileCount: Integer; var AByteCount: Int64; AVisitedDirs: TList; ADepth: Integer);
 type
   TDiskEntryRec = record
     Name: string;
@@ -4014,85 +4424,146 @@ type
   end;
 var
   Entries: array of TDiskEntryRec;
-  Count: Integer;
+  Count, MaxEntries, EntryIndex: Integer;
   CurrentCluster: Int64;
   DirEntry: array[0..FAT12_DIR_ENTRY_SIZE - 1] of Byte;
-  EntryName, SubHostDir, OutFilePath: string;
+  EntryName, SubHostDir, OutFilePath, FullHostDir, FullOutDir: string;
   I: Integer;
   OutFs: TFileStream;
   CurrFileCluster: Word;
-  BytesToRead, BytesRead, FileBytesRemaining: Int64;
+  BytesToRead, BytesRead, FileBytesRemaining, MaxPossibleSize: Int64;
   Buffer: array[0..4095] of Byte;
+  Visited: TList;
+  OwnsVisited: Boolean;
+  DirLoopCount, FileLoopCount: Integer;
+  ReachedEnd: Boolean;
 begin
-  ForceDirectories(AHostPath);
-  Count := 0;
-  SetLength(Entries, 0);
+  if ADepth > 32 then Exit;
 
-  CurrentCluster := ADirCluster;
-  while True do
-  begin
-    if CurrentCluster = 0 then
-      AImageFile.Position := FRootDirStart
-    else
-      AImageFile.Position := FDataAreaStart + (CurrentCluster - 2) * FBytesPerCluster;
+  OwnsVisited := (AVisitedDirs = nil);
+  if OwnsVisited then
+    Visited := TList.Create
+  else
+    Visited := AVisitedDirs;
 
-    while True do
+  try
+    if Visited.IndexOf(Pointer(PtrUInt(ADirCluster))) <> -1 then Exit;
+    Visited.Add(Pointer(PtrUInt(ADirCluster)));
+
+    if not ForceDirectories(AHostPath) then Exit;
+
+    Count := 0;
+    SetLength(Entries, 0);
+
+    CurrentCluster := ADirCluster;
+    DirLoopCount := 0;
+    ReachedEnd := False;
+    while not ReachedEnd do
     begin
-      if AImageFile.Read(DirEntry, FAT12_DIR_ENTRY_SIZE) <> FAT12_DIR_ENTRY_SIZE then Break;
-      if IsEndOfDirectory(DirEntry) then Break;
-      if IsDeleted(DirEntry) or ((DirEntry[11] and $08) <> 0) then Continue;
+      Inc(DirLoopCount);
+      if DirLoopCount > 4096 then Break;
 
-      EntryName := ExtractFileNameFromEntry(DirEntry);
-      if (EntryName = '.') or (EntryName = '..') then Continue;
-
-      SetLength(Entries, Count + 1);
-      Entries[Count].Name := EntryName;
-      Entries[Count].IsDir := IsDirectory(DirEntry);
-      Entries[Count].StartCluster := DirEntry[26] or (DirEntry[27] shl 8);
-      Entries[Count].FileSize := DirEntry[28] or
-                                 (Int64(DirEntry[29]) shl 8) or
-                                 (Int64(DirEntry[30]) shl 16) or
-                                 (Int64(DirEntry[31]) shl 24);
-      Inc(Count);
-    end;
-
-    if ADirCluster = 0 then Break;
-    CurrentCluster := GetNextCluster(AImageFile, CurrentCluster);
-    if CurrentCluster >= $FF8 then Break;
-  end;
-
-  for I := 0 to Count - 1 do
-  begin
-    if Entries[I].IsDir then
-    begin
-      SubHostDir := IncludeTrailingPathDelimiter(AHostPath) + Entries[I].Name;
-      ExtractDiskDirectory(AImageFile, Entries[I].StartCluster, SubHostDir, AFileCount, AByteCount);
-    end
-    else
-    begin
-      OutFilePath := IncludeTrailingPathDelimiter(AHostPath) + Entries[I].Name;
-      OutFs := TFileStream.Create(OutFilePath, fmCreate);
-      try
-        FileBytesRemaining := Entries[I].FileSize;
-        CurrFileCluster := Entries[I].StartCluster;
-        while (CurrFileCluster >= 2) and (CurrFileCluster < $FF8) and (FileBytesRemaining > 0) do
-        begin
-          BytesToRead := FBytesPerCluster;
-          if FileBytesRemaining < FBytesPerCluster then
-            BytesToRead := FileBytesRemaining;
-          AImageFile.Position := FDataAreaStart + (CurrFileCluster - 2) * FBytesPerCluster;
-          BytesRead := AImageFile.Read(Buffer[0], BytesToRead);
-          if BytesRead > 0 then
-            OutFs.Write(Buffer[0], BytesRead);
-          Dec(FileBytesRemaining, BytesRead);
-          CurrFileCluster := GetNextCluster(AImageFile, CurrFileCluster);
-        end;
-      finally
-        OutFs.Free;
+      if CurrentCluster = 0 then
+      begin
+        AImageFile.Position := FRootDirStart;
+        MaxEntries := FRootEntries;
+      end
+      else
+      begin
+        if (CurrentCluster < 2) or (CurrentCluster >= $FF8) then Break;
+        AImageFile.Position := FDataAreaStart + (CurrentCluster - 2) * FBytesPerCluster;
+        MaxEntries := FBytesPerCluster div FAT12_DIR_ENTRY_SIZE;
       end;
-      Inc(AFileCount);
-      Inc(AByteCount, Entries[I].FileSize);
+
+      EntryIndex := 0;
+      while EntryIndex < MaxEntries do
+      begin
+        Inc(EntryIndex);
+        if AImageFile.Read(DirEntry, FAT12_DIR_ENTRY_SIZE) <> FAT12_DIR_ENTRY_SIZE then
+        begin
+          ReachedEnd := True;
+          Break;
+        end;
+        if IsEndOfDirectory(DirEntry) then
+        begin
+          ReachedEnd := True;
+          Break;
+        end;
+        if IsDeleted(DirEntry) or ((DirEntry[11] and $08) <> 0) then Continue;
+
+        EntryName := ExtractFileNameFromEntry(DirEntry);
+        if (EntryName = '') or (EntryName = '.') or (EntryName = '..') then Continue;
+
+        SetLength(Entries, Count + 1);
+        Entries[Count].Name := EntryName;
+        Entries[Count].IsDir := IsDirectory(DirEntry);
+        Entries[Count].StartCluster := DirEntry[26] or (DirEntry[27] shl 8);
+        Entries[Count].FileSize := DirEntry[28] or
+                                   (Int64(DirEntry[29]) shl 8) or
+                                   (Int64(DirEntry[30]) shl 16) or
+                                   (Int64(DirEntry[31]) shl 24);
+        Inc(Count);
+      end;
+
+      if ADirCluster = 0 then Break;
+      CurrentCluster := GetNextCluster(AImageFile, CurrentCluster);
+      if CurrentCluster >= $FF8 then Break;
     end;
+
+    FullHostDir := IncludeTrailingPathDelimiter(ExpandFileName(AHostPath));
+
+    for I := 0 to Count - 1 do
+    begin
+      if Entries[I].IsDir then
+      begin
+        if (Entries[I].StartCluster >= 2) and (Entries[I].StartCluster < $FF8) then
+        begin
+          SubHostDir := IncludeTrailingPathDelimiter(AHostPath) + Entries[I].Name;
+          FullOutDir := IncludeTrailingPathDelimiter(ExpandFileName(SubHostDir));
+          if StartsText(FullHostDir, FullOutDir) then
+            ExtractDiskDirectory(AImageFile, Entries[I].StartCluster, SubHostDir, AFileCount, AByteCount, Visited, ADepth + 1);
+        end;
+      end
+      else
+      begin
+        OutFilePath := IncludeTrailingPathDelimiter(AHostPath) + Entries[I].Name;
+        FullOutDir := IncludeTrailingPathDelimiter(ExtractFilePath(ExpandFileName(OutFilePath)));
+        if not StartsText(FullHostDir, FullOutDir) then Continue;
+
+        OutFs := TFileStream.Create(OutFilePath, fmCreate);
+        try
+          FileBytesRemaining := Entries[I].FileSize;
+          MaxPossibleSize := Int64(FTotalClusters) * FBytesPerCluster;
+          if FileBytesRemaining > MaxPossibleSize then
+            FileBytesRemaining := MaxPossibleSize;
+
+          CurrFileCluster := Entries[I].StartCluster;
+          FileLoopCount := 0;
+          while (CurrFileCluster >= 2) and (CurrFileCluster < $FF8) and (FileBytesRemaining > 0) do
+          begin
+            Inc(FileLoopCount);
+            if FileLoopCount > 4096 then Break;
+
+            BytesToRead := FBytesPerCluster;
+            if FileBytesRemaining < FBytesPerCluster then
+              BytesToRead := FileBytesRemaining;
+            AImageFile.Position := FDataAreaStart + (Int64(CurrFileCluster) - 2) * FBytesPerCluster;
+            BytesRead := AImageFile.Read(Buffer[0], BytesToRead);
+            if BytesRead <= 0 then Break;
+            OutFs.Write(Buffer[0], BytesRead);
+            Dec(FileBytesRemaining, BytesRead);
+            CurrFileCluster := GetNextCluster(AImageFile, CurrFileCluster);
+          end;
+        finally
+          OutFs.Free;
+        end;
+        Inc(AFileCount);
+        Inc(AByteCount, Entries[I].FileSize);
+      end;
+    end;
+  finally
+    if OwnsVisited then
+      Visited.Free;
   end;
 end;
 
@@ -4494,7 +4965,7 @@ begin
   for I := 0 to FRootEntries - 1 do
   begin
     if AImageFile.Read(DirEntry, FAT12_DIR_ENTRY_SIZE) <> FAT12_DIR_ENTRY_SIZE then Break;
-    if (DirEntry[11] and $08) <> 0 then
+    if ((DirEntry[11] and $08) <> 0) and ((DirEntry[11] and $0F) <> $0F) then
     begin
       LabelPos := AImageFile.Position - FAT12_DIR_ENTRY_SIZE;
       FoundExisting := True;
@@ -4514,6 +4985,7 @@ begin
       AImageFile.Position := LabelPos;
       DirEntry[0] := FAT12_DELETED;
       AImageFile.Write(DirEntry[0], 1);
+      FIsModified := True;
     end;
     Exit;
   end;
@@ -4537,6 +5009,7 @@ begin
 
   AImageFile.Position := LabelPos;
   AImageFile.Write(DirEntry, FAT12_DIR_ENTRY_SIZE);
+  FIsModified := True;
 end;
 
 {------------------------------------------------------------------
@@ -4567,6 +5040,8 @@ begin
   finally
     ImageFile.Free;
   end;
+
+  FIsModified := True;
 
   if FVolumeLabel <> '' then
     LabelVolume.Caption := 'Volume: ' + FVolumeLabel
@@ -5026,6 +5501,11 @@ begin
   try
     GetFATDetails(ImageFile);
     DirCluster := FindDirectoryInPath(ImageFile, FCurrentPath);
+    if DirCluster = -1 then
+    begin
+      ShowMessage(Format(ERR_DIR_NOT_FOUND, [FCurrentPath]));
+      Exit;
+    end;
 
     // Check if new name already exists
     ExistingPos := FindFileInDirectory(ImageFile, DirCluster, NewName);
@@ -5052,6 +5532,7 @@ begin
     // Update directory entry on disk
     ImageFile.Position := DirEntryPos;
     ImageFile.WriteBuffer(FormattedName, 11);
+    FIsModified := True;
   finally
     ImageFile.Free;
   end;
@@ -5120,6 +5601,11 @@ begin
   try
     GetFATDetails(ImageFile);
     DirCluster := FindDirectoryInPath(ImageFile, FCurrentPath);
+    if DirCluster = -1 then
+    begin
+      ShowMessage(Format(ERR_DIR_NOT_FOUND, [FCurrentPath]));
+      Exit;
+    end;
     DirEntryPos := FindFileInDirectory(ImageFile, DirCluster, TargetName);
     if DirEntryPos = -1 then
     begin
@@ -5137,6 +5623,7 @@ begin
     // Write back
     ImageFile.Position := DirEntryPos + 11;
     ImageFile.WriteBuffer(NewAttr, 1);
+    FIsModified := True;
   finally
     ImageFile.Free;
   end;
@@ -5205,6 +5692,11 @@ begin
   try
     GetFATDetails(ImageFile);
     DirCluster := FindDirectoryInPath(ImageFile, FCurrentPath);
+    if DirCluster = -1 then
+    begin
+      ShowMessage(Format(ERR_DIR_NOT_FOUND, [FCurrentPath]));
+      Exit;
+    end;
     DirEntryPos := FindFileInDirectory(ImageFile, DirCluster, CleanName);
     if DirEntryPos = -1 then
     begin
@@ -5232,6 +5724,7 @@ begin
 
     ImageFile.Position := DirEntryPos + 11;
     ImageFile.WriteBuffer(NewAttr, 1);
+    FIsModified := True;
   finally
     ImageFile.Free;
   end;
@@ -5259,7 +5752,7 @@ var
   BytesPerSec, SecPerFAT, TotalSec, ReservedSec, RootEntries, SecPerTrack, Sides: Word;
   SecPerClust, NumFATs, MediaByte: Byte;
   I: Integer;
-  BootSum: Word;
+  BootSum, OriginalBootSum: Word;
 begin
   if (FImagePath = '') or not FileExists(FImagePath) then
   begin
@@ -5291,6 +5784,21 @@ begin
 
     FS.Position := 0;
     FS.ReadBuffer(BootSec, 512);
+
+    // Check if original boot sector contains an executable Atari ST bootloader
+    OriginalBootSum := 0;
+    for I := 0 to 255 do
+      Inc(OriginalBootSum, (Word(BootSec[I * 2]) shl 8) or BootSec[I * 2 + 1]);
+
+    if (OriginalBootSum = $1234) or (BootSec[0] = $60) then
+    begin
+      if MessageDlg('Executable Bootloader Detected',
+        'Warning: This disk image appears to contain an executable Atari ST bootloader.' + sLineBreak +
+        'Applying a standard PC boot sector will overwrite the Atari boot program (e.g. game or demo loader).' + sLineBreak + sLineBreak +
+        'Do you want to proceed and replace it anyway?',
+        mtWarning, [mbYes, mbNo], 0) <> mrYes then
+        Exit;
+    end;
 
     // Read current BPB values
     Move(BootSec[$0B], BytesPerSec, 2);
@@ -5326,7 +5834,15 @@ begin
     end;
     if SecPerFAT = 0 then
     begin
-      if TotalSec <= 720 then SecPerFAT := 2 else SecPerFAT := 5;
+      if TotalSec <= 720 then
+        SecPerFAT := 2
+      else
+      begin
+        // Calculate needed FAT12 sectors: 1.5 bytes per cluster
+        SecPerFAT := Word((((Int64(TotalSec) div Max(1, SecPerClust)) + 2) * 3 div 2 + 511) div 512);
+        if SecPerFAT < 2 then SecPerFAT := 2;
+        if SecPerFAT > 9 then SecPerFAT := 5;
+      end;
     end;
     if SecPerTrack = 0 then SecPerTrack := 9;
     if Sides = 0 then
@@ -5400,6 +5916,8 @@ begin
     // Write updated Sector 0
     FS.Position := 0;
     FS.WriteBuffer(BootSec, 512);
+
+    FIsModified := True;
 
     GetFATDetails(FS);
   finally
@@ -6121,6 +6639,7 @@ end;
  ------------------------------------------------------------------}
 procedure TForm1.MenuItemCloseImageClick(Sender: TObject);
 begin
+  if not CanCloseOrOpenImage then Exit;
   ResetState;
 end;
 

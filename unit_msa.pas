@@ -278,8 +278,8 @@ begin
       OutFS.WriteBuffer(Hdr, SizeOf(Hdr));
 
       SetLength(RawTrack, TrackSize);
-      // Compressed track could at most be slightly larger if all single $E5 escapes
-      SetLength(CompTrack, TrackSize * 2);
+      // Safe allocation: track size + margin; loop stops immediately once CompLen >= TrackSize
+      SetLength(CompTrack, TrackSize + 32);
 
       for Trk := 0 to TotalTracks - 1 do
       begin
@@ -293,6 +293,10 @@ begin
           I := 0;
           while I < TrackSize do
           begin
+            // Stop compressing once output reaches TrackSize; raw track will be stored
+            if CompLen >= TrackSize then
+              Break;
+
             CurByte := RawTrack[I];
             RunLen := 1;
             while (I + RunLen < TrackSize) and (RawTrack[I + RunLen] = CurByte) and (RunLen < $FFFF) do

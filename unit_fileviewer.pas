@@ -638,12 +638,15 @@ begin
 end;
 
 procedure TFormFileViewer.RenderHexView;
+const
+  HexDigits: array[0..15] of Char = '0123456789ABCDEF';
 var
   SL: TStringList;
   I, J, LineStart, LineEnd, TotalBytes: Integer;
-  HexPart, AscPart: string;
+  LineStr: string;
   B: Byte;
   HeaderInfo: string;
+  HexPos, AscPos: Integer;
 begin
   MemoContent.Lines.BeginUpdate;
   try
@@ -661,40 +664,68 @@ begin
 
     SL := TStringList.Create;
     try
-      // Allow full viewing of floppy image files (safety cap only at 16MB)
-      TotalBytes := Min(TotalBytes, 16777216);
+      // Cap at 1MB for UI responsiveness if very large file/disk image
+      TotalBytes := Min(TotalBytes, 1048576);
+      SL.Capacity := ((TotalBytes + 15) div 16) + 16;
+
+      // Pre-allocate template line:
+      // Offset (8) + ':  ' (3) + 49 chars hex + ' |' (2) + 16 chars asc + '|' (1) = 79 chars
+      SetLength(LineStr, 79);
 
       I := 0;
       while I < TotalBytes do
       begin
         LineStart := I;
         LineEnd := Min(LineStart + 16, TotalBytes);
-        HexPart := '';
-        AscPart := '';
 
+        // Fill offset (8 hex digits)
+        LineStr[1] := HexDigits[(LineStart shr 28) and $0F];
+        LineStr[2] := HexDigits[(LineStart shr 24) and $0F];
+        LineStr[3] := HexDigits[(LineStart shr 20) and $0F];
+        LineStr[4] := HexDigits[(LineStart shr 16) and $0F];
+        LineStr[5] := HexDigits[(LineStart shr 12) and $0F];
+        LineStr[6] := HexDigits[(LineStart shr 8) and $0F];
+        LineStr[7] := HexDigits[(LineStart shr 4) and $0F];
+        LineStr[8] := HexDigits[LineStart and $0F];
+        LineStr[9] := ':';
+        LineStr[10] := ' ';
+        LineStr[11] := ' ';
+
+        // Clear hex and ascii area
+        FillChar(LineStr[12], 49, ' ');
+        LineStr[61] := ' ';
+        LineStr[62] := '|';
+        FillChar(LineStr[63], 16, ' ');
+        LineStr[79] := '|';
+
+        HexPos := 12;
+        AscPos := 63;
         for J := LineStart to LineEnd - 1 do
         begin
           B := FData[J];
-          HexPart := HexPart + Format('%.2X ', [B]);
+          LineStr[HexPos] := HexDigits[B shr 4];
+          LineStr[HexPos + 1] := HexDigits[B and $0F];
+          LineStr[HexPos + 2] := ' ';
+          Inc(HexPos, 3);
           if (J - LineStart = 7) then
-            HexPart := HexPart + ' ';
+          begin
+            LineStr[HexPos] := ' ';
+            Inc(HexPos);
+          end;
 
           if (B >= 32) and (B <= 126) then
-            AscPart := AscPart + Char(B)
+            LineStr[AscPos] := Char(B)
           else
-            AscPart := AscPart + '.';
+            LineStr[AscPos] := '.';
+          Inc(AscPos);
         end;
 
-        // Pad if last line is short
-        while Length(HexPart) < 49 do
-          HexPart := HexPart + ' ';
-
-        SL.Add(Format('%.8X:  %s |%s|', [LineStart, HexPart, AscPart]));
+        SL.Add(LineStr);
         Inc(I, 16);
       end;
 
       if Length(FData) > TotalBytes then
-        SL.Add(Format(sLineBreak + '... [Display capped at %d MB. Total file size: %s bytes] ...',
+        SL.Add(Format(sLineBreak + '... [Display capped at %d MB for performance. Total file size: %s bytes] ...',
           [TotalBytes div (1024 * 1024), FormatFloat('#,##0', Length(FData))]));
 
       if HeaderInfo <> '' then
