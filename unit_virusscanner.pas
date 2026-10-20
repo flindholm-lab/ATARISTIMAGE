@@ -67,6 +67,8 @@ type
     procedure ButtonDisinfectAllClick(Sender: TObject);
     procedure ButtonInspectHexClick(Sender: TObject);
     procedure ButtonCloseClick(Sender: TObject);
+    procedure ListViewThreatsCustomDrawItem(Sender: TCustomListView; Item: TListItem; State: TCustomDrawState; var DefaultDraw: Boolean);
+    procedure ListViewThreatsCustomDrawSubItem(Sender: TCustomListView; Item: TListItem; SubItem: Integer; State: TCustomDrawState; var DefaultDraw: Boolean);
     procedure ListViewThreatsSelectItem(Sender: TObject; Item: TListItem; Selected: Boolean);
   private
     FCurrentDiskPath: string;
@@ -531,7 +533,7 @@ begin
   Sigs[34].Bytes := [$23, $FC, $00, $00, $00, $00, $00, $00, $04, $2A];
   Sigs[34].Mask := 'xx????xxxx';
   Sigs[34].FixedOffset := -1;
-  Sigs[34].RequiredString := '';
+  Sigs[34].RequiredString := 'SILLY';
 
   // 36. Vax / Vaxina Boot Virus
   Sigs[35].Name := 'Vax / Vaxina Boot Virus';
@@ -547,7 +549,7 @@ begin
   Sigs[36].Bytes := [$13, $FC, $00, $07, $00, $FF, $88, $00];
   Sigs[36].Mask := 'xxxxxx??';
   Sigs[36].FixedOffset := -1;
-  Sigs[36].RequiredString := '';
+  Sigs[36].RequiredString := 'WHISTLE';
 
   // 38. Mosquito Boot Virus
   Sigs[37].Name := 'Mosquito Boot Virus';
@@ -563,21 +565,33 @@ begin
   Sigs[38].Bytes := [$1F, $3C, $00, $07, $4E, $41];
   Sigs[38].Mask := 'xxxxxx';
   Sigs[38].FixedOffset := -1;
-  Sigs[38].RequiredString := '';
+  Sigs[38].RequiredString := 'BELL';
 
   // -------------------------------------------------------------------------
   // TIER 1.5: Known Boot Sector Protectors and Vaccines
   // Checked BEFORE virus signatures so immunization stubs are not falsely flagged
   // -------------------------------------------------------------------------
-  // Kobold Boot Vaccine / Protector
+  // Kobold Boot Vaccine / Protector (English & German releases)
   if (BufferContainsText(SectorBytes, 512, 'KOBOLD') and
-      (BufferContainsText(SectorBytes, 512, 'PROTECT') or BufferContainsText(SectorBytes, 512, 'VACCINE'))) or
-     BufferContainsText(SectorBytes, 512, 'KOBOLD-VIRUS PROTECTION') then
+      (BufferContainsText(SectorBytes, 512, 'PROTECT') or
+       BufferContainsText(SectorBytes, 512, 'VACCINE') or
+       BufferContainsText(SectorBytes, 512, 'SCHUTZ') or
+       BufferContainsText(SectorBytes, 512, 'VIRENSCHUTZ'))) or
+     BufferContainsText(SectorBytes, 512, 'KOBOLD-VIRUS PROTECTION') or
+     BufferContainsText(SectorBytes, 512, 'KOBOLD-VIRENSCHUTZ') or
+     ((SectorBytes[0] = $60) and (SectorBytes[1] = $38) and
+      BufferContainsString(SectorBytes, 512, 'KOBOLD') and
+      (SectorBytes[$3A] = $48) and (SectorBytes[$3B] = $7A) and
+      (SectorBytes[$42] = $4E) and (SectorBytes[$43] = $41) and
+      (SectorBytes[$46] = $4E) and (SectorBytes[$47] = $75)) then
   begin
     Threat.VirusFound := False;
     Threat.TargetType := vtProtector;
     Threat.Name := 'Kobold Vaccine / Boot Protector';
-    Threat.Description := 'Known benign vaccine boot sector displaying "*** KOBOLD-Virus Protection ***". Immunizes floppy against Kobold virus infections.';
+    if BufferContainsText(SectorBytes, 512, 'VIRENSCHUTZ') or BufferContainsText(SectorBytes, 512, 'SCHUTZ') then
+      Threat.Description := 'Known benign German vaccine boot sector displaying "*** KOBOLD-Virenschutz ***". Immunizes floppy against Kobold virus infections.'
+    else
+      Threat.Description := 'Known benign vaccine boot sector displaying "*** KOBOLD-Virus Protection ***". Immunizes floppy against Kobold virus infections.';
     Threat.Offset := 0;
     Exit(True);
   end;
@@ -737,6 +751,174 @@ begin
     Exit(True);
   end;
 
+  // The Tripple H Killer Vaccine
+  if BufferContainsText(SectorBytes, 512, 'TRIPPLE H KILLER') or
+     BufferContainsText(SectorBytes, 512, 'TRIPLE H KILLER') or
+     (BufferContainsText(SectorBytes, 512, 'MAST') and BufferContainsText(SectorBytes, 512, 'KILLER')) then
+  begin
+    Threat.VirusFound := False;
+    Threat.TargetType := vtProtector;
+    Threat.Name := 'Triple H Virus Killer Vaccine';
+    Threat.Description := 'The Tripple H Killer resident boot vaccine by MAST / Triple H. Scans memory on startup and neutralizes boot viruses.';
+    Threat.Offset := 0;
+    Exit(True);
+  end;
+
+  // TDT Altair Anti-Virus / FastCopy III Guardian
+  if BufferContainsText(SectorBytes, 512, 'TDT ALTAIR') or
+     BufferContainsText(SectorBytes, 512, 'ALTAIR ANTI VIRUS') or
+     (BufferContainsText(SectorBytes, 512, 'FastCopy') and BufferContainsText(SectorBytes, 512, 'ANTI VIRUS')) or
+     (BufferContainsText(SectorBytes, 512, 'FastCopy') and BufferContainsText(SectorBytes, 512, 'RESET VIRUS')) then
+  begin
+    Threat.VirusFound := False;
+    Threat.TargetType := vtProtector;
+    Threat.Name := 'TDT Altair Anti-Virus Vaccine';
+    Threat.Description := 'TDT Altair Anti Virus v3.00 installed via FastCopy III. Resident reset-proof boot vaccine purging memory-resident viruses.';
+    Threat.Offset := 0;
+    Exit(True);
+  end;
+
+  // Sentry Protector II by Eagle
+  if BufferContainsText(SectorBytes, 512, 'SENTRY Protector') or
+     (BufferContainsText(SectorBytes, 512, 'SENTRY') and BufferContainsText(SectorBytes, 512, 'Eagle')) or
+     (BufferContainsText(SectorBytes, 512, 'SENTRY') and BufferContainsText(SectorBytes, 512, 'Virus in memory')) then
+  begin
+    Threat.VirusFound := False;
+    Threat.TargetType := vtProtector;
+    Threat.Name := 'Sentry Protector II Vaccine';
+    Threat.Description := 'Sentry Protector II resident boot protector by Eagle. Scans system vectors and memory on boot, offering interactive virus removal.';
+    Threat.Offset := 0;
+    Exit(True);
+  end;
+
+  // Persistence Of Vision (P.O.V.) Virus Detector
+  if BufferContainsText(SectorBytes, 512, 'P.O.V. VIRUS DETECTOR') or
+     BufferContainsText(SectorBytes, 512, 'POV VIRUS DETECTOR') or
+     (BufferContainsText(SectorBytes, 512, 'P.O.V.') and BufferContainsText(SectorBytes, 512, 'VIRUS')) or
+     (BufferContainsText(SectorBytes, 512, 'FREE OF VIRUSES') and BufferContainsText(SectorBytes, 512, 'clear vector')) then
+  begin
+    Threat.VirusFound := False;
+    Threat.TargetType := vtProtector;
+    Threat.Name := 'P.O.V. Virus Detector / Sentinel';
+    Threat.Description := 'Persistence Of Vision (P.O.V.) resident virus detector. Scans memory on boot for Ghost, Kobold #2, and reset vector tampering.';
+    Threat.Offset := 0;
+    Exit(True);
+  end;
+
+  // CT P.D.L. Anti-Virus (by Troic / CT Public Domain Library)
+  if (BufferContainsText(SectorBytes, 512, 'CT P.D.L.') and
+      (BufferContainsText(SectorBytes, 512, 'TI-VIRUS') or
+       BufferContainsText(SectorBytes, 512, 'VIRUS') or
+       BufferContainsText(SectorBytes, 512, 'virus in memory'))) or
+     BufferContainsText(SectorBytes, 512, 'There is no virus in memory!') or
+     (BufferContainsText(SectorBytes, 512, 'THE GHOST VIRUS IS IN YOUR MEMORY') and
+      (BufferContainsText(SectorBytes, 512, 'RESET VECTOR') or BufferContainsText(SectorBytes, 512, 'R.S.T V.CTOR') or
+       BufferContainsText(SectorBytes, 512, 'CT P.D.L.') or BufferContainsText(SectorBytes, 512, 'TROIC'))) then
+  begin
+    Threat.VirusFound := False;
+    Threat.TargetType := vtProtector;
+    Threat.Name := 'CT P.D.L. Anti-Virus Sentinel';
+    Threat.Description := 'CT Public Domain Library resident anti-virus boot protector (coded by Troic). Checks memory for Ghost virus and reset vector tampering.';
+    Threat.Offset := 0;
+    Exit(True);
+  end;
+
+  // Anarchy's Virus Checker (by Anarchy demogroup)
+  if BufferContainsText(SectorBytes, 512, 'Anarchy''s Virus Checker') or
+     (BufferContainsText(SectorBytes, 512, 'Anarchy') and BufferContainsText(SectorBytes, 512, 'Virus Checker')) or
+     (BufferContainsText(SectorBytes, 512, 'The Memory is Clean') and BufferContainsText(SectorBytes, 512, 'Ghost')) or
+     (BufferContainsText(SectorBytes, 512, 'Reset Resident Code In Memory') and BufferContainsText(SectorBytes, 512, 'Virus')) then
+  begin
+    Threat.VirusFound := False;
+    Threat.TargetType := vtProtector;
+    Threat.Name := 'Anarchy Virus Checker Sentinel';
+    Threat.Description := 'Anarchy demogroup resident anti-virus boot protector. Checks memory for Ghost virus and reset-resident code.';
+    Threat.Offset := 0;
+    Exit(True);
+  end;
+
+  // ST Guardian by Merlin (The Silicon Sorceror / MUG U.K. SVK)
+  if BufferContainsText(SectorBytes, 512, 'ST Guardian') or
+     BufferContainsText(SectorBytes, 512, 'ST GUARDIAN') or
+     (BufferContainsText(SectorBytes, 512, 'Guardian') and BufferContainsText(SectorBytes, 512, 'Merlin')) then
+  begin
+    Threat.VirusFound := False;
+    Threat.TargetType := vtProtector;
+    Threat.Name := 'ST Guardian Boot Protector';
+    Threat.Description := 'Resident boot protector and vaccine by Merlin (The Silicon Sorceror). Protects memory and boot sectors against infection.';
+    Threat.Offset := 0;
+    Exit(True);
+  end;
+
+  // GFA IMMUN by Donald P. Maple (Early GFA-BASIC Resident Vaccine)
+  if BufferContainsText(SectorBytes, 512, 'GFA IMMUN') or
+     (BufferContainsText(SectorBytes, 512, 'IMMUN') and BufferContainsText(SectorBytes, 512, 'Donald')) or
+     BufferContainsText(SectorBytes, 512, 'Donald P. Maple') or
+     BufferContainsText(SectorBytes, 512, 'Donald Maple') then
+  begin
+    Threat.VirusFound := False;
+    Threat.TargetType := vtProtector;
+    Threat.Name := 'GFA Immun Vaccine (Donald Maple)';
+    Threat.Description := 'Resident floppy immunization and protector by Donald P. Maple. Prevents bootsector infection on the Atari ST.';
+    Threat.Offset := 0;
+    Exit(True);
+  end;
+
+  // Anti-Viren Kit II & M. Paulys Anti Virus (German Protectors)
+  if BufferContainsText(SectorBytes, 512, 'KEIN BOOTSEKTORVIRUS') or
+     BufferContainsText(SectorBytes, 512, 'Anti Viren Kit') or
+     BufferContainsText(SectorBytes, 512, 'Kein Bootvirus vorhanden') or
+     BufferContainsText(SectorBytes, 512, 'M. Paulys') or
+     BufferContainsText(SectorBytes, 512, 'M.Paulys') then
+  begin
+    Threat.VirusFound := False;
+    Threat.TargetType := vtProtector;
+    Threat.Name := 'Anti-Viren Kit / M. Paulys Vaccine';
+    Threat.Description := 'German resident boot vaccine (Anti-Viren Kit / M. Paulys). Validates boot sector integrity and blocks viral writes.';
+    Threat.Offset := 0;
+    Exit(True);
+  end;
+
+  // Virus-Report & LSD Anti-Virus 1.1
+  if BufferContainsText(SectorBytes, 512, 'Virus-Report') or
+     BufferContainsText(SectorBytes, 512, 'Virus Report') or
+     BufferContainsText(SectorBytes, 512, 'LSD Anti Virus') or
+     BufferContainsText(SectorBytes, 512, 'LSD Anti-Virus') or
+     BufferContainsText(SectorBytes, 512, 'Neuter Booter') then
+  begin
+    Threat.VirusFound := False;
+    Threat.TargetType := vtProtector;
+    Threat.Name := 'Virus-Report / LSD Anti-Virus Sentinel';
+    Threat.Description := 'Resident boot sentinel and immunization header (Virus-Report / LSD / Neuter Booter).';
+    Threat.Offset := 0;
+    Exit(True);
+  end;
+
+  // MUG U.K. Super Virus Killer Vaccine & NeoChrome Booter
+  if (BufferContainsText(SectorBytes, 512, 'MUG U.K') or BufferContainsText(SectorBytes, 512, 'MUG UK')) and
+     (BufferContainsText(SectorBytes, 512, 'NeoChrome') or BufferContainsText(SectorBytes, 512, 'Immunizer') or
+      BufferContainsText(SectorBytes, 512, 'Super Virus') or BufferContainsText(SectorBytes, 512, 'Killer')) then
+  begin
+    Threat.VirusFound := False;
+    Threat.TargetType := vtProtector;
+    Threat.Name := 'MUG U.K. Super Virus Killer Vaccine';
+    Threat.Description := 'Resident vaccine and booter installed by MUG U.K.''s Super Virus Killer.';
+    Threat.Offset := 0;
+    Exit(True);
+  end;
+
+  // M.S. Powell's Vkill Bootsector
+  if BufferContainsText(SectorBytes, 512, 'Vkill') or
+     (BufferContainsText(SectorBytes, 512, 'Powell') and BufferContainsText(SectorBytes, 512, 'Kill')) then
+  begin
+    Threat.VirusFound := False;
+    Threat.TargetType := vtProtector;
+    Threat.Name := 'M.S. Powell Vkill Vaccine';
+    Threat.Description := 'Resident boot protection vaccine coded by M.S. Powell.';
+    Threat.Offset := 0;
+    Exit(True);
+  end;
+
   // -------------------------------------------------------------------------
   // Check Specific Virus Signatures Database (39 Boot Sector Viruses)
   // -------------------------------------------------------------------------
@@ -745,11 +927,20 @@ begin
     MatchOff := FindMaskedPattern(SectorBytes, 512, Sigs[I].Bytes, Sigs[I].Mask, Sigs[I].FixedOffset);
     if MatchOff <> -1 then
     begin
-      if (Sigs[I].RequiredString <> '') and not BufferContainsString(SectorBytes, 512, Sigs[I].RequiredString) then
+      if (Sigs[I].RequiredString <> '') and
+         not BufferContainsString(SectorBytes, 512, Sigs[I].RequiredString) and
+         not BufferContainsText(SectorBytes, 512, Sigs[I].RequiredString) then
         Continue;
 
-      // Disregard Kobold #1 if sector is the Kobold protection vaccine
-      if (I = 28) and (BufferContainsText(SectorBytes, 512, 'PROTECT') or BufferContainsText(SectorBytes, 512, 'VACCINE')) then
+      // Disregard Kobold #1 if sector is the Kobold protection vaccine (English or German)
+      if (I = 28) and (BufferContainsText(SectorBytes, 512, 'PROTECT') or
+                       BufferContainsText(SectorBytes, 512, 'VACCINE') or
+                       BufferContainsText(SectorBytes, 512, 'SCHUTZ') or
+                       BufferContainsText(SectorBytes, 512, 'VIRENSCHUTZ') or
+                       ((SectorBytes[0] = $60) and (SectorBytes[1] = $38) and
+                        (SectorBytes[$3A] = $48) and (SectorBytes[$3B] = $7A) and
+                        (SectorBytes[$42] = $4E) and (SectorBytes[$43] = $41) and
+                        (SectorBytes[$46] = $4E) and (SectorBytes[$47] = $75))) then
         Continue;
 
       Threat.VirusFound := True;
@@ -806,13 +997,32 @@ begin
       Exit(False); // Whitelisted and verified safe!
   end;
 
-  // Recognized Atari ST Scene Loaders & Crack Intros (Hotline, Elite, Pompey Pirates, Superior, Cynix, Replicants)
+  // Recognized Atari ST Scene Loaders & Crack Intros (Hotline, Elite, Pompey Pirates, Superior, Cynix, Replicants, Colin Reed)
   if BufferContainsText(SectorBytes, 512, 'HOTLINE') or
      BufferContainsText(SectorBytes, 512, 'ELITE!') or
      BufferContainsText(SectorBytes, 512, 'POMPEY') or
      BufferContainsText(SectorBytes, 512, 'CYNIX') or
      BufferContainsText(SectorBytes, 512, 'SUPERIOR') or
-     BufferContainsText(SectorBytes, 512, 'REPLICANTS') then
+     BufferContainsText(SectorBytes, 512, 'REPLICANTS') or
+     BufferContainsText(SectorBytes, 512, 'Colin Reed') or
+     BufferContainsText(SectorBytes, 512, 'STANDARD CLEAR AUTOMATION BOOT') or
+     BufferContainsText(SectorBytes, 512, 'Fungus The Bogeyman') or
+     BufferContainsText(SectorBytes, 512, 'NeoDsk') or
+     BufferContainsText(SectorBytes, 512, 'GFA USER') or
+     BufferContainsText(SectorBytes, 512, 'desktop in medium resolution') or
+     BufferContainsText(SectorBytes, 512, 'HI, REPLICANTS!') or
+     BufferContainsText(SectorBytes, 512, 'PHALANX DEMO') or
+     BufferContainsText(SectorBytes, 512, 'Aenigmatica') or
+     BufferContainsText(SectorBytes, 512, 'Drum-U-Loada') or
+     BufferContainsText(SectorBytes, 512, 'TIMELORD') or
+     BufferContainsText(SectorBytes, 512, 'freezer.2_0') or
+     BufferContainsText(SectorBytes, 512, 'DClick') or
+     BufferContainsText(SectorBytes, 512, 'CopySTar') or
+     BufferContainsText(SectorBytes, 512, '42 Crew') or
+     BufferContainsText(SectorBytes, 512, 'AMIGA DEMO') or
+     BufferContainsText(SectorBytes, 512, 'BIG DEMO') or
+     BufferContainsText(SectorBytes, 512, 'Whattaheck') or
+     BufferContainsText(SectorBytes, 512, 'Union Demo') then
     Exit(False);
 
   // Generic BRA / JMP instructions are only benign if the sector is NOT executable (checksum <> $1234)
@@ -2543,6 +2753,62 @@ procedure TFormVirusScanner.ButtonCloseClick(Sender: TObject);
 begin
   FCancelScan := True;
   Close;
+end;
+
+procedure TFormVirusScanner.ListViewThreatsCustomDrawItem(Sender: TCustomListView;
+  Item: TListItem; State: TCustomDrawState; var DefaultDraw: Boolean);
+var
+  Idx: Integer;
+  IsRealThreat: Boolean;
+begin
+  DefaultDraw := True;
+  if Item = nil then Exit;
+  Idx := Item.Index;
+  if (Idx < 0) or (Idx > High(FSummary.Threats)) then Exit;
+
+  if not (cdsSelected in State) then
+  begin
+    IsRealThreat := (FSummary.Threats[Idx].TargetType <> vtProtector) and
+                    not FSummary.Threats[Idx].Disinfected and
+                    (Pos('unrecognized', LowerCase(FSummary.Threats[Idx].Name)) = 0);
+
+    if IsRealThreat then
+    begin
+      Sender.Canvas.Brush.Color := RGBToColor(255, 224, 224); // Light pastel red row background
+      Sender.Canvas.Font.Color := RGBToColor(160, 0, 0);     // Dark bold red text
+      Sender.Canvas.Font.Style := [fsBold];
+    end
+    else if FSummary.Threats[Idx].Disinfected then
+    begin
+      Sender.Canvas.Brush.Color := clWindow;
+      Sender.Canvas.Font.Color := clGrayText;
+      Sender.Canvas.Font.Style := [];
+    end
+    else if FSummary.Threats[Idx].TargetType = vtProtector then
+    begin
+      Sender.Canvas.Brush.Color := clWindow;
+      Sender.Canvas.Font.Color := $00804000; // Deep teal / green
+      Sender.Canvas.Font.Style := [];
+    end
+    else if Pos('unrecognized', LowerCase(FSummary.Threats[Idx].Name)) > 0 then
+    begin
+      Sender.Canvas.Brush.Color := clWindow;
+      Sender.Canvas.Font.Color := RGBToColor(180, 90, 0); // Amber / brown
+      Sender.Canvas.Font.Style := [];
+    end
+    else
+    begin
+      Sender.Canvas.Brush.Color := clWindow;
+      Sender.Canvas.Font.Color := clWindowText;
+      Sender.Canvas.Font.Style := [];
+    end;
+  end;
+end;
+
+procedure TFormVirusScanner.ListViewThreatsCustomDrawSubItem(Sender: TCustomListView;
+  Item: TListItem; SubItem: Integer; State: TCustomDrawState; var DefaultDraw: Boolean);
+begin
+  ListViewThreatsCustomDrawItem(Sender, Item, State, DefaultDraw);
 end;
 
 procedure TFormVirusScanner.ListViewThreatsSelectItem(Sender: TObject; Item: TListItem; Selected: Boolean);
