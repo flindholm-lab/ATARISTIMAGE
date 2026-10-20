@@ -9,7 +9,7 @@ uses
   StdCtrls, ExtCtrls, Math;
 
 type
-  TVirusTargetType = (vtBootSector, vtFile, vtNone);
+  TVirusTargetType = (vtBootSector, vtFile, vtProtector, vtNone);
 
   TVirusScanResult = record
     VirusFound: Boolean;
@@ -17,6 +17,10 @@ type
     Name: string;
     Description: string;
     Target: string;       // e.g. "Boot Sector (Sector 0)" or "File: \AUTO\MEDWAY.PRG"
+    SourceFile: string;   // Scanned file name / archive member
+    ActualImagePath: string; // Full path on disk (if standalone)
+    ZipArchivePath: string;  // Non-empty if inside zip
+    ZipEntryName: string;    // Entry path inside zip
     Offset: Integer;      // Byte offset within sector or file
     CanDisinfect: Boolean;
     Cluster: Word;        // If file, starting cluster
@@ -35,7 +39,7 @@ type
     Threats: TVirusScanResultArray;
   end;
 
-  TScanProgressEvent = procedure(const CurrentItem: string; Percent: Integer) of object;
+  TScanProgressEvent = procedure(const CurrentItem: string; Percent: Integer; var Abort: Boolean) of object;
 
   { TFormVirusScanner }
   TFormVirusScanner = class(TForm)
@@ -48,6 +52,8 @@ type
     PanelBottom: TPanel;
     ProgressBarScan: TProgressBar;
     ButtonScan: TButton;
+    ButtonScanFolder: TButton;
+    ButtonCancelScan: TButton;
     ButtonDisinfectBoot: TButton;
     ButtonDisinfectAll: TButton;
     ButtonInspectHex: TButton;
@@ -55,6 +61,8 @@ type
 
     procedure FormCreate(Sender: TObject);
     procedure ButtonScanClick(Sender: TObject);
+    procedure ButtonScanFolderClick(Sender: TObject);
+    procedure ButtonCancelScanClick(Sender: TObject);
     procedure ButtonDisinfectBootClick(Sender: TObject);
     procedure ButtonDisinfectAllClick(Sender: TObject);
     procedure ButtonInspectHexClick(Sender: TObject);
@@ -63,9 +71,14 @@ type
   private
     FCurrentDiskPath: string;
     FSummary: TDiskScanSummary;
+    FCancelScan: Boolean;
+    FFolderScanMode: Boolean;
+    FCurrentFileIndex: Integer;
+    FTotalFilesToScan: Integer;
     procedure UpdateUI;
-    procedure OnScanProgress(const CurrentItem: string; Percent: Integer);
+    procedure OnScanProgress(const CurrentItem: string; Percent: Integer; var Abort: Boolean);
     procedure PopulateThreatsList;
+    procedure AddThreatResult(const AThreat: TVirusScanResult);
   public
     procedure OpenForDisk(const ADiskPath: string; AutoScan: Boolean = True);
   end;
@@ -85,7 +98,7 @@ function QuickCheckBootSector(const AImagePath: string; out ThreatName: string; 
 implementation
 
 uses
-  unit_fileviewer, unit_depacker;
+  unit_fileviewer, unit_depacker, unit_msa, unit_dim, zipper;
 
 {$R *.lfm}
 
@@ -114,6 +127,32 @@ begin
     for J := 1 to NeedleLen do
     begin
       if Buffer[I + J - 1] <> Byte(Needle[J]) then
+      begin
+        Match := False;
+        Break;
+      end;
+    end;
+    if Match then Exit(True);
+  end;
+end;
+
+function BufferContainsText(const Buffer: PByte; BufLen: Integer; const Needle: string): Boolean;
+var
+  NeedleLen, I, J: Integer;
+  Match: Boolean;
+  UpNeedle: string;
+begin
+  Result := False;
+  NeedleLen := Length(Needle);
+  if (Buffer = nil) or (BufLen < NeedleLen) or (NeedleLen = 0) then Exit;
+  UpNeedle := UpperCase(Needle);
+
+  for I := 0 to BufLen - NeedleLen do
+  begin
+    Match := True;
+    for J := 1 to NeedleLen do
+    begin
+      if UpCase(Char(Buffer[I + J - 1])) <> UpNeedle[J] then
       begin
         Match := False;
         Break;
@@ -164,7 +203,7 @@ end;
 
 function CalculateBootChecksum(const Sector: PByte; Size: Integer = 512): Word;
 var
-  Sum: Word;
+  Sum: LongWord;
   I: Integer;
   Val: Word;
 begin
@@ -173,9 +212,9 @@ begin
   for I := 0 to 255 do
   begin
     Val := (Word(Sector[I * 2]) shl 8) or Word(Sector[I * 2 + 1]);
-    Sum := Word(Sum + Val);
+    Sum := (Sum + Val) and $FFFF;
   end;
-  Result := Sum;
+  Result := Word(Sum);
 end;
 
 function ScanBootSector(const SectorBytes: PByte; SectorSize: Integer; out Threat: TVirusScanResult): Boolean;
@@ -183,8 +222,9 @@ var
   BootSum: Word;
   IsExec: Boolean;
   MatchOff: Integer;
-  I: Integer;
-  Sigs: array[0..26] of TMaskedSig;
+  I, K, TargetOff: Integer;
+  IsDummy: Boolean;
+  Sigs: array[0..38] of TMaskedSig;
   SafeSigs: array[0..5] of TMaskedSig;
   GenericSigs: array[0..0] of TMaskedSig;
 begin
@@ -194,6 +234,10 @@ begin
   Threat.Name := '';
   Threat.Description := '';
   Threat.Target := 'Boot Sector (Sector 0)';
+  Threat.SourceFile := '';
+  Threat.ActualImagePath := '';
+  Threat.ZipArchivePath := '';
+  Threat.ZipEntryName := '';
   Threat.Offset := -1;
   Threat.CanDisinfect := True;
   Threat.Cluster := 0;
@@ -316,8 +360,8 @@ begin
   // 14. Green Goblins Virus
   Sigs[13].Name := 'Green Goblins Virus';
   Sigs[13].Description := 'Retro game compilations sector interrupter displaying playful warnings.';
-  Sigs[13].Bytes := [$54, $68, $65, $20, $4C, $69, $74, $74, $6C, $65, $20, $47, $72, $65, $65, $6E]; // "The Little Green"
-  Sigs[13].Mask := 'xxxxxxxxxxxxxxxx';
+  Sigs[13].Bytes := [$47, $72, $65, $65, $6E, $20, $47, $6F, $62, $6C, $69, $6E]; // "Green Goblin"
+  Sigs[13].Mask := 'xxxxxxxxxxxx';
   Sigs[13].FixedOffset := -1;
   Sigs[13].RequiredString := '';
 
@@ -425,12 +469,287 @@ begin
   Sigs[26].FixedOffset := -1;
   Sigs[26].RequiredString := '';
 
+  // 28. Disk-Doctor / Cva Boot Virus
+  Sigs[27].Name := 'Disk-Doctor / Cva Boot Virus';
+  Sigs[27].Description := 'Widespread early European boot infector hooking Hdv_bpb vector, often disguised as Disk Doctor.';
+  Sigs[27].Bytes := [$60, $1C, $00, $00, $2F, $08, $20, $79, $00, $00, $04, $C6];
+  Sigs[27].Mask := 'xxxxxxxxxxxx';
+  Sigs[27].FixedOffset := -1;
+  Sigs[27].RequiredString := '';
+
+  // 29. Kobold #1 Boot Virus (KVI)
+  Sigs[28].Name := 'Kobold #1 Boot Virus (KVI)';
+  Sigs[28].Description := 'Precursor to Kobold #2, resident boot sector infector hooking floppy read vectors.';
+  Sigs[28].Bytes := [$60, $38, $4B, $4F, $42, $4F, $4C, $44]; // BRA + "KOBOLD"
+  Sigs[28].Mask := 'xxxxxxxx';
+  Sigs[28].FixedOffset := 0;
+  Sigs[28].RequiredString := '';
+
+  // 30. C'est La Vie Boot Virus
+  Sigs[29].Name := 'C''est La Vie Boot Virus';
+  Sigs[29].Description := 'French resident boot infector displaying "C''est la vie" and hijacking BIOS traps.';
+  Sigs[29].Bytes := [$43, $27, $45, $53, $54, $20, $4C, $41, $20, $56, $49, $45]; // "C'EST LA VIE"
+  Sigs[29].Mask := 'xxxxxxxxxxxx';
+  Sigs[29].FixedOffset := -1;
+  Sigs[29].RequiredString := '';
+
+  // 31. NRP Boot Virus (No Real Problem)
+  Sigs[30].Name := 'NRP Boot Virus (No Real Problem)';
+  Sigs[30].Description := 'Highly prevalent European boot infector displaying "No Real Problem" on activation.';
+  Sigs[30].Bytes := [$4E, $52, $50, $20, $56, $49, $52, $55, $53]; // "NRP VIRUS"
+  Sigs[30].Mask := 'xxxxxxxxx';
+  Sigs[30].FixedOffset := -1;
+  Sigs[30].RequiredString := '';
+
+  // 32. Anti-Ghost Boot Virus
+  Sigs[31].Name := 'Anti-Ghost Boot Virus';
+  Sigs[31].Description := 'Contagious resident boot sector that was intended to eradicate the Ghost virus, but became an infector itself.';
+  Sigs[31].Bytes := [$41, $4E, $54, $49, $2D, $47, $48, $4F, $53, $54]; // "ANTI-GHOST"
+  Sigs[31].Mask := 'xxxxxxxxxx';
+  Sigs[31].FixedOffset := -1;
+  Sigs[31].RequiredString := '';
+
+  // 33. Sub-Rosa Boot Virus
+  Sigs[32].Name := 'Sub-Rosa Boot Virus';
+  Sigs[32].Description := 'French resident boot virus manipulating video base registers ($FFFF8201) and palette colors.';
+  Sigs[32].Bytes := [$53, $55, $42, $2D, $52, $4F, $53, $41]; // "SUB-ROSA"
+  Sigs[32].Mask := 'xxxxxxxx';
+  Sigs[32].FixedOffset := -1;
+  Sigs[32].RequiredString := '';
+
+  // 34. Alcool / Alcoolique Boot Virus
+  Sigs[33].Name := 'Alcool / Alcoolique Boot Virus';
+  Sigs[33].Description := 'French boot sector virus inverting display orientations and colors after 10 disk accesses.';
+  Sigs[33].Bytes := [$41, $4C, $43, $4F, $4F, $4C]; // "ALCOOL"
+  Sigs[33].Mask := 'xxxxxx';
+  Sigs[33].FixedOffset := -1;
+  Sigs[33].RequiredString := '';
+
+  // 35. Silly Boot Virus
+  Sigs[34].Name := 'Silly Boot Virus';
+  Sigs[34].Description := 'Classic 1987 reset-proof resident boot infector hooking Resvector ($42A).';
+  Sigs[34].Bytes := [$23, $FC, $00, $00, $00, $00, $00, $00, $04, $2A];
+  Sigs[34].Mask := 'xx????xxxx';
+  Sigs[34].FixedOffset := -1;
+  Sigs[34].RequiredString := '';
+
+  // 36. Vax / Vaxina Boot Virus
+  Sigs[35].Name := 'Vax / Vaxina Boot Virus';
+  Sigs[35].Description := 'Survives warm resets and resides above phystop, hooking floppy read/write operations.';
+  Sigs[35].Bytes := [$56, $41, $58, $49, $4E, $41]; // "VAXINA"
+  Sigs[35].Mask := 'xxxxxx';
+  Sigs[35].FixedOffset := -1;
+  Sigs[35].RequiredString := '';
+
+  // 37. Whistle Soundchip Boot Virus
+  Sigs[36].Name := 'Whistle Soundchip Boot Virus';
+  Sigs[36].Description := 'Resident floppy infector playing audio whistle tones through the Yamaha YM2149 soundchip on seek.';
+  Sigs[36].Bytes := [$13, $FC, $00, $07, $00, $FF, $88, $00];
+  Sigs[36].Mask := 'xxxxxx??';
+  Sigs[36].FixedOffset := -1;
+  Sigs[36].RequiredString := '';
+
+  // 38. Mosquito Boot Virus
+  Sigs[37].Name := 'Mosquito Boot Virus';
+  Sigs[37].Description := 'Generates persistent high-pitched buzzing through the YM2149 sound generator.';
+  Sigs[37].Bytes := [$4D, $4F, $53, $51, $55, $49, $54, $4F]; // "MOSQUITO"
+  Sigs[37].Mask := 'xxxxxxxx';
+  Sigs[37].FixedOffset := -1;
+  Sigs[37].RequiredString := '';
+
+  // 39. Bell Boot Virus
+  Sigs[38].Name := 'Bell Boot Virus';
+  Sigs[38].Description := 'Rings the console bell on each floppy track seek and spreads to uninfected disks.';
+  Sigs[38].Bytes := [$1F, $3C, $00, $07, $4E, $41];
+  Sigs[38].Mask := 'xxxxxx';
+  Sigs[38].FixedOffset := -1;
+  Sigs[38].RequiredString := '';
+
+  // -------------------------------------------------------------------------
+  // TIER 1.5: Known Boot Sector Protectors and Vaccines
+  // Checked BEFORE virus signatures so immunization stubs are not falsely flagged
+  // -------------------------------------------------------------------------
+  // Kobold Boot Vaccine / Protector
+  if (BufferContainsText(SectorBytes, 512, 'KOBOLD') and
+      (BufferContainsText(SectorBytes, 512, 'PROTECT') or BufferContainsText(SectorBytes, 512, 'VACCINE'))) or
+     BufferContainsText(SectorBytes, 512, 'KOBOLD-VIRUS PROTECTION') then
+  begin
+    Threat.VirusFound := False;
+    Threat.TargetType := vtProtector;
+    Threat.Name := 'Kobold Vaccine / Boot Protector';
+    Threat.Description := 'Known benign vaccine boot sector displaying "*** KOBOLD-Virus Protection ***". Immunizes floppy against Kobold virus infections.';
+    Threat.Offset := 0;
+    Exit(True);
+  end;
+
+  if BufferContainsText(SectorBytes, 512, 'SAGROTAN') or
+     BufferContainsText(SectorBytes, 512, 'KEIN VIRUS') or
+     ((SectorBytes[506] = Byte('B')) and (SectorBytes[507] = Byte('o')) and (SectorBytes[508] = Byte('o')) and (SectorBytes[509] = Byte('t'))) then
+  begin
+    Threat.VirusFound := False;
+    Threat.TargetType := vtProtector;
+    Threat.Name := 'Sagrotan Boot Protector';
+    Threat.Description := 'Resident boot protector & vaccine by Henrik Alt / ToXis. Protects Sector 0 against unauthorized writes.';
+    Threat.Offset := 0;
+    Exit(True);
+  end;
+
+  if BufferContainsText(SectorBytes, 512, 'ANTIDOTE') then
+  begin
+    Threat.VirusFound := False;
+    Threat.TargetType := vtProtector;
+    Threat.Name := 'Antidote Boot Protector';
+    Threat.Description := 'Known memory-resident virus shield by Antidote. Intercepts viral propagation routines on boot.';
+    Threat.Offset := 0;
+    Exit(True);
+  end;
+
+  if BufferContainsText(SectorBytes, 512, 'VKILLER') or BufferContainsText(SectorBytes, 512, 'VACCINE') then
+  begin
+    Threat.VirusFound := False;
+    Threat.TargetType := vtProtector;
+    Threat.Name := 'VKiller Resident Vaccine';
+    Threat.Description := 'Known resident boot protection installed by VKiller. Traps write attempts to floppy track 0.';
+    Threat.Offset := 0;
+    Exit(True);
+  end;
+
+  if BufferContainsText(SectorBytes, 512, 'UVK') or BufferContainsText(SectorBytes, 512, 'KARSMAKERS') or BufferContainsText(SectorBytes, 512, 'ULTIMATE VIRUS KILLER') then
+  begin
+    Threat.VirusFound := False;
+    Threat.TargetType := vtProtector;
+    Threat.Name := 'UVK Boot Guard / Vaccine';
+    Threat.Description := 'Immunization record or boot guard installed by Richard Karsmakers'' Ultimate Virus Killer.';
+    Threat.Offset := 0;
+    Exit(True);
+  end;
+
+  if BufferContainsText(SectorBytes, 512, 'MEDWAY') and
+     (BufferContainsText(SectorBytes, 512, 'PROTECT') or BufferContainsText(SectorBytes, 512, 'KILLER')) then
+  begin
+    Threat.VirusFound := False;
+    Threat.TargetType := vtProtector;
+    Threat.Name := 'Medway Boys Boot Protector';
+    Threat.Description := 'Resident boot protection header created by the Medway Boys crew.';
+    Threat.Offset := 0;
+    Exit(True);
+  end;
+
+  if BufferContainsText(SectorBytes, 512, 'CHUBBY') or BufferContainsText(SectorBytes, 512, 'DISK DEFENDER') then
+  begin
+    Threat.VirusFound := False;
+    Threat.TargetType := vtProtector;
+    Threat.Name := 'Chubby Checker Boot Guard';
+    Threat.Description := 'Resident boot sector validator / protection utility.';
+    Threat.Offset := 0;
+    Exit(True);
+  end;
+
+  if BufferContainsText(SectorBytes, 512, 'The Little Green Desktop') or
+     BufferContainsText(SectorBytes, 512, 'lgd.fatal-design.com') then
+  begin
+    Threat.VirusFound := False;
+    Threat.TargetType := vtProtector;
+    Threat.Name := 'LGD Virus Sentinel / Protector';
+    Threat.Description := 'The Little Green Desktop boot guard by TS & x_. Protects boot vectors and scans memory for Kobold #2, Ghost, etc.';
+    Threat.Offset := 0;
+    Exit(True);
+  end;
+
+  if BufferContainsText(SectorBytes, 512, 'D-Bug') or
+     BufferContainsText(SectorBytes, 512, 'Cyrano Jones') or
+     (BufferContainsText(SectorBytes, 512, 'Anti-Virus') and BufferContainsText(SectorBytes, 512, 'by reset')) then
+  begin
+    Threat.VirusFound := False;
+    Threat.TargetType := vtProtector;
+    Threat.Name := 'D-Bug Boot Protector';
+    Threat.Description := 'Resident boot protector coded by Cyrano Jones / D-Bug. Guards boot vectors against viral infection.';
+    Threat.Offset := 0;
+    Exit(True);
+  end;
+
+  if BufferContainsText(SectorBytes, 512, 'FUZION') and
+     (BufferContainsText(SectorBytes, 512, 'VIRUS KILLER') or BufferContainsText(SectorBytes, 512, 'VIRUS FOUND') or BufferContainsText(SectorBytes, 512, 'NO VIRUS')) then
+  begin
+    Threat.VirusFound := False;
+    Threat.TargetType := vtProtector;
+    Threat.Name := 'Fuzion Virus Killer';
+    Threat.Description := 'Resident boot protector & virus killer created by the Fuzion cracking crew.';
+    Threat.Offset := 0;
+    Exit(True);
+  end;
+
+  if BufferContainsText(SectorBytes, 512, 'KILLER_BOOT') then
+  begin
+    Threat.VirusFound := False;
+    Threat.TargetType := vtProtector;
+    Threat.Name := 'Killer Boot Resident Vaccine';
+    Threat.Description := 'Classic resident virus killer boot block scanning memory on startup.';
+    Threat.Offset := 0;
+    Exit(True);
+  end;
+
+  if BufferContainsText(SectorBytes, 512, 'UTILITY BOOT') and
+     (BufferContainsText(SectorBytes, 512, 'SECTOR ONE') or BufferContainsText(SectorBytes, 512, 'ODC')) then
+  begin
+    Threat.VirusFound := False;
+    Threat.TargetType := vtProtector;
+    Threat.Name := 'Sector One Utility Boot Sentinel';
+    Threat.Description := 'Memory protector and virus sanitizer by ODC / Sector One.';
+    Threat.Offset := 0;
+    Exit(True);
+  end;
+
+  if BufferContainsText(SectorBytes, 512, 'MAGNUM') and
+     BufferContainsText(SectorBytes, 512, 'FREE OF VIRUSES') then
+  begin
+    Threat.VirusFound := False;
+    Threat.TargetType := vtProtector;
+    Threat.Name := 'Magnum Anti-Virus Boot Guard';
+    Threat.Description := 'Resident boot guard validating system memory and floppy sectors against viruses.';
+    Threat.Offset := 0;
+    Exit(True);
+  end;
+
+  if BufferContainsText(SectorBytes, 512, 'FASTCOPY PRO') or
+     (BufferContainsText(SectorBytes, 512, 'GUARDIAN') and BufferContainsText(SectorBytes, 512, 'NOT INFECTED')) or
+     (BufferContainsText(SectorBytes, 512, 'Martin Backschat') and BufferContainsText(SectorBytes, 512, 'GUARDIAN')) then
+  begin
+    Threat.VirusFound := False;
+    Threat.TargetType := vtProtector;
+    Threat.Name := 'FastCopy Pro Guardian Vaccine';
+    Threat.Description := 'Boot sector guardian & vaccine installed by FastCopy Pro / Martin Backschat.';
+    Threat.Offset := 0;
+    Exit(True);
+  end;
+
+  if BufferContainsText(SectorBytes, 512, 'SPECIAL FX') or
+     BufferContainsText(SectorBytes, 512, 'SPECIAL-FX') or
+     BufferContainsText(SectorBytes, 512, 'JAM-HOT') or
+     (FindMaskedPattern(SectorBytes, 512, [$2F, $38, $04, $4E, $31, $FC, $00, $07, $82, $40], 'xxxxxxxxxx', 30) <> -1) or
+     (FindMaskedPattern(SectorBytes, 512, [$2F, $38, $04, $4E, $42, $78, $82, $40, $21, $FC], 'xxxxxxxxxx', 30) <> -1) then
+  begin
+    Threat.VirusFound := False;
+    Threat.TargetType := vtProtector;
+    Threat.Name := 'Special FX / Jam-Hot Menu Sentinel';
+    Threat.Description := 'Special FX / Superior scene compilation menu loader and virus-free greeting.';
+    Threat.Offset := 0;
+    Exit(True);
+  end;
+
+  // -------------------------------------------------------------------------
+  // Check Specific Virus Signatures Database (39 Boot Sector Viruses)
+  // -------------------------------------------------------------------------
   for I := 0 to High(Sigs) do
   begin
     MatchOff := FindMaskedPattern(SectorBytes, 512, Sigs[I].Bytes, Sigs[I].Mask, Sigs[I].FixedOffset);
     if MatchOff <> -1 then
     begin
       if (Sigs[I].RequiredString <> '') and not BufferContainsString(SectorBytes, 512, Sigs[I].RequiredString) then
+        Continue;
+
+      // Disregard Kobold #1 if sector is the Kobold protection vaccine
+      if (I = 28) and (BufferContainsText(SectorBytes, 512, 'PROTECT') or BufferContainsText(SectorBytes, 512, 'VACCINE')) then
         Continue;
 
       Threat.VirusFound := True;
@@ -487,6 +806,15 @@ begin
       Exit(False); // Whitelisted and verified safe!
   end;
 
+  // Recognized Atari ST Scene Loaders & Crack Intros (Hotline, Elite, Pompey Pirates, Superior, Cynix, Replicants)
+  if BufferContainsText(SectorBytes, 512, 'HOTLINE') or
+     BufferContainsText(SectorBytes, 512, 'ELITE!') or
+     BufferContainsText(SectorBytes, 512, 'POMPEY') or
+     BufferContainsText(SectorBytes, 512, 'CYNIX') or
+     BufferContainsText(SectorBytes, 512, 'SUPERIOR') or
+     BufferContainsText(SectorBytes, 512, 'REPLICANTS') then
+    Exit(False);
+
   // Generic BRA / JMP instructions are only benign if the sector is NOT executable (checksum <> $1234)
   if not IsExec then
   begin
@@ -497,13 +825,35 @@ begin
     end;
   end;
 
+  // Benign dummy boot stubs: code branches directly to RTS ($4E $75) or starts with RTS
+  if (SectorBytes[0] = $4E) and (SectorBytes[1] = $75) then
+  begin
+    Threat.VirusFound := False;
+    Exit(False); // Immediate RTS at offset 0
+  end;
+
+  if (SectorBytes[0] = $60) then
+  begin
+    if SectorBytes[1] <> 0 then
+      TargetOff := 2 + ShortInt(SectorBytes[1])
+    else
+      TargetOff := 4 + SmallInt((Word(SectorBytes[2]) shl 8) or Word(SectorBytes[3]));
+
+    if (TargetOff >= 2) and (TargetOff + 1 < 510) and
+       (SectorBytes[TargetOff] = $4E) and (SectorBytes[TargetOff + 1] = $75) then
+    begin
+      Threat.VirusFound := False;
+      Exit(False); // Benign dummy stub: BRA directly to RTS, no code executed
+    end;
+  end;
+
   // -------------------------------------------------------------------------
   // TIER 3: Generic Family Signatures
   // -------------------------------------------------------------------------
   GenericSigs[0].Name := 'Ghost / MAD Virus Family (Generic)';
-  GenericSigs[0].Description := 'Mutated or obfuscated variant of the Ghost/MAD family using recognizable register-dump stub.';
-  GenericSigs[0].Bytes := [$48, $E7, $FF, $FE];
-  GenericSigs[0].Mask := 'xxxx';
+  GenericSigs[0].Description := 'Mutated or obfuscated variant of the Ghost/MAD family using recognizable relocator stub.';
+  GenericSigs[0].Bytes := [$48, $E7, $FF, $FE, $41, $FA];
+  GenericSigs[0].Mask := 'xxxxxx';
   GenericSigs[0].FixedOffset := -1;
   GenericSigs[0].RequiredString := '';
 
@@ -536,7 +886,7 @@ end;
 function ScanFileBuffer(const Buffer: PByte; BufLen: Integer; const AFileName: string; ACluster: Word; out Threat: TVirusScanResult): Boolean;
 var
   MatchOff, I: Integer;
-  FileSigs: array[0..2] of TMaskedSig;
+  FileSigs: array[0..8] of TMaskedSig;
   DepackedBuf: TBytes;
   PackerSig, DepackPackerName: string;
 begin
@@ -546,6 +896,10 @@ begin
   Threat.Name := '';
   Threat.Description := '';
   Threat.Target := 'File: \' + AFileName;
+  Threat.SourceFile := '';
+  Threat.ActualImagePath := '';
+  Threat.ZipArchivePath := '';
+  Threat.ZipEntryName := '';
   Threat.Offset := -1;
   Threat.CanDisinfect := True;
   Threat.Cluster := ACluster;
@@ -575,14 +929,47 @@ begin
   FileSigs[2].Mask := 'xxxxxxxxxxx';
   FileSigs[2].FixedOffset := -1;
 
-  {
-  // 4. Medway Boys File Infector - commented out for now (gives too many false positives on legitimate Medway releases)
-  FileSigs[3].Name := 'Medway Boys File Infector';
-  FileSigs[3].Description := 'A virus developed by the Medway crew targeting executable application storage offsets.';
-  FileSigs[3].Bytes := [$4D, $45, $44, $57, $41, $59, $20, $42, $4F, $59, $53]; // "MEDWAY BOYS"
-  FileSigs[3].Mask := 'xxxxxxxxxxx';
+  // 4. Ghost Linkvirus (TOS-Link)
+  FileSigs[3].Name := 'Ghost Linkvirus (TOS-Link)';
+  FileSigs[3].Description := 'File-infecting variant of the Ghost family appending code to GEMDOS .PRG and .TOS executables.';
+  FileSigs[3].Bytes := [$47, $48, $4F, $53, $54, $2D, $4C, $49, $4E, $4B]; // "GHOST-LINK"
+  FileSigs[3].Mask := 'xxxxxxxxxx';
   FileSigs[3].FixedOffset := -1;
-  }
+
+  // 5. Hallo / Hello File Virus
+  FileSigs[4].Name := 'Hallo / Hello File Virus';
+  FileSigs[4].Description := 'Appends payload to GEMDOS executables and alters the Program Header text segment size.';
+  FileSigs[4].Bytes := [$48, $41, $4C, $4C, $4F, $20, $56, $49, $52, $55, $53]; // "HALLO VIRUS"
+  FileSigs[4].Mask := 'xxxxxxxxxxx';
+  FileSigs[4].FixedOffset := -1;
+
+  // 6. Twister File Virus
+  FileSigs[5].Name := 'Twister File Virus';
+  FileSigs[5].Description := 'Virulent file linkvirus spreading across executable applications and desk accessories.';
+  FileSigs[5].Bytes := [$54, $57, $49, $53, $54, $45, $52, $20, $56, $49, $52, $55, $53]; // "TWISTER VIRUS"
+  FileSigs[5].Mask := 'xxxxxxxxxxxxx';
+  FileSigs[5].FixedOffset := -1;
+
+  // 7. Spam File Virus
+  FileSigs[6].Name := 'Spam File Virus';
+  FileSigs[6].Description := 'Targets and patches AUTO folder executables to guarantee automatic execution on boot.';
+  FileSigs[6].Bytes := [$53, $50, $41, $4D, $20, $56, $49, $52, $55, $53]; // "SPAM VIRUS"
+  FileSigs[6].Mask := 'xxxxxxxxxx';
+  FileSigs[6].FixedOffset := -1;
+
+  // 8. Manfred / M-Virus
+  FileSigs[7].Name := 'Manfred / M-Virus';
+  FileSigs[7].Description := 'Modifies GEMDOS program headers to expand code size and prepend replication routines.';
+  FileSigs[7].Bytes := [$4D, $41, $4E, $46, $52, $45, $44, $20, $56, $49, $52, $55, $53]; // "MANFRED VIRUS"
+  FileSigs[7].Mask := 'xxxxxxxxxxxxx';
+  FileSigs[7].FixedOffset := -1;
+
+  // 9. Signum File Infector
+  FileSigs[8].Name := 'Signum File Infector';
+  FileSigs[8].Description := 'Companion file infector that replicates alongside the Signum boot sector strain.';
+  FileSigs[8].Bytes := [$53, $49, $47, $4E, $55, $4D, $20, $46, $49, $4C, $45]; // "SIGNUM FILE"
+  FileSigs[8].Mask := 'xxxxxxxxxxx';
+  FileSigs[8].FixedOffset := -1;
 
   // Scan raw file bytes
   for I := 0 to High(FileSigs) do
@@ -599,24 +986,28 @@ begin
   end;
 
   // If file is packed, decompress and scan unpacked contents
-  PackerSig := DetectPackerSignature(Buffer, BufLen);
-  if (BufLen > 32) and IsPackerSupported(PackerSig) then
-  begin
-    if DepackBuffer(Buffer, BufLen, DepackedBuf, DepackPackerName) and (Length(DepackedBuf) > 0) then
+  try
+    PackerSig := DetectPackerSignature(Buffer, BufLen);
+    if (BufLen > 32) and IsPackerSupported(PackerSig) then
     begin
-      for I := 0 to High(FileSigs) do
+      if DepackBuffer(Buffer, BufLen, DepackedBuf, DepackPackerName) and (Length(DepackedBuf) > 0) then
       begin
-        MatchOff := FindMaskedPattern(@DepackedBuf[0], Length(DepackedBuf), FileSigs[I].Bytes, FileSigs[I].Mask, FileSigs[I].FixedOffset);
-        if MatchOff <> -1 then
+        for I := 0 to High(FileSigs) do
         begin
-          Threat.VirusFound := True;
-          Threat.Name := FileSigs[I].Name + ' [In Packed Executable]';
-          Threat.Description := FileSigs[I].Description + ' (Detected inside decompressed binary payload)';
-          Threat.Offset := MatchOff;
-          Exit(True);
+          MatchOff := FindMaskedPattern(@DepackedBuf[0], Length(DepackedBuf), FileSigs[I].Bytes, FileSigs[I].Mask, FileSigs[I].FixedOffset);
+          if MatchOff <> -1 then
+          begin
+            Threat.VirusFound := True;
+            Threat.Name := FileSigs[I].Name + ' [In Packed Executable]';
+            Threat.Description := FileSigs[I].Description + ' (Detected inside decompressed binary payload)';
+            Threat.Offset := MatchOff;
+            Exit(True);
+          end;
         end;
       end;
     end;
+  except
+    // Safe fallback if depacking encounters invalid bitstream or arithmetic overflow
   end;
 end;
 
@@ -632,6 +1023,29 @@ begin
     Result := ((Word(FATBuf[Off]) shr 4) or (Word(FATBuf[Off + 1]) shl 4));
 end;
 
+function IsValidDOSChar(C: Byte): Boolean; inline;
+begin
+  // Valid printable GEMDOS filename characters: ASCII 33..126 excluding reserved chars
+  Result := (C > 32) and (C < 127) and not (Char(C) in ['*', '?', '.', ',', ';', ':', '=', '+', '/', '"', '[', ']', '|', '\', '<', '>']);
+end;
+
+function IsValidDOSName(const P: PByte): Boolean;
+var
+  J: Integer;
+  HasNonSpace: Boolean;
+  B: Byte;
+begin
+  HasNonSpace := False;
+  for J := 0 to 10 do
+  begin
+    B := P[J];
+    if B = 32 then Continue;
+    if not IsValidDOSChar(B) then Exit(False);
+    HasNonSpace := True;
+  end;
+  Result := HasNonSpace;
+end;
+
 function ScanDiskImage(const AImagePath: string; out Summary: TDiskScanSummary; OnProgress: TScanProgressEvent = nil): Boolean;
 var
   FS: TFileStream;
@@ -639,8 +1053,11 @@ var
   BytesPerSec, SecPerClust, ResSec, NumFATs, RootEntries, SecPerFAT: Word;
   FatStart, RootDirStart, DataStart, RootDirSectors: Int64;
   ClusterBytes: Int64;
+  MaxCluster: Word;
   FATBuffer: TBytes;
   BootThreat, FileThreat: TVirusScanResult;
+  GlobalVisitedDirs: array of Word;
+  FAborted: Boolean;
 
   procedure AddThreat(const AThreat: TVirusScanResult);
   var
@@ -649,6 +1066,26 @@ var
     Len := Length(Summary.Threats);
     SetLength(Summary.Threats, Len + 1);
     Summary.Threats[Len] := AThreat;
+    Summary.Threats[Len].SourceFile := ExtractFileName(AImagePath);
+    Summary.Threats[Len].ActualImagePath := AImagePath;
+  end;
+
+  function IsDirClusterVisited(C: Word): Boolean;
+  var
+    V: Integer;
+  begin
+    for V := 0 to High(GlobalVisitedDirs) do
+      if GlobalVisitedDirs[V] = C then Exit(True);
+    Exit(False);
+  end;
+
+  procedure MarkDirClusterVisited(C: Word);
+  var
+    Len: Integer;
+  begin
+    Len := Length(GlobalVisitedDirs);
+    SetLength(GlobalVisitedDirs, Len + 1);
+    GlobalVisitedDirs[Len] := C;
   end;
 
   procedure ScanDirectory(StartCluster: Word; const CurrentPath: string; Depth: Integer);
@@ -664,6 +1101,7 @@ var
     CurrClust: Word;
     ClustOff, ToRead, BytesRead: Int64;
     VisitedClusters: array of Word;
+    AbortScan: Boolean;
 
     function IsClusterVisited(C: Word): Boolean;
     var
@@ -675,7 +1113,9 @@ var
     end;
 
   begin
-    if Depth > 16 then Exit;
+    if FAborted then Exit;
+    if Depth > 8 then Exit;
+    if Summary.TotalFoldersScanned >= 256 then Exit;
 
     // Read directory entries
     if StartCluster = 0 then
@@ -689,39 +1129,64 @@ var
     else
     begin
       // Subdirectory
-      Inc(Summary.TotalFoldersScanned);
+      if (StartCluster < 2) or (StartCluster > MaxCluster) then Exit;
+      if IsDirClusterVisited(StartCluster) then Exit;
+      MarkDirClusterVisited(StartCluster);
+
       CurrClust := StartCluster;
       SetLength(EntriesBuf, 0);
       SetLength(VisitedClusters, 0);
 
-      while (CurrClust >= 2) and (CurrClust < $FF8) and not IsClusterVisited(CurrClust) do
+      while (CurrClust >= 2) and (CurrClust <= MaxCluster) and not IsClusterVisited(CurrClust) do
       begin
         SetLength(VisitedClusters, Length(VisitedClusters) + 1);
         VisitedClusters[High(VisitedClusters)] := CurrClust;
 
-        ClustOff := DataStart + Int64(CurrClust - 2) * ClusterBytes;
+        ClustOff := DataStart + (Int64(CurrClust) - 2) * ClusterBytes;
         if ClustOff + ClusterBytes <= FS.Size then
         begin
           I := Length(EntriesBuf);
           SetLength(EntriesBuf, I + ClusterBytes);
           FS.Position := ClustOff;
           FS.ReadBuffer(EntriesBuf[I], ClusterBytes);
-        end;
+        end
+        else
+          Break;
 
         CurrClust := ReadFAT12Entry(@FATBuffer[0], Length(FATBuffer), CurrClust);
       end;
+
+      // Subdirectory structure validation:
+      // In GEMDOS and FAT12, EVERY valid subdirectory MUST start with the '.' entry ($2E)
+      // and have the subdirectory attribute ($10).
+      if (Length(EntriesBuf) < 32) or (EntriesBuf[0] <> Byte('.')) or ((EntriesBuf[11] and $10) = 0) then
+        Exit;
+
+      Inc(Summary.TotalFoldersScanned);
       NumEntries := Length(EntriesBuf) div 32;
     end;
 
     for I := 0 to NumEntries - 1 do
     begin
+      if FAborted then Exit;
+      if Summary.TotalFilesScanned >= 2048 then Exit;
+
       EntryOff := I * 32;
       if (EntryOff + 32 > Length(EntriesBuf)) then Break;
       if (EntriesBuf[EntryOff] = $00) and (StartCluster = 0) then Break;
-      if EntriesBuf[EntryOff] = $E5 then Continue; // Deleted
+      if (EntriesBuf[EntryOff] = $00) or (EntriesBuf[EntryOff] = $E5) then Continue;
+
+      // Skip '.' and '..' directory entries
+      if EntriesBuf[EntryOff] = Byte('.') then Continue;
 
       Attr := EntriesBuf[EntryOff + 11];
-      if (Attr and $08) <> 0 then Continue; // Volume Label
+      // Reserved attribute bits in FAT12/GEMDOS: bits 6 & 7 ($C0) are never used
+      if (Attr and $C0) <> 0 then Continue;
+      // Volume label: skip
+      if (Attr and $08) <> 0 then Continue;
+
+      // Validate 8.3 filename characters
+      if not IsValidDOSName(@EntriesBuf[EntryOff]) then Continue;
 
       // Build 8.3 filename
       RawName := '';
@@ -736,8 +1201,6 @@ var
             RawName := RawName + Char(EntriesBuf[EntryOff + J]);
       end;
 
-      if (RawName = '.') or (RawName = '..') then Continue;
-
       FileClust := Word(EntriesBuf[EntryOff + 26]) or (Word(EntriesBuf[EntryOff + 27]) shl 8);
       FileSize := LongWord(EntriesBuf[EntryOff + 28]) or
                   (LongWord(EntriesBuf[EntryOff + 29]) shl 8) or
@@ -747,17 +1210,26 @@ var
       if (Attr and $10) <> 0 then
       begin
         // Recurse into subdirectory
-        if FileClust >= 2 then
+        if (FileClust >= 2) and (FileClust <= MaxCluster) and not IsDirClusterVisited(FileClust) then
           ScanDirectory(FileClust, CurrentPath + '\' + RawName, Depth + 1);
       end
       else
       begin
         // File!
+        if (FileClust > MaxCluster) and (FileClust <> 0) then Continue;
         Inc(Summary.TotalFilesScanned);
         if Assigned(OnProgress) then
-          OnProgress(CurrentPath + '\' + RawName, Min(100, Summary.TotalFilesScanned));
+        begin
+          AbortScan := False;
+          OnProgress(CurrentPath + '\' + RawName, Min(100, Summary.TotalFilesScanned), AbortScan);
+          if AbortScan then
+          begin
+            FAborted := True;
+            Exit;
+          end;
+        end;
 
-        if (FileSize > 0) and (FileClust >= 2) then
+        if (FileSize > 0) and (FileClust >= 2) and (FileClust <= MaxCluster) then
         begin
           // Read full file bytes following cluster chain (safety capped at 8MB)
           FileSize := Min(FileSize, 8 * 1024 * 1024);
@@ -766,12 +1238,12 @@ var
           CurrClust := FileClust;
           SetLength(VisitedClusters, 0);
 
-          while (CurrClust >= 2) and (CurrClust < $FF8) and (BytesRead < FileSize) and not IsClusterVisited(CurrClust) do
+          while (CurrClust >= 2) and (CurrClust <= MaxCluster) and (BytesRead < FileSize) and not IsClusterVisited(CurrClust) do
           begin
             SetLength(VisitedClusters, Length(VisitedClusters) + 1);
             VisitedClusters[High(VisitedClusters)] := CurrClust;
 
-            ClustOff := DataStart + Int64(CurrClust - 2) * ClusterBytes;
+            ClustOff := DataStart + (Int64(CurrClust) - 2) * ClusterBytes;
             ToRead := Min(ClusterBytes, Int64(FileSize) - BytesRead);
             if ClustOff + ToRead <= FS.Size then
             begin
@@ -802,6 +1274,8 @@ begin
   Summary.BootChecksum := 0;
   Summary.BootIsExecutable := False;
   SetLength(Summary.Threats, 0);
+  SetLength(GlobalVisitedDirs, 0);
+  FAborted := False;
 
   if not FileExists(AImagePath) then Exit;
 
@@ -838,6 +1312,16 @@ begin
     RootDirSectors := (Int64(RootEntries) * 32 + (BytesPerSec - 1)) div BytesPerSec;
     DataStart := RootDirStart + RootDirSectors * BytesPerSec;
     ClusterBytes := Int64(SecPerClust) * BytesPerSec;
+
+    // Validate geometry sanity
+    if (ClusterBytes <= 0) or (DataStart >= FS.Size) or (FatStart >= FS.Size) then
+    begin
+      Result := True; // Boot sector scanned, filesystem non-standard
+      Exit;
+    end;
+
+    MaxCluster := 2 + (FS.Size - DataStart) div ClusterBytes;
+    if MaxCluster > 4085 then MaxCluster := 4085;
 
     // Read First FAT Table into memory
     if (FatStart + Int64(SecPerFAT) * BytesPerSec) <= FS.Size then
@@ -1084,11 +1568,46 @@ begin
     IsExecutable := (CalculateBootChecksum(@BootSec[0], 512) = $1234);
     if ScanBootSector(@BootSec[0], 512, Threat) then
     begin
-      ThreatName := Threat.Name;
-      Result := True;
+      // Only treat as threat if it is an actual threat, not a protector/vaccine
+      if Threat.TargetType <> vtProtector then
+      begin
+        ThreatName := Threat.Name;
+        Result := True;
+      end;
     end;
   finally
     FS.Free;
+  end;
+end;
+
+procedure CollectSupportedFiles(const ADir: string; AList: TStringList; var ACancel: Boolean);
+var
+  SR: TSearchRec;
+  Ext, TargetDir: string;
+begin
+  if ACancel then Exit;
+  TargetDir := IncludeTrailingPathDelimiter(ADir);
+  if FindFirst(TargetDir + '*', faAnyFile, SR) = 0 then
+  begin
+    try
+      repeat
+        if ACancel then Exit;
+        if (SR.Name = '.') or (SR.Name = '..') then Continue;
+
+        if (SR.Attr and faDirectory) <> 0 then
+        begin
+          CollectSupportedFiles(TargetDir + SR.Name, AList, ACancel);
+        end
+        else
+        begin
+          Ext := LowerCase(ExtractFileExt(SR.Name));
+          if (Ext = '.st') or (Ext = '.msa') or (Ext = '.dim') or (Ext = '.zip') then
+            AList.Add(TargetDir + SR.Name);
+        end;
+      until FindNext(SR) <> 0;
+    finally
+      FindClose(SR);
+    end;
   end;
 end;
 
@@ -1097,13 +1616,32 @@ end;
 procedure TFormVirusScanner.FormCreate(Sender: TObject);
 begin
   FCurrentDiskPath := '';
+  FFolderScanMode := False;
+  FCancelScan := False;
   ProgressBarScan.Position := 0;
+  ButtonCancelScan.Enabled := False;
 end;
 
 procedure TFormVirusScanner.OpenForDisk(const ADiskPath: string; AutoScan: Boolean);
 begin
   FCurrentDiskPath := ADiskPath;
-  LabelDiskPath.Caption := 'Disk Image: ' + ExtractFileName(FCurrentDiskPath);
+  FFolderScanMode := False;
+  FCancelScan := False;
+  ButtonCancelScan.Enabled := False;
+  ButtonScanFolder.Enabled := True;
+
+  if FCurrentDiskPath <> '' then
+  begin
+    LabelDiskPath.Caption := 'Disk Image: ' + ExtractFileName(FCurrentDiskPath);
+    ButtonScan.Enabled := True;
+  end
+  else
+  begin
+    LabelDiskPath.Caption := 'Disk Image: [No Disk Loaded - Ready for Folder Scan]';
+    LabelBootStatus.Caption := 'Boot Sector: N/A';
+    ButtonScan.Enabled := False;
+  end;
+
   UpdateUI;
   Show;
   BringToFront;
@@ -1114,27 +1652,68 @@ end;
 
 procedure TFormVirusScanner.UpdateUI;
 var
-  HasBootThreat, HasAnyThreat: Boolean;
+  HasBootThreat, HasAnyThreat, OnlyPotentialThreats: Boolean;
+  ThreatCount, ProtectorCount: Integer;
+  FirstProtectorName: string;
   I: Integer;
 begin
   HasBootThreat := False;
-  HasAnyThreat := (Length(FSummary.Threats) > 0);
+  ThreatCount := 0;
+  ProtectorCount := 0;
+  FirstProtectorName := '';
+  OnlyPotentialThreats := True;
 
   for I := 0 to High(FSummary.Threats) do
   begin
     if (FSummary.Threats[I].TargetType = vtBootSector) and not FSummary.Threats[I].Disinfected then
       HasBootThreat := True;
+
+    if (FSummary.Threats[I].TargetType <> vtProtector) and not FSummary.Threats[I].Disinfected then
+    begin
+      Inc(ThreatCount);
+      if Pos('unrecognized', LowerCase(FSummary.Threats[I].Name)) = 0 then
+        OnlyPotentialThreats := False;
+    end
+    else if FSummary.Threats[I].TargetType = vtProtector then
+    begin
+      Inc(ProtectorCount);
+      if FirstProtectorName = '' then
+        FirstProtectorName := FSummary.Threats[I].Name;
+    end;
   end;
 
-  if FSummary.BootIsExecutable then
-    LabelBootStatus.Caption := Format('Boot Sector: Checksum $%.4X [EXECUTABLE BOOT BLOCK]', [FSummary.BootChecksum])
-  else
-    LabelBootStatus.Caption := Format('Boot Sector: Checksum $%.4X [Non-executable / Clean]', [FSummary.BootChecksum]);
+  HasAnyThreat := (ThreatCount > 0);
+
+  if not FFolderScanMode then
+  begin
+    if FSummary.BootIsExecutable then
+    begin
+      if ProtectorCount > 0 then
+        LabelBootStatus.Caption := Format('Boot Sector: Checksum $%.4X [PROTECTED / VACCINE: %s]', [FSummary.BootChecksum, FirstProtectorName])
+      else
+        LabelBootStatus.Caption := Format('Boot Sector: Checksum $%.4X [EXECUTABLE BOOT BLOCK]', [FSummary.BootChecksum]);
+    end
+    else
+      LabelBootStatus.Caption := Format('Boot Sector: Checksum $%.4X [Non-executable / Clean]', [FSummary.BootChecksum]);
+  end;
 
   if HasAnyThreat then
   begin
-    LabelScanStatus.Font.Color := clRed;
-    LabelScanStatus.Caption := Format('ALERT: %d Threat(s) Found!', [Length(FSummary.Threats)]);
+    if OnlyPotentialThreats then
+    begin
+      LabelScanStatus.Font.Color := $000080FF; // Amber / orange
+      LabelScanStatus.Caption := Format('CAUTION: %d Potential Threat(s) Detected!', [ThreatCount]);
+    end
+    else
+    begin
+      LabelScanStatus.Font.Color := clRed;
+      LabelScanStatus.Caption := Format('ALERT: %d Threat(s) Found!', [ThreatCount]);
+    end;
+  end
+  else if ProtectorCount > 0 then
+  begin
+    LabelScanStatus.Font.Color := $00804000; // Deep teal / green
+    LabelScanStatus.Caption := Format('PROTECTED: %s Active (0 Threats Found)', [FirstProtectorName]);
   end
   else if FSummary.TotalFilesScanned > 0 then
   begin
@@ -1147,23 +1726,36 @@ begin
     LabelScanStatus.Caption := 'Ready to scan';
   end;
 
-  ButtonDisinfectBoot.Enabled := HasBootThreat;
-  ButtonDisinfectAll.Enabled := HasAnyThreat;
+  if FFolderScanMode then
+  begin
+    ButtonDisinfectBoot.Enabled := False;
+    ButtonDisinfectAll.Enabled := False;
+  end
+  else
+  begin
+    ButtonDisinfectBoot.Enabled := HasBootThreat or (ProtectorCount > 0);
+    ButtonDisinfectAll.Enabled := HasAnyThreat;
+  end;
   ButtonInspectHex.Enabled := (ListViewThreats.Selected <> nil);
 end;
 
-procedure TFormVirusScanner.OnScanProgress(const CurrentItem: string; Percent: Integer);
+procedure TFormVirusScanner.OnScanProgress(const CurrentItem: string; Percent: Integer; var Abort: Boolean);
 begin
-  LabelScanStatus.Caption := 'Scanning: ' + ExtractFileName(CurrentItem);
+  if FFolderScanMode and (FTotalFilesToScan > 0) then
+    LabelScanStatus.Caption := Format('Scanning [%d/%d]: %s',
+      [FCurrentFileIndex + 1, FTotalFilesToScan, ExtractFileName(CurrentItem)])
+  else
+    LabelScanStatus.Caption := 'Scanning: ' + ExtractFileName(CurrentItem);
   ProgressBarScan.Position := Percent;
   Application.ProcessMessages;
+  Abort := FCancelScan;
 end;
 
 procedure TFormVirusScanner.PopulateThreatsList;
 var
   I: Integer;
   Item: TListItem;
-  CatStr, StatusStr: string;
+  CatStr, StatusStr, FileDispName: string;
 begin
   ListViewThreats.Items.BeginUpdate;
   try
@@ -1171,17 +1763,32 @@ begin
     for I := 0 to High(FSummary.Threats) do
     begin
       Item := ListViewThreats.Items.Add;
-      Item.Caption := FSummary.Threats[I].Target;
+      FileDispName := FSummary.Threats[I].SourceFile;
+      if FileDispName = '' then
+      begin
+        if FSummary.DiskImagePath <> '' then
+          FileDispName := ExtractFileName(FSummary.DiskImagePath)
+        else
+          FileDispName := ExtractFileName(FCurrentDiskPath);
+      end;
+      Item.Caption := FileDispName;
+      Item.SubItems.Add(FSummary.Threats[I].Target);
       Item.SubItems.Add(FSummary.Threats[I].Name);
 
       if FSummary.Threats[I].TargetType = vtBootSector then
         CatStr := 'Boot Sector'
+      else if FSummary.Threats[I].TargetType = vtProtector then
+        CatStr := 'Protector / Vaccine'
       else
         CatStr := 'File Infector';
       Item.SubItems.Add(CatStr);
 
-      if FSummary.Threats[I].Disinfected then
+      if FSummary.Threats[I].TargetType = vtProtector then
+        StatusStr := 'Active / Protected'
+      else if FSummary.Threats[I].Disinfected then
         StatusStr := 'Cleaned / Safe'
+      else if Pos('unrecognized', LowerCase(FSummary.Threats[I].Name)) > 0 then
+        StatusStr := 'Potential Threat'
       else if FSummary.Threats[I].CanDisinfect then
         StatusStr := 'Disinfectable'
       else
@@ -1195,7 +1802,56 @@ begin
   end;
 end;
 
+procedure TFormVirusScanner.AddThreatResult(const AThreat: TVirusScanResult);
+var
+  Idx: Integer;
+  Item: TListItem;
+  CatStr, StatusStr, FileDispName: string;
+begin
+  Idx := Length(FSummary.Threats);
+  SetLength(FSummary.Threats, Idx + 1);
+  FSummary.Threats[Idx] := AThreat;
+
+  FileDispName := AThreat.SourceFile;
+  if FileDispName = '' then
+  begin
+    if FSummary.DiskImagePath <> '' then
+      FileDispName := ExtractFileName(FSummary.DiskImagePath)
+    else
+      FileDispName := ExtractFileName(FCurrentDiskPath);
+  end;
+
+  Item := ListViewThreats.Items.Add;
+  Item.Caption := FileDispName;
+  Item.SubItems.Add(AThreat.Target);
+  Item.SubItems.Add(AThreat.Name);
+
+  if AThreat.TargetType = vtBootSector then
+    CatStr := 'Boot Sector'
+  else if AThreat.TargetType = vtProtector then
+    CatStr := 'Protector / Vaccine'
+  else
+    CatStr := 'File Infector';
+  Item.SubItems.Add(CatStr);
+
+  if AThreat.TargetType = vtProtector then
+    StatusStr := 'Active / Protected'
+  else if AThreat.Disinfected then
+    StatusStr := 'Cleaned / Safe'
+  else if Pos('unrecognized', LowerCase(AThreat.Name)) > 0 then
+    StatusStr := 'Potential Threat'
+  else if AThreat.CanDisinfect then
+    StatusStr := 'Disinfectable'
+  else
+    StatusStr := 'Quarantined';
+  Item.SubItems.Add(StatusStr);
+
+  Item.SubItems.Add(AThreat.Description);
+end;
+
 procedure TFormVirusScanner.ButtonScanClick(Sender: TObject);
+var
+  I: Integer;
 begin
   if (FCurrentDiskPath = '') or not FileExists(FCurrentDiskPath) then
   begin
@@ -1203,42 +1859,432 @@ begin
     Exit;
   end;
 
+  FFolderScanMode := False;
+  FCancelScan := False;
   ButtonScan.Enabled := False;
+  ButtonScanFolder.Enabled := False;
+  ButtonCancelScan.Enabled := True;
+  ButtonDisinfectBoot.Enabled := False;
+  ButtonDisinfectAll.Enabled := False;
+  ButtonInspectHex.Enabled := False;
   ProgressBarScan.Position := 0;
   LabelScanStatus.Caption := 'Scanning disk...';
   Screen.Cursor := crHourGlass;
   try
     ScanDiskImage(FCurrentDiskPath, FSummary, @OnScanProgress);
+    for I := 0 to High(FSummary.Threats) do
+    begin
+      FSummary.Threats[I].SourceFile := ExtractFileName(FCurrentDiskPath);
+      FSummary.Threats[I].ActualImagePath := FCurrentDiskPath;
+    end;
     PopulateThreatsList;
     ProgressBarScan.Position := 100;
     UpdateUI;
   finally
     ButtonScan.Enabled := True;
+    ButtonScanFolder.Enabled := True;
+    ButtonCancelScan.Enabled := False;
     Screen.Cursor := crDefault;
   end;
 end;
 
+procedure TFormVirusScanner.ButtonScanFolderClick(Sender: TObject);
+var
+  Dlg: TSelectDirectoryDialog;
+  ChosenDir: string;
+  FileList: TStringList;
+  FileIdx, EntryIdx, K: Integer;
+  ActualThreatCount, PotentialThreatCount, ProtectorCount: Integer;
+  CurFile, Ext, TempST, TempConvertedST, DiskToScan: string;
+  TempSummary: TDiskScanSummary;
+  TotalImagesProcessed, TotalFilesInsideImages: Integer;
+  UnZip, UnZipSingle: TUnZipper;
+  ZipEntryName, ZipEntryExt, TempZipStageDir, ExtractedFile: string;
+begin
+  Dlg := TSelectDirectoryDialog.Create(nil);
+  try
+    Dlg.Title := 'Select Directory to Scan for Atari ST Disk Images & Archives';
+    if not Dlg.Execute then Exit;
+    ChosenDir := Dlg.FileName;
+  finally
+    Dlg.Free;
+  end;
+
+  if (ChosenDir = '') or not DirectoryExists(ChosenDir) then Exit;
+
+  FFolderScanMode := True;
+  FCancelScan := False;
+  ButtonScan.Enabled := False;
+  ButtonScanFolder.Enabled := False;
+  ButtonCancelScan.Enabled := True;
+  ButtonDisinfectBoot.Enabled := False;
+  ButtonDisinfectAll.Enabled := False;
+  ButtonInspectHex.Enabled := False;
+
+  LabelDiskPath.Caption := 'Folder: ' + ChosenDir;
+  LabelBootStatus.Caption := 'Directory Scan in progress...';
+  LabelScanStatus.Font.Color := clWindowText;
+  LabelScanStatus.Caption := 'Searching for supported files (.st, .msa, .dim, .zip)...';
+  ProgressBarScan.Position := 0;
+  ListViewThreats.Items.Clear;
+  SetLength(FSummary.Threats, 0);
+  FSummary.TotalFilesScanned := 0;
+  FSummary.TotalFoldersScanned := 0;
+  FSummary.BootChecksum := 0;
+  FSummary.BootIsExecutable := False;
+
+  Screen.Cursor := crHourGlass;
+  FileList := TStringList.Create;
+  try
+    CollectSupportedFiles(ChosenDir, FileList, FCancelScan);
+
+    if FCancelScan then
+    begin
+      LabelScanStatus.Font.Color := clNavy;
+      LabelScanStatus.Caption := 'Scan cancelled during directory discovery.';
+      Exit;
+    end;
+
+    if FileList.Count = 0 then
+    begin
+      LabelScanStatus.Caption := 'No supported files (.st, .msa, .dim, .zip) found in folder.';
+      ShowMessage('No supported files (.st, .msa, .dim, .zip) found in:' + sLineBreak + ChosenDir);
+      Exit;
+    end;
+
+    TotalImagesProcessed := 0;
+    TotalFilesInsideImages := 0;
+    FTotalFilesToScan := FileList.Count;
+
+    for FileIdx := 0 to FileList.Count - 1 do
+    begin
+      if FCancelScan then Break;
+      FCurrentFileIndex := FileIdx;
+
+      CurFile := FileList[FileIdx];
+      ProgressBarScan.Position := (FileIdx * 100) div FileList.Count;
+      LabelScanStatus.Font.Color := clWindowText;
+      LabelScanStatus.Caption := Format('Scanning [%d/%d]: %s',
+        [FileIdx + 1, FileList.Count, ExtractFileName(CurFile)]);
+      Application.ProcessMessages;
+
+      if FCancelScan then Break;
+
+      Ext := LowerCase(ExtractFileExt(CurFile));
+
+      try
+        if Ext = '.st' then
+        begin
+          TempSummary.TotalFilesScanned := 0;
+          SetLength(TempSummary.Threats, 0);
+          if ScanDiskImage(CurFile, TempSummary, @OnScanProgress) then
+          begin
+            Inc(TotalImagesProcessed);
+            Inc(TotalFilesInsideImages, TempSummary.TotalFilesScanned);
+            for K := 0 to High(TempSummary.Threats) do
+            begin
+              TempSummary.Threats[K].SourceFile := ExtractFileName(CurFile);
+              TempSummary.Threats[K].ActualImagePath := CurFile;
+              AddThreatResult(TempSummary.Threats[K]);
+            end;
+          end;
+        end
+        else if Ext = '.msa' then
+        begin
+          TempST := IncludeTrailingPathDelimiter(GetTempDir) + 'st_msascan_' + FormatDateTime('hhnnsszzz', Now) + '_' + IntToStr(FileIdx) + '.st';
+          try
+            if UnpackMSAToST(CurFile, TempST) and FileExists(TempST) then
+            begin
+              TempSummary.TotalFilesScanned := 0;
+              SetLength(TempSummary.Threats, 0);
+              if ScanDiskImage(TempST, TempSummary, @OnScanProgress) then
+              begin
+                Inc(TotalImagesProcessed);
+                Inc(TotalFilesInsideImages, TempSummary.TotalFilesScanned);
+                for K := 0 to High(TempSummary.Threats) do
+                begin
+                  TempSummary.Threats[K].SourceFile := ExtractFileName(CurFile);
+                  TempSummary.Threats[K].ActualImagePath := CurFile;
+                  AddThreatResult(TempSummary.Threats[K]);
+                end;
+              end;
+            end;
+          finally
+            if FileExists(TempST) then
+              SysUtils.DeleteFile(TempST);
+          end;
+        end
+        else if Ext = '.dim' then
+        begin
+          TempST := IncludeTrailingPathDelimiter(GetTempDir) + 'st_dimscan_' + FormatDateTime('hhnnsszzz', Now) + '_' + IntToStr(FileIdx) + '.st';
+          try
+            if UnpackDIMToST(CurFile, TempST) and FileExists(TempST) then
+            begin
+              TempSummary.TotalFilesScanned := 0;
+              SetLength(TempSummary.Threats, 0);
+              if ScanDiskImage(TempST, TempSummary, @OnScanProgress) then
+              begin
+                Inc(TotalImagesProcessed);
+                Inc(TotalFilesInsideImages, TempSummary.TotalFilesScanned);
+                for K := 0 to High(TempSummary.Threats) do
+                begin
+                  TempSummary.Threats[K].SourceFile := ExtractFileName(CurFile);
+                  TempSummary.Threats[K].ActualImagePath := CurFile;
+                  AddThreatResult(TempSummary.Threats[K]);
+                end;
+              end;
+            end;
+          finally
+            if FileExists(TempST) then
+              SysUtils.DeleteFile(TempST);
+          end;
+        end
+        else if Ext = '.zip' then
+        begin
+          UnZip := TUnZipper.Create;
+          try
+            UnZip.FileName := CurFile;
+            try
+              UnZip.Examine;
+            except
+              UnZip.Entries.Clear;
+            end;
+
+            for EntryIdx := 0 to UnZip.Entries.Count - 1 do
+            begin
+              if FCancelScan then Break;
+              if UnZip.Entries[EntryIdx].IsDirectory then Continue;
+
+              ZipEntryName := UnZip.Entries[EntryIdx].ArchiveFileName;
+              ZipEntryExt := LowerCase(ExtractFileExt(ZipEntryName));
+              if (ZipEntryExt = '.st') or (ZipEntryExt = '.msa') or (ZipEntryExt = '.dim') then
+              begin
+                TempZipStageDir := IncludeTrailingPathDelimiter(GetTempDir) + 'st_zipscan_' + FormatDateTime('hhnnsszzz', Now) + '_' + IntToStr(EntryIdx) + PathDelim;
+                ForceDirectories(TempZipStageDir);
+                try
+                  UnZipSingle := TUnZipper.Create;
+                  try
+                    UnZipSingle.FileName := CurFile;
+                    UnZipSingle.OutputPath := TempZipStageDir;
+                    UnZipSingle.Flat := True;
+                    UnZipSingle.UnZipFile(ZipEntryName);
+                  finally
+                    UnZipSingle.Free;
+                  end;
+
+                  ExtractedFile := TempZipStageDir + ExtractFileName(StringReplace(ZipEntryName, '/', PathDelim, [rfReplaceAll]));
+                  if FileExists(ExtractedFile) then
+                  begin
+                    DiskToScan := ExtractedFile;
+                    TempConvertedST := '';
+                    try
+                      if ZipEntryExt = '.msa' then
+                      begin
+                        TempConvertedST := ExtractedFile + '.st';
+                        if UnpackMSAToST(ExtractedFile, TempConvertedST) and FileExists(TempConvertedST) then
+                          DiskToScan := TempConvertedST
+                        else
+                          DiskToScan := '';
+                      end
+                      else if ZipEntryExt = '.dim' then
+                      begin
+                        TempConvertedST := ExtractedFile + '.st';
+                        if UnpackDIMToST(ExtractedFile, TempConvertedST) and FileExists(TempConvertedST) then
+                          DiskToScan := TempConvertedST
+                        else
+                          DiskToScan := '';
+                      end;
+
+                      if (DiskToScan <> '') and FileExists(DiskToScan) then
+                      begin
+                        TempSummary.TotalFilesScanned := 0;
+                        SetLength(TempSummary.Threats, 0);
+                        if ScanDiskImage(DiskToScan, TempSummary, @OnScanProgress) then
+                        begin
+                          Inc(TotalImagesProcessed);
+                          Inc(TotalFilesInsideImages, TempSummary.TotalFilesScanned);
+                          for K := 0 to High(TempSummary.Threats) do
+                          begin
+                            TempSummary.Threats[K].SourceFile := ExtractFileName(CurFile) + ' [' + ExtractFileName(ZipEntryName) + ']';
+                            TempSummary.Threats[K].ActualImagePath := '';
+                            TempSummary.Threats[K].ZipArchivePath := CurFile;
+                            TempSummary.Threats[K].ZipEntryName := ZipEntryName;
+                            AddThreatResult(TempSummary.Threats[K]);
+                          end;
+                        end;
+                      end;
+                    finally
+                      if (TempConvertedST <> '') and FileExists(TempConvertedST) then
+                        SysUtils.DeleteFile(TempConvertedST);
+                      SysUtils.DeleteFile(ExtractedFile);
+                    end;
+                  end;
+                finally
+                  RemoveDir(TempZipStageDir);
+                end;
+              end;
+            end;
+          finally
+            UnZip.Free;
+          end;
+        end;
+      except
+        on E: Exception do
+        begin
+          // Safely catch I/O hiccups, unreadable shares or corrupted archives and proceed
+        end;
+      end;
+    end;
+
+    FSummary.TotalFilesScanned := TotalFilesInsideImages;
+
+    ActualThreatCount := 0;
+    PotentialThreatCount := 0;
+    ProtectorCount := 0;
+    for K := 0 to High(FSummary.Threats) do
+    begin
+      if FSummary.Threats[K].TargetType = vtProtector then
+        Inc(ProtectorCount)
+      else if Pos('unrecognized', LowerCase(FSummary.Threats[K].Name)) > 0 then
+        Inc(PotentialThreatCount)
+      else
+        Inc(ActualThreatCount);
+    end;
+
+    if FCancelScan then
+    begin
+      LabelScanStatus.Font.Color := clNavy;
+      if (ActualThreatCount + PotentialThreatCount > 0) or (ProtectorCount > 0) then
+        LabelScanStatus.Caption := Format('Scan cancelled. %d images processed (%d threat(s), %d protector(s)).',
+          [TotalImagesProcessed, ActualThreatCount + PotentialThreatCount, ProtectorCount])
+      else
+        LabelScanStatus.Caption := Format('Scan cancelled. %d images processed (0 threats detected).',
+          [TotalImagesProcessed]);
+      LabelBootStatus.Caption := Format('Folder Scan Cancelled (%d of %d files checked)',
+        [TotalImagesProcessed, FileList.Count]);
+    end
+    else
+    begin
+      ProgressBarScan.Position := 100;
+      if ProtectorCount > 0 then
+        LabelBootStatus.Caption := Format('Folder Scan Complete: %d image(s) processed (%d protected)',
+          [TotalImagesProcessed, ProtectorCount])
+      else
+        LabelBootStatus.Caption := Format('Folder Scan Complete: %d image(s) processed', [TotalImagesProcessed]);
+
+      if ActualThreatCount > 0 then
+      begin
+        LabelScanStatus.Font.Color := clRed;
+        if PotentialThreatCount > 0 then
+          LabelScanStatus.Caption := Format('ALERT: %d Threat(s) and %d Potential Threat(s) Found across %d image(s)!',
+            [ActualThreatCount, PotentialThreatCount, TotalImagesProcessed])
+        else
+          LabelScanStatus.Caption := Format('ALERT: %d Threat(s) Found across %d image(s)!',
+            [ActualThreatCount, TotalImagesProcessed]);
+      end
+      else if PotentialThreatCount > 0 then
+      begin
+        LabelScanStatus.Font.Color := $000080FF; // Amber / orange
+        LabelScanStatus.Caption := Format('CAUTION: %d Potential Threat(s) Detected across %d image(s)!',
+          [PotentialThreatCount, TotalImagesProcessed]);
+      end
+      else if ProtectorCount > 0 then
+      begin
+        LabelScanStatus.Font.Color := $00804000; // Deep teal / green
+        LabelScanStatus.Caption := Format('CLEAN & PROTECTED: %d images scanned, %d files checked (%d boot protector(s), 0 threats)',
+          [TotalImagesProcessed, TotalFilesInsideImages, ProtectorCount]);
+      end
+      else
+      begin
+        LabelScanStatus.Font.Color := clGreen;
+        LabelScanStatus.Caption := Format('CLEAN: %d images scanned, %d files checked (No threats)',
+          [TotalImagesProcessed, TotalFilesInsideImages]);
+      end;
+    end;
+  finally
+    FileList.Free;
+    ButtonScan.Enabled := (FCurrentDiskPath <> '') and FileExists(FCurrentDiskPath);
+    ButtonScanFolder.Enabled := True;
+    ButtonCancelScan.Enabled := False;
+    Screen.Cursor := crDefault;
+  end;
+end;
+
+procedure TFormVirusScanner.ButtonCancelScanClick(Sender: TObject);
+begin
+  FCancelScan := True;
+  LabelScanStatus.Caption := 'Cancelling scan...';
+  Application.ProcessMessages;
+end;
+
 procedure TFormVirusScanner.ButtonDisinfectBootClick(Sender: TObject);
 var
-  I: Integer;
-  HasUnrecBoot: Boolean;
-  BakPath: string;
+  I, TargetIdx: Integer;
+  HasUnrecBoot, HasProtector: Boolean;
+  BakPath, TargetDisk: string;
 begin
-  if (FCurrentDiskPath = '') or not FileExists(FCurrentDiskPath) then Exit;
+  TargetIdx := -1;
+  if FFolderScanMode then
+  begin
+    if ListViewThreats.Selected = nil then
+    begin
+      ShowMessage('Please select a threat in the list to disinfect.');
+      Exit;
+    end;
+    TargetIdx := ListViewThreats.Selected.Index;
+    if (TargetIdx < 0) or (TargetIdx > High(FSummary.Threats)) then Exit;
+    TargetDisk := FSummary.Threats[TargetIdx].ActualImagePath;
+    if (TargetDisk = '') or not FileExists(TargetDisk) or not SameText(ExtractFileExt(TargetDisk), '.st') then
+    begin
+      ShowMessage('Only standalone uncompressed .ST disk images can be disinfected in batch mode.');
+      Exit;
+    end;
+  end
+  else
+  begin
+    TargetDisk := FCurrentDiskPath;
+  end;
+
+  if (TargetDisk = '') or not FileExists(TargetDisk) then Exit;
 
   HasUnrecBoot := False;
-  for I := 0 to High(FSummary.Threats) do
-    if (FSummary.Threats[I].TargetType = vtBootSector) and
-       (Pos('Unrecognized Executable', FSummary.Threats[I].Name) > 0) then
+  HasProtector := False;
+  if TargetIdx >= 0 then
+  begin
+    if FSummary.Threats[TargetIdx].TargetType = vtProtector then
+      HasProtector := True
+    else if (FSummary.Threats[TargetIdx].TargetType = vtBootSector) and
+       (Pos('Unrecognized Executable', FSummary.Threats[TargetIdx].Name) > 0) then
       HasUnrecBoot := True;
+  end
+  else
+  begin
+    for I := 0 to High(FSummary.Threats) do
+    begin
+      if FSummary.Threats[I].TargetType = vtProtector then
+        HasProtector := True
+      else if (FSummary.Threats[I].TargetType = vtBootSector) and
+         (Pos('Unrecognized Executable', FSummary.Threats[I].Name) > 0) then
+        HasUnrecBoot := True;
+    end;
+  end;
 
-  if HasUnrecBoot then
+  if HasProtector then
+  begin
+    if MessageDlg('Remove Virus Protector / Vaccine',
+      'The boot sector contains a known virus protector or vaccine.' + sLineBreak +
+      'Disinfecting will remove this protection and reset Sector 0 to a standard non-executable boot block.' + sLineBreak + sLineBreak +
+      'A backup (' + ExtractFileName(TargetDisk) + '.bak) will be created.' + sLineBreak +
+      'Are you sure you want to proceed?',
+      mtConfirmation, [mbYes, mbNo], 0) <> mrYes then Exit;
+  end
+  else if HasUnrecBoot then
   begin
     if MessageDlg('Custom Bootloader Warning',
       'Caution: The boot sector contains an unrecognized custom executable loader.' + sLineBreak +
       'This is often a legitimate custom loader for Atari games and demos.' + sLineBreak +
       'Disinfecting will disable the boot code and may prevent the disk from booting!' + sLineBreak + sLineBreak +
-      'A backup (' + ExtractFileName(FCurrentDiskPath) + '.bak) will be created.' + sLineBreak +
+      'A backup (' + ExtractFileName(TargetDisk) + '.bak) will be created.' + sLineBreak +
       'Are you sure you want to proceed?',
       mtWarning, [mbYes, mbNo], 0) <> mrYes then Exit;
   end
@@ -1246,23 +2292,30 @@ begin
   begin
     if MessageDlg('Disinfect Boot Sector',
       'Are you sure you want to disinfect the boot sector?' + sLineBreak +
-      'A backup (' + ExtractFileName(FCurrentDiskPath) + '.bak) will be created.' + sLineBreak +
+      'A backup (' + ExtractFileName(TargetDisk) + '.bak) will be created.' + sLineBreak +
       'The BPB geometry will be kept intact, execution vectors demoted, and checksum cleared.',
       mtConfirmation, [mbYes, mbNo], 0) <> mrYes then Exit;
   end;
 
-  BakPath := FCurrentDiskPath + '.bak';
-  CopyFile(FCurrentDiskPath, BakPath);
+  BakPath := TargetDisk + '.bak';
+  CopyFile(TargetDisk, BakPath);
 
-  if DisinfectBootSector(FCurrentDiskPath) then
+  if DisinfectBootSector(TargetDisk) then
   begin
-    for I := 0 to High(FSummary.Threats) do
+    if TargetIdx >= 0 then
     begin
-      if FSummary.Threats[I].TargetType = vtBootSector then
-        FSummary.Threats[I].Disinfected := True;
+      FSummary.Threats[TargetIdx].Disinfected := True;
+    end
+    else
+    begin
+      for I := 0 to High(FSummary.Threats) do
+      begin
+        if (FSummary.Threats[I].TargetType = vtBootSector) or (FSummary.Threats[I].TargetType = vtProtector) then
+          FSummary.Threats[I].Disinfected := True;
+      end;
+      FSummary.BootChecksum := 0;
+      FSummary.BootIsExecutable := False;
     end;
-    FSummary.BootChecksum := 0;
-    FSummary.BootIsExecutable := False;
     PopulateThreatsList;
     UpdateUI;
     ShowMessage('Boot Sector successfully disinfected! The disk is now safe and non-executable.' + sLineBreak +
@@ -1282,10 +2335,23 @@ begin
   if (FCurrentDiskPath = '') or not FileExists(FCurrentDiskPath) then Exit;
 
   HasUnrecBoot := False;
+  CleanedCount := 0;
   for I := 0 to High(FSummary.Threats) do
-    if (FSummary.Threats[I].TargetType = vtBootSector) and
-       (Pos('Unrecognized Executable', FSummary.Threats[I].Name) > 0) then
-      HasUnrecBoot := True;
+  begin
+    if not FSummary.Threats[I].Disinfected and (FSummary.Threats[I].TargetType <> vtProtector) then
+    begin
+      Inc(CleanedCount);
+      if (FSummary.Threats[I].TargetType = vtBootSector) and
+         (Pos('Unrecognized Executable', FSummary.Threats[I].Name) > 0) then
+        HasUnrecBoot := True;
+    end;
+  end;
+
+  if CleanedCount = 0 then
+  begin
+    ShowMessage('No active threats to disinfect (boot protectors and vaccines are already safe).');
+    Exit;
+  end;
 
   if HasUnrecBoot then
   begin
@@ -1303,7 +2369,7 @@ begin
       Format('Disinfect %d detected threat(s)?' + sLineBreak +
         'A backup (' + ExtractFileName(FCurrentDiskPath) + '.bak) will be created.' + sLineBreak +
         'Boot sector threats will be safely cleared and infected files will be removed.',
-        [Length(FSummary.Threats)]),
+        [CleanedCount]),
       mtConfirmation, [mbYes, mbNo], 0) <> mrYes then Exit;
   end;
 
@@ -1313,7 +2379,7 @@ begin
   CleanedCount := 0;
   for I := 0 to High(FSummary.Threats) do
   begin
-    if FSummary.Threats[I].TargetType = vtBootSector then
+    if (FSummary.Threats[I].TargetType = vtBootSector) and (FSummary.Threats[I].TargetType <> vtProtector) then
     begin
       if DisinfectBootSector(FCurrentDiskPath) then
       begin
@@ -1345,53 +2411,156 @@ var
   FS: TFileStream;
   Buf: TBytes;
   Clust: Word;
-  SizeToRead: Int64;
+  ImagePath, TempDir, ExtractedFile, TempST: string;
+  UnZip: TUnZipper;
+  NeedCleanupImage, NeedCleanupDir: Boolean;
 begin
   if ListViewThreats.Selected = nil then Exit;
   Idx := ListViewThreats.Selected.Index;
   if (Idx < 0) or (Idx > High(FSummary.Threats)) then Exit;
 
-  if FSummary.Threats[Idx].TargetType = vtBootSector then
+  ImagePath := '';
+  NeedCleanupImage := False;
+  NeedCleanupDir := False;
+  TempDir := '';
+  ExtractedFile := '';
+  TempST := '';
+
+  if FSummary.Threats[Idx].ZipArchivePath <> '' then
   begin
-    // Load Sector 0 into File Viewer
-    if FileExists(FCurrentDiskPath) then
+    // Extract from ZIP archive into temporary directory
+    TempDir := IncludeTrailingPathDelimiter(GetTempDir) + 'st_view_' + FormatDateTime('hhnnsszzz', Now) + PathDelim;
+    ForceDirectories(TempDir);
+    NeedCleanupDir := True;
+    try
+      UnZip := TUnZipper.Create;
+      try
+        UnZip.FileName := FSummary.Threats[Idx].ZipArchivePath;
+        UnZip.OutputPath := TempDir;
+        UnZip.Flat := True;
+        UnZip.UnZipFile(FSummary.Threats[Idx].ZipEntryName);
+      finally
+        UnZip.Free;
+      end;
+      ExtractedFile := TempDir + ExtractFileName(StringReplace(FSummary.Threats[Idx].ZipEntryName, '/', PathDelim, [rfReplaceAll]));
+      if FileExists(ExtractedFile) then
+      begin
+        if SameText(ExtractFileExt(ExtractedFile), '.msa') then
+        begin
+          TempST := ExtractedFile + '.st';
+          if UnpackMSAToST(ExtractedFile, TempST) and FileExists(TempST) then
+            ImagePath := TempST;
+        end
+        else if SameText(ExtractFileExt(ExtractedFile), '.dim') then
+        begin
+          TempST := ExtractedFile + '.st';
+          if UnpackDIMToST(ExtractedFile, TempST) and FileExists(TempST) then
+            ImagePath := TempST;
+        end
+        else
+          ImagePath := ExtractedFile;
+      end;
+    except
+      ImagePath := '';
+    end;
+  end
+  else if FFolderScanMode then
+  begin
+    ImagePath := FSummary.Threats[Idx].ActualImagePath;
+    if (ImagePath <> '') and FileExists(ImagePath) then
     begin
-      FS := TFileStream.Create(FCurrentDiskPath, fmOpenRead or fmShareDenyNone);
+      if SameText(ExtractFileExt(ImagePath), '.msa') then
+      begin
+        TempST := IncludeTrailingPathDelimiter(GetTempDir) + 'st_view_' + FormatDateTime('hhnnsszzz', Now) + '.st';
+        if UnpackMSAToST(ImagePath, TempST) and FileExists(TempST) then
+        begin
+          ImagePath := TempST;
+          NeedCleanupImage := True;
+        end;
+      end
+      else if SameText(ExtractFileExt(ImagePath), '.dim') then
+      begin
+        TempST := IncludeTrailingPathDelimiter(GetTempDir) + 'st_view_' + FormatDateTime('hhnnsszzz', Now) + '.st';
+        if UnpackDIMToST(ImagePath, TempST) and FileExists(TempST) then
+        begin
+          ImagePath := TempST;
+          NeedCleanupImage := True;
+        end;
+      end;
+    end;
+  end
+  else
+  begin
+    ImagePath := FCurrentDiskPath;
+  end;
+
+  try
+    if (ImagePath = '') or not FileExists(ImagePath) then
+    begin
+      ShowMessage('Hex inspection could not access the underlying disk image file.');
+      Exit;
+    end;
+
+    if (FSummary.Threats[Idx].TargetType = vtBootSector) or (FSummary.Threats[Idx].TargetType = vtProtector) then
+    begin
+      FS := TFileStream.Create(ImagePath, fmOpenRead or fmShareDenyNone);
       try
         SetLength(Buf, 512);
         FS.Position := 0;
         FS.ReadBuffer(Buf[0], 512);
-        FormFileViewer.LoadFromBuffer(Buf, 'BOOT_SECTOR_0.BIN', 0);
+        FormFileViewer.LoadFromBuffer(Buf, 'BOOT_SECTOR_0.BIN [' + FSummary.Threats[Idx].SourceFile + ']', 0);
         FormFileViewer.Show;
         FormFileViewer.BringToFront;
       finally
         FS.Free;
       end;
-    end;
-  end
-  else if FSummary.Threats[Idx].TargetType = vtFile then
-  begin
-    // Open the infected file in File Viewer
-    Clust := FSummary.Threats[Idx].Cluster;
-    SizeToRead := FSummary.Threats[Idx].FileSize;
-    if (Clust >= 2) and FileExists(FCurrentDiskPath) then
+    end
+    else if FSummary.Threats[Idx].TargetType = vtFile then
     begin
-      // Let FileViewer load or extract
-      FormFileViewer.LoadFromHostFile(FCurrentDiskPath, FSummary.Threats[Idx].Target, Clust);
-      FormFileViewer.Show;
-      FormFileViewer.BringToFront;
+      Clust := FSummary.Threats[Idx].Cluster;
+      if (Clust >= 2) then
+      begin
+        FormFileViewer.LoadFromHostFile(ImagePath, FSummary.Threats[Idx].Target, Clust);
+        FormFileViewer.Show;
+        FormFileViewer.BringToFront;
+      end;
+    end;
+  finally
+    if NeedCleanupImage and (ImagePath <> '') and FileExists(ImagePath) then
+      SysUtils.DeleteFile(ImagePath);
+    if NeedCleanupDir and (TempDir <> '') and DirectoryExists(TempDir) then
+    begin
+      if (ExtractedFile <> '') and FileExists(ExtractedFile) then
+        SysUtils.DeleteFile(ExtractedFile);
+      if (TempST <> '') and FileExists(TempST) then
+        SysUtils.DeleteFile(TempST);
+      RemoveDir(TempDir);
     end;
   end;
 end;
 
 procedure TFormVirusScanner.ButtonCloseClick(Sender: TObject);
 begin
+  FCancelScan := True;
   Close;
 end;
 
 procedure TFormVirusScanner.ListViewThreatsSelectItem(Sender: TObject; Item: TListItem; Selected: Boolean);
+var
+  Idx: Integer;
 begin
   ButtonInspectHex.Enabled := Selected and (Item <> nil);
+  if FFolderScanMode and Selected and (Item <> nil) then
+  begin
+    Idx := Item.Index;
+    if (Idx >= 0) and (Idx <= High(FSummary.Threats)) then
+    begin
+      ButtonDisinfectBoot.Enabled := (FSummary.Threats[Idx].TargetType in [vtBootSector, vtProtector]) and
+                                     (FSummary.Threats[Idx].ActualImagePath <> '') and
+                                     FileExists(FSummary.Threats[Idx].ActualImagePath) and
+                                     SameText(ExtractFileExt(FSummary.Threats[Idx].ActualImagePath), '.st');
+    end;
+  end;
 end;
 
 end.

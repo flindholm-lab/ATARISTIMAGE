@@ -4257,13 +4257,28 @@ begin
   // Real-time Anti-Virus Boot Sector check
   if QuickCheckBootSector(FImagePath, VirusThreatName, IsBootExec) then
   begin
-    if MessageDlg('Atari ST Anti-Virus Guard',
-      Format('WARNING: Virus threat detected in Boot Sector: %s!' + sLineBreak + sLineBreak +
-             'Would you like to open the Anti-Virus Scanner now to inspect and disinfect the disk?',
-             [VirusThreatName]),
-      mtWarning, [mbYes, mbNo], 0) = mrYes then
+    if Pos('unrecognized', LowerCase(VirusThreatName)) > 0 then
     begin
-      FormVirusScanner.OpenForDisk(FImagePath, True);
+      if MessageDlg('Atari ST Anti-Virus Guard',
+        Format('CAUTION: Potential virus threat detected in Boot Sector: %s!' + sLineBreak + sLineBreak +
+               'This is often a legitimate custom loader for Atari games and demos.' + sLineBreak +
+               'Would you like to open the Anti-Virus Scanner now to inspect the disk?',
+               [VirusThreatName]),
+        mtWarning, [mbYes, mbNo], 0) = mrYes then
+      begin
+        FormVirusScanner.OpenForDisk(FImagePath, True);
+      end;
+    end
+    else
+    begin
+      if MessageDlg('Atari ST Anti-Virus Guard',
+        Format('WARNING: Virus threat detected in Boot Sector: %s!' + sLineBreak + sLineBreak +
+               'Would you like to open the Anti-Virus Scanner now to inspect and disinfect the disk?',
+               [VirusThreatName]),
+        mtWarning, [mbYes, mbNo], 0) = mrYes then
+      begin
+        FormVirusScanner.OpenForDisk(FImagePath, True);
+      end;
     end;
   end;
 
@@ -5149,12 +5164,10 @@ end;
  ------------------------------------------------------------------}
 procedure TForm1.MenuItemVirusScannerClick(Sender: TObject);
 begin
-  if (FImagePath = '') or not FileExists(FImagePath) then
-  begin
-    ShowMessage('Please open an Atari ST disk image first.');
-    Exit;
-  end;
-  FormVirusScanner.OpenForDisk(FImagePath, True);
+  if (FImagePath <> '') and FileExists(FImagePath) then
+    FormVirusScanner.OpenForDisk(FImagePath, True)
+  else
+    FormVirusScanner.OpenForDisk('', False);
 end;
 
 {------------------------------------------------------------------

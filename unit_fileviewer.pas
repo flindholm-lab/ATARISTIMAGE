@@ -500,8 +500,17 @@ begin
       BootState := 'Non-executable (Standard Data Disk)';
 
     if ScanBootSector(@FData[0], 512, ThreatRes) then
-      ThreatLine := Format('Threat Status:    *** VIRUS DETECTED: %s ***' + sLineBreak +
-                           'Description:      %s' + sLineBreak, [ThreatRes.Name, ThreatRes.Description])
+    begin
+      if ThreatRes.TargetType = vtProtector then
+        ThreatLine := Format('Protection Status: [PROTECTOR / VACCINE] %s' + sLineBreak +
+                             'Description:       %s' + sLineBreak, [ThreatRes.Name, ThreatRes.Description])
+      else if Pos('unrecognized', LowerCase(ThreatRes.Name)) > 0 then
+        ThreatLine := Format('Threat Status:    *** POTENTIAL VIRUS DETECTED: %s ***' + sLineBreak +
+                             'Description:      %s' + sLineBreak, [ThreatRes.Name, ThreatRes.Description])
+      else
+        ThreatLine := Format('Threat Status:    *** VIRUS DETECTED: %s ***' + sLineBreak +
+                             'Description:      %s' + sLineBreak, [ThreatRes.Name, ThreatRes.Description]);
+    end
     else
       ThreatLine := 'Threat Status:    Clean (No known virus signatures detected)' + sLineBreak;
 
