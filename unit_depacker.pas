@@ -1271,173 +1271,34 @@ begin
 end;
 
 type
-  TRNCHuffTree = record
-    Lengths: array of Byte;
-    Codes: array of Word;
-    MaxLen: Integer;
-    NumSymbols: Integer;
+  TRNCHufEntry = record
+    Depth: Byte;
+    Code: Word;
   end;
+  TRNCHufTable = array[0..15] of TRNCHufEntry;
 
-function DecompressRNCMethod1(const Data: PByte; InSize: Integer; OutSize: Integer; out OutBuf: TBytes): Boolean;
-var
-  OutPos, InPos, BitBuf, BitsLeft: Integer;
-
-  function GetBit: Byte;
-  begin
-    if BitsLeft = 0 then
-    begin
-      if InPos + 1 >= InSize then Exit(0);
-      BitBuf := Data[InPos] or (Word(Data[InPos + 1]) shl 8);
-      Inc(InPos, 2);
-      BitsLeft := 16;
-    end;
-    Result := BitBuf and 1;
-    BitBuf := BitBuf shr 1;
-    Dec(BitsLeft);
-  end;
-
-  function GetBits(N: Integer): LongWord;
-  var
-    I: Integer;
-  begin
-    Result := 0;
-    for I := 1 to N do
-      Result := (Result shl 1) or GetBit;
-  end;
-
-  function BuildHuff(NumSymbols: Integer): TRNCHuffTree;
-  var
-    Idx, Len, Count, Extra, I, Bits, Code: Integer;
-    BLCount: array[0..32] of Word;
-    NextCode: array[0..32] of Word;
-  begin
-    Result.NumSymbols := NumSymbols;
-    SetLength(Result.Lengths, NumSymbols);
-    SetLength(Result.Codes, NumSymbols);
-    Idx := 0;
-    while Idx < NumSymbols do
-    begin
-      Len := 0;
-      while (GetBit = 0) and (Len < 32) and (InPos <= InSize + 2) do Inc(Len);
-      Inc(Len);
-      if Len > 32 then Len := 32;
-      Count := GetBits(4);
-      if Count = 15 then
-      repeat
-        Extra := GetBits(4);
-        Inc(Count, Extra);
-      until (Extra <> 15) or (InPos > InSize + 2);
-      Inc(Count);
-      for I := 1 to Count do
-      begin
-        if Idx < NumSymbols then
-        begin
-          Result.Lengths[Idx] := Len;
-          Inc(Idx);
-        end;
-      end;
-    end;
-
-    Result.MaxLen := 1;
-    for I := 0 to NumSymbols - 1 do
-    begin
-      if Result.Lengths[I] > 32 then Result.Lengths[I] := 32;
-      if Result.Lengths[I] > Result.MaxLen then Result.MaxLen := Result.Lengths[I];
-    end;
-    if Result.MaxLen > 32 then Result.MaxLen := 32;
-
-    FillChar(BLCount, SizeOf(BLCount), 0);
-    for I := 0 to NumSymbols - 1 do
-      if (Result.Lengths[I] > 0) and (Result.Lengths[I] <= 32) then
-        Inc(BLCount[Result.Lengths[I]]);
-
-    Code := 0;
-    BLCount[0] := 0;
-    FillChar(NextCode, SizeOf(NextCode), 0);
-    for Bits := 1 to Result.MaxLen do
-    begin
-      Code := (Code + BLCount[Bits - 1]) shl 1;
-      NextCode[Bits] := Code;
-    end;
-
-    for I := 0 to NumSymbols - 1 do
-    begin
-      Len := Result.Lengths[I];
-      if Len > 0 then
-      begin
-        Result.Codes[I] := NextCode[Len];
-        Inc(NextCode[Len]);
-      end;
-    end;
-  end;
-
-  function DecodeSymbol(const Tree: TRNCHuffTree): Integer;
-  var
-    Code, Len, I: Integer;
-  begin
-    Result := 0;
-    Code := 0;
-    for Len := 1 to Tree.MaxLen do
-    begin
-      Code := (Code shl 1) or GetBit;
-      for I := 0 to Tree.NumSymbols - 1 do
-      begin
-        if (Tree.Lengths[I] = Len) and (Tree.Codes[I] = Code) then
-        begin
-          if I < 2 then Exit(I);
-          Exit(GetBits(I - 1) or (1 shl (I - 1)));
-        end;
-      end;
-    end;
-  end;
-
-var
-  RawTree, LenTree, PosTree: TRNCHuffTree;
-  Subchunks, RawLen, OffsetVal, LengthVal, I: Integer;
+function Ror16(Key: Word): Word; inline;
 begin
-  Result := False;
-  SetLength(OutBuf, OutSize);
-  OutPos := 0;
-  InPos := 18;
-  BitBuf := 0;
-  BitsLeft := 0;
+  if (Key and 1) <> 0 then
+    Result := $8000 or (Key shr 1)
+  else
+    Result := Key shr 1;
+end;
 
-  try
-    while (OutPos < OutSize) and (InPos < InSize) do
-    begin
-      RawTree := BuildHuff(16);
-      LenTree := BuildHuff(64);
-      PosTree := BuildHuff(64);
-      Subchunks := GetBits(16);
-
-      while (Subchunks > 0) and (OutPos < OutSize) do
-      begin
-        Dec(Subchunks);
-        RawLen := DecodeSymbol(RawTree);
-        while (RawLen > 0) and (OutPos < OutSize) and (InPos < InSize) do
-        begin
-          OutBuf[OutPos] := Data[InPos];
-          Inc(OutPos);
-          Inc(InPos);
-          Dec(RawLen);
-        end;
-        if (Subchunks > 0) and (OutPos < OutSize) then
-        begin
-          OffsetVal := DecodeSymbol(LenTree) + 1;
-          LengthVal := DecodeSymbol(PosTree) + 2;
-          for I := 1 to LengthVal do
-          begin
-            if (OutPos >= OutSize) or (OutPos - OffsetVal < 0) then Break;
-            OutBuf[OutPos] := OutBuf[OutPos - OffsetVal];
-            Inc(OutPos);
-          end;
-        end;
-      end;
-    end;
-    Result := (OutPos = OutSize) and (OutSize > 0);
-  except
-    Result := False;
+function InverseBits(Value: LongWord; Count: Integer): Word; inline;
+var
+  Res: Word;
+  I: Integer;
+begin
+  Res := 0;
+  for I := 1 to Count do
+  begin
+    Res := Res shl 1;
+    if (Value and 1) <> 0 then
+      Res := Res or 1;
+    Value := Value shr 1;
   end;
+  Result := Res;
 end;
 
 function CalculateRNCCRC16(const Buffer: PByte; ALength: Integer): Word;
@@ -1460,6 +1321,259 @@ begin
     end;
   end;
   Result := CRC;
+end;
+
+function ExecuteRNC1Unpack(const Data: PByte; InSize: Integer; OutSize: Integer; AKey: Word; out OutBuf: TBytes): Boolean;
+var
+  InPos, InEnd, OutPos, Processed, LoopGuard: Integer;
+  BitBuf: LongWord;
+  BitCount: Integer;
+  CurKey, InitialKey: Word;
+  RawTable, LenTable, PosTable: TRNCHufTable;
+  Subchunks, SC, DataLen, MatchOffset, MatchCount, I: Integer;
+  Hi, Mid, Lo: Byte;
+  B: Byte;
+
+  function Peek(Offset: Integer): Byte; inline;
+  var
+    Idx: Integer;
+  begin
+    Idx := InPos + Offset;
+    if (Idx >= 0) and (Idx < InEnd) then
+      Result := Data[Idx]
+    else
+      Result := 0;
+  end;
+
+  function ReadByte: Byte; inline;
+  begin
+    if InPos < InEnd then
+    begin
+      Result := Data[InPos];
+      Inc(InPos);
+    end
+    else
+    begin
+      Inc(InPos); // Always advance to guarantee forward progress and avoid EOF hang
+      Result := 0;
+    end;
+  end;
+
+  function ReadM1TokenByte: Byte; inline;
+  begin
+    Result := Peek(0);
+    Inc(InPos); // Always advance to guarantee forward progress and avoid EOF hang
+  end;
+
+  function ReadBitsM1(Count: Integer): LongWord;
+  var
+    Bits, PrevBits: LongWord;
+    B1, B2, LoByte, HiByte: Byte;
+    I: Integer;
+  begin
+    Bits := 0;
+    PrevBits := 1;
+    for I := 1 to Count do
+    begin
+      if BitCount = 0 then
+      begin
+        B1 := ReadM1TokenByte;
+        B2 := ReadM1TokenByte;
+        LoByte := Peek(0);
+        HiByte := Peek(1);
+        BitBuf := (LongWord(HiByte) shl 24) or (LongWord(LoByte) shl 16) or (LongWord(B2) shl 8) or LongWord(B1);
+        BitCount := 16;
+      end;
+
+      if (BitBuf and 1) <> 0 then
+        Bits := Bits or PrevBits;
+
+      BitBuf := BitBuf shr 1;
+      PrevBits := PrevBits shl 1;
+      Dec(BitCount);
+    end;
+    Result := Bits;
+  end;
+
+  procedure MakeHufTable(out Table: TRNCHufTable);
+  var
+    LeafNodes, I, BitsCount: Integer;
+    BitDepths: array[0..15] of Byte;
+    Val, DivVal: LongWord;
+  begin
+    FillChar(Table, SizeOf(Table), 0);
+    FillChar(BitDepths, SizeOf(BitDepths), 0);
+    LeafNodes := ReadBitsM1(5);
+    if LeafNodes = 0 then Exit;
+    if LeafNodes > 16 then LeafNodes := 16;
+
+    for I := 0 to LeafNodes - 1 do
+      BitDepths[I] := ReadBitsM1(4);
+
+    Val := 0;
+    DivVal := $80000000;
+    for BitsCount := 1 to 16 do
+    begin
+      for I := 0 to LeafNodes - 1 do
+      begin
+        if BitDepths[I] = BitsCount then
+        begin
+          Table[I].Depth := BitsCount;
+          Table[I].Code := InverseBits(Val div DivVal, BitsCount);
+          Inc(Val, DivVal);
+        end;
+      end;
+      DivVal := DivVal shr 1;
+    end;
+  end;
+
+  function DecodeTableData(const Table: TRNCHufTable; out DecVal: Integer): Boolean;
+  var
+    I: Integer;
+    Mask: LongWord;
+  begin
+    for I := 0 to 15 do
+    begin
+      if Table[I].Depth > 0 then
+      begin
+        Mask := (LongWord(1) shl Table[I].Depth) - 1;
+        if Table[I].Code = (BitBuf and Mask) then
+        begin
+          ReadBitsM1(Table[I].Depth);
+          if I < 2 then
+            DecVal := I
+          else
+            DecVal := Integer(ReadBitsM1(I - 1)) or (1 shl (I - 1));
+          Exit(True);
+        end;
+      end;
+    end;
+    DecVal := 0;
+    Result := False; // EOF or invalid symbol
+  end;
+
+begin
+  Result := False;
+  SetLength(OutBuf, OutSize);
+  OutPos := 0;
+  Processed := 0;
+  InPos := 18; // Skip 18-byte RNC header
+  InEnd := InSize;
+  BitBuf := 0;
+  BitCount := 0;
+  InitialKey := AKey;
+  CurKey := AKey;
+  LoopGuard := 0;
+
+  // Skip 2 bits (bit 0 = lock flag, bit 1 = encryption flag)
+  ReadBitsM1(2);
+
+  while (Processed < OutSize) and (InPos < InEnd + 16) do
+  begin
+    Inc(LoopGuard);
+    if LoopGuard > 20000 then Break;
+
+    CurKey := InitialKey;
+    MakeHufTable(RawTable);
+    MakeHufTable(LenTable);
+    MakeHufTable(PosTable);
+
+    Subchunks := ReadBitsM1(16);
+    if Subchunks <= 0 then Break;
+
+    for SC := 0 to Subchunks - 1 do
+    begin
+      if not DecodeTableData(RawTable, DataLen) then Exit(False);
+      Inc(Processed, DataLen);
+
+      if DataLen > 0 then
+      begin
+        for I := 1 to DataLen do
+        begin
+          B := ReadByte;
+          if OutPos < OutSize then
+          begin
+            OutBuf[OutPos] := (CurKey xor B) and $FF;
+            Inc(OutPos);
+          end;
+        end;
+
+        CurKey := Ror16(CurKey);
+
+        // Reload lookahead into bit buffer after reading raw literal bytes
+        Hi := Peek(2);
+        Mid := Peek(1);
+        Lo := Peek(0);
+        BitBuf := (((LongWord(Hi) shl 16) or (LongWord(Mid) shl 8) or LongWord(Lo)) shl BitCount) or
+                  (BitBuf and ((LongWord(1) shl BitCount) - 1));
+      end;
+
+      if SC < Subchunks - 1 then
+      begin
+        if not DecodeTableData(LenTable, MatchOffset) then Exit(False);
+        Inc(MatchOffset, 1);
+
+        if not DecodeTableData(PosTable, MatchCount) then Exit(False);
+        Inc(MatchCount, 2);
+
+        Inc(Processed, MatchCount);
+
+        for I := 1 to MatchCount do
+        begin
+          if (OutPos < OutSize) and (OutPos - MatchOffset >= 0) then
+          begin
+            OutBuf[OutPos] := OutBuf[OutPos - MatchOffset];
+            Inc(OutPos);
+          end
+          else
+            Break;
+        end;
+      end;
+
+      if Processed >= OutSize then Break;
+    end;
+  end;
+
+  Result := (OutPos = OutSize);
+end;
+
+function DecompressRNCMethod1(const Data: PByte; InSize: Integer; OutSize: Integer; out OutBuf: TBytes): Boolean;
+var
+  ExpectedCRC: Word;
+  EncFlag: Byte;
+begin
+  Result := False;
+  SetLength(OutBuf, 0);
+  if (Data = nil) or (InSize < 18) or (OutSize <= 0) then Exit(False);
+
+  ExpectedCRC := (Word(Data[12]) shl 8) or Data[13];
+  EncFlag := (Data[18] shr 1) and 1; // Bit 1 of byte 18
+
+  // If encryption flag is set, try standard Atari ST key $04D2 (1234) first
+  if EncFlag <> 0 then
+  begin
+    if ExecuteRNC1Unpack(Data, InSize, OutSize, $04D2, OutBuf) then
+    begin
+      if (ExpectedCRC = 0) or (CalculateRNCCRC16(@OutBuf[0], OutSize) = ExpectedCRC) then
+        Exit(True);
+    end;
+  end;
+
+  // Try unencrypted / key 0
+  if ExecuteRNC1Unpack(Data, InSize, OutSize, 0, OutBuf) then
+  begin
+    if (ExpectedCRC = 0) or (CalculateRNCCRC16(@OutBuf[0], OutSize) = ExpectedCRC) then
+      Exit(True);
+  end;
+
+  // Fallback: If enc flag is set, try $04D2 even if CRC didn't match exactly
+  if EncFlag <> 0 then
+  begin
+    if ExecuteRNC1Unpack(Data, InSize, OutSize, $04D2, OutBuf) then
+      Exit(True);
+  end;
+
+  Result := (Length(OutBuf) = OutSize) and (OutSize > 0);
 end;
 
 function DecompressRNC(const InBuf: PByte; InSize: Integer; out OutBuf: TBytes): Boolean;
@@ -2803,61 +2917,109 @@ begin
   SetLength(FallbackBuf, 0);
   if (InBuf = nil) or (InSize < 12) then Exit;
 
-  // Gather candidate stream end positions
-  SetLength(Candidates, 0);
-  if (InSize >= 28) and (InBuf[0] = $60) and (InBuf[1] in [$1A, $1C, $00]) then
-  begin
-    TextSize := ReadBE32(InBuf, 2);
-    DataSize := ReadBE32(InBuf, 6);
-    SymSize  := ReadBE32(InBuf, 14);
-    End1 := 28 + TextSize + DataSize;
-    End2 := 28 + TextSize + DataSize + SymSize;
-    if (End1 > 28) and (End1 <= InSize) then
+  try
+    // Gather candidate stream end positions
+    SetLength(Candidates, 0);
+    if (InSize >= 28) and (InBuf[0] = $60) and (InBuf[1] in [$1A, $1C, $00]) then
     begin
-      SetLength(Candidates, Length(Candidates) + 1);
-      Candidates[High(Candidates)] := End1;
-    end;
-    if (End2 > 28) and (End2 <= InSize) and (End2 <> End1) then
-    begin
-      SetLength(Candidates, Length(Candidates) + 1);
-      Candidates[High(Candidates)] := End2;
-    end;
-  end;
-  SetLength(Candidates, Length(Candidates) + 1);
-  Candidates[High(Candidates)] := InSize;
-
-  for CandIdx := 0 to High(Candidates) do
-  begin
-    ActualEnd := Candidates[CandIdx];
-    if ActualEnd < 8 then Continue;
-
-    OffsetVal := ActualEnd - 4;
-    XorKey := ReadBE32(InBuf, OffsetVal);
-    D0Val := 0;
-
-    MaxBufSize := 4 * 1024 * 1024;
-    SetLength(TempBuf, MaxBufSize);
-    OutPtr := MaxBufSize;
-
-    try
-      while OutPtr > 0 do
+      TextSize := ReadBE32(InBuf, 2);
+      DataSize := ReadBE32(InBuf, 6);
+      SymSize  := ReadBE32(InBuf, 14);
+      if (TextSize < 16777216) and (DataSize < 16777216) and (SymSize < 16777216) then
       begin
-        if GetBit = 0 then
+        End1 := 28 + Integer(TextSize) + Integer(DataSize);
+        End2 := 28 + Integer(TextSize) + Integer(DataSize) + Integer(SymSize);
+        if (End1 > 28) and (End1 <= InSize) then
+        begin
+          SetLength(Candidates, Length(Candidates) + 1);
+          Candidates[High(Candidates)] := End1;
+        end;
+        if (End2 > 28) and (End2 <= InSize) and (End2 <> End1) then
+        begin
+          SetLength(Candidates, Length(Candidates) + 1);
+          Candidates[High(Candidates)] := End2;
+        end;
+      end;
+    end;
+    SetLength(Candidates, Length(Candidates) + 1);
+    Candidates[High(Candidates)] := InSize;
+
+    for CandIdx := 0 to High(Candidates) do
+    begin
+      ActualEnd := Candidates[CandIdx];
+      if ActualEnd < 8 then Continue;
+
+      OffsetVal := ActualEnd - 4;
+      XorKey := ReadBE32(InBuf, OffsetVal);
+      D0Val := 0;
+
+      MaxBufSize := 4 * 1024 * 1024;
+      SetLength(TempBuf, MaxBufSize);
+      OutPtr := MaxBufSize;
+
+      try
+        while OutPtr > 0 do
         begin
           if GetBit = 0 then
           begin
-            CountVal := GetBits(3) + 1;
-            for I := 1 to CountVal do
+            if GetBit = 0 then
             begin
-              Dec(OutPtr);
-              if OutPtr >= 0 then TempBuf[OutPtr] := GetBits(8);
+              CountVal := GetBits(3) + 1;
+              for I := 1 to CountVal do
+              begin
+                Dec(OutPtr);
+                if OutPtr >= 0 then TempBuf[OutPtr] := GetBits(8);
+              end;
+            end
+            else
+            begin
+              OffVal := GetBits(8);
+              SrcVal := OutPtr + OffVal;
+              for I := 1 to 2 do
+              begin
+                Dec(OutPtr);
+                Dec(SrcVal);
+                if (OutPtr >= 0) and (SrcVal >= 0) and (SrcVal < MaxBufSize) then
+                  TempBuf[OutPtr] := TempBuf[SrcVal]
+                else
+                  TempBuf[OutPtr] := 0;
+              end;
             end;
           end
           else
           begin
-            OffVal := GetBits(8);
+            CmdVal := GetBits(2);
+            CountVal := 0;
+            OffVal := 0;
+
+            if CmdVal = 0 then
+            begin
+              OffVal := GetBits(9);
+              CountVal := 3;
+            end
+            else if CmdVal = 1 then
+            begin
+              OffVal := GetBits(10);
+              CountVal := 4;
+            end
+            else if CmdVal = 2 then
+            begin
+              CountVal := GetBits(8) + 1;
+              OffVal := GetBits(12);
+            end
+            else if CmdVal = 3 then
+            begin
+              CountVal := GetBits(8) + 9;
+              for I := 1 to CountVal do
+              begin
+                Dec(OutPtr);
+                if OutPtr >= 0 then TempBuf[OutPtr] := GetBits(8);
+              end;
+              Continue;
+            end;
+
             SrcVal := OutPtr + OffVal;
-            for I := 1 to 2 do
+            for I := 1 to CountVal do
             begin
               Dec(OutPtr);
               Dec(SrcVal);
@@ -2867,114 +3029,77 @@ begin
                 TempBuf[OutPtr] := 0;
             end;
           end;
-        end
-        else
-        begin
-          CmdVal := GetBits(2);
-          CountVal := 0;
-          OffVal := 0;
-
-          if CmdVal = 0 then
-          begin
-            OffVal := GetBits(9);
-            CountVal := 3;
-          end
-          else if CmdVal = 1 then
-          begin
-            OffVal := GetBits(10);
-            CountVal := 4;
-          end
-          else if CmdVal = 2 then
-          begin
-            CountVal := GetBits(8) + 1;
-            OffVal := GetBits(12);
-          end
-          else if CmdVal = 3 then
-          begin
-            CountVal := GetBits(8) + 9;
-            for I := 1 to CountVal do
-            begin
-              Dec(OutPtr);
-              if OutPtr >= 0 then TempBuf[OutPtr] := GetBits(8);
-            end;
-            Continue;
-          end;
-
-          SrcVal := OutPtr + OffVal;
-          for I := 1 to CountVal do
-          begin
-            Dec(OutPtr);
-            Dec(SrcVal);
-            if (OutPtr >= 0) and (SrcVal >= 0) and (SrcVal < MaxBufSize) then
-              TempBuf[OutPtr] := TempBuf[SrcVal]
-            else
-              TempBuf[OutPtr] := 0;
-          end;
         end;
+      except
+        // Graceful exit upon hitting end of compressed bitstream
       end;
-    except
-      // Graceful exit upon hitting end of compressed bitstream
-    end;
 
-    if OutPtr < MaxBufSize then
-    begin
-      ResultLen := MaxBufSize - OutPtr;
-      SetLength(RawSlice, ResultLen);
-      Move(TempBuf[OutPtr], RawSlice[0], ResultLen);
-
-      // Scan for embedded GEMDOS/TOS executable header ($601A)
-      PrgStart := -1;
-      TotalWithReloc := 0;
-      for I := 0 to ResultLen - 28 do
+      if OutPtr < MaxBufSize then
       begin
-        if (RawSlice[I] = $60) and (RawSlice[I+1] = $1A) then
+        ResultLen := MaxBufSize - OutPtr;
+        SetLength(RawSlice, ResultLen);
+        Move(TempBuf[OutPtr], RawSlice[0], ResultLen);
+
+        // Scan for embedded GEMDOS/TOS executable header ($601A)
+        PrgStart := -1;
+        TotalWithReloc := 0;
+        for I := 0 to ResultLen - 28 do
         begin
-          TextLen := ReadBE32(@RawSlice[I], 2);
-          DataLen := ReadBE32(@RawSlice[I], 6);
-          SymLen  := ReadBE32(@RawSlice[I], 14);
-          TotalExp := 28 + TextLen + DataLen + SymLen;
-          if (TotalExp > 0) and (TotalExp <= LongWord(ResultLen - I + 512)) then
+          if (RawSlice[I] = $60) and (RawSlice[I+1] = $1A) then
           begin
-            P := I + TotalExp;
-            TotalWithReloc := Min(LongWord(ResultLen - I), TotalExp);
-            if P + 4 <= ResultLen then
+            TextLen := ReadBE32(@RawSlice[I], 2);
+            DataLen := ReadBE32(@RawSlice[I], 6);
+            SymLen  := ReadBE32(@RawSlice[I], 14);
+            if (TextLen < 16777216) and (DataLen < 16777216) and (SymLen < 16777216) then
             begin
-              FirstReloc := ReadBE32(@RawSlice[0], P);
-              if FirstReloc = 0 then
-                Inc(TotalWithReloc, 4)
-              else
+              TotalExp := 28 + TextLen + DataLen + SymLen;
+              if (TotalExp > 0) and (TotalExp <= LongWord(ResultLen - I + 512)) then
               begin
-                RelocBytes := 4;
-                while (P + RelocBytes < ResultLen) and (RawSlice[P + RelocBytes] <> 0) do
-                  Inc(RelocBytes);
-                if P + RelocBytes < ResultLen then Inc(RelocBytes);
-                Inc(TotalWithReloc, RelocBytes);
+                P := I + TotalExp;
+                TotalWithReloc := Min(LongWord(ResultLen - I), TotalExp);
+                if P + 4 <= ResultLen then
+                begin
+                  FirstReloc := ReadBE32(@RawSlice[0], P);
+                  if FirstReloc = 0 then
+                    Inc(TotalWithReloc, 4)
+                  else
+                  begin
+                    RelocBytes := 4;
+                    while (P + RelocBytes < ResultLen) and (RawSlice[P + RelocBytes] <> 0) do
+                      Inc(RelocBytes);
+                    if P + RelocBytes < ResultLen then Inc(RelocBytes);
+                    Inc(TotalWithReloc, RelocBytes);
+                  end;
+                end;
+                TotalWithReloc := Min(LongWord(ResultLen - I), TotalWithReloc);
+                PrgStart := I;
+                Break;
               end;
             end;
-            TotalWithReloc := Min(LongWord(ResultLen - I), TotalWithReloc);
-            PrgStart := I;
-            Break;
           end;
         end;
-      end;
 
-      if PrgStart <> -1 then
-      begin
-        SetLength(OutBuf, TotalWithReloc);
-        Move(RawSlice[PrgStart], OutBuf[0], TotalWithReloc);
-        Exit(True);
-      end
-      else if (ResultLen >= 1024) and (Length(FallbackBuf) = 0) then
-      begin
-        FallbackBuf := RawSlice;
+        if PrgStart <> -1 then
+        begin
+          SetLength(OutBuf, TotalWithReloc);
+          Move(RawSlice[PrgStart], OutBuf[0], TotalWithReloc);
+          Exit(True);
+        end
+        else if (ResultLen >= 1024) and (Length(FallbackBuf) = 0) then
+        begin
+          FallbackBuf := RawSlice;
+        end;
       end;
     end;
-  end;
 
-  if Length(FallbackBuf) > 0 then
-  begin
-    OutBuf := FallbackBuf;
-    Exit(True);
+    if Length(FallbackBuf) > 0 then
+    begin
+      OutBuf := FallbackBuf;
+      Exit(True);
+    end;
+  except
+    SetLength(OutBuf, 0);
+    Result := False;
   end;
 end;
 
@@ -3940,9 +4065,10 @@ begin
   DetectedPacker := 'None';
   if (InBuf = nil) or (InSize < 4) then Exit;
 
-  DetectedPacker := DetectPackerSignature(InBuf, InSize);
+  try
+    DetectedPacker := DetectPackerSignature(InBuf, InSize);
 
-  // 1. Pack-Ice
+    // 1. Pack-Ice
   if Pos('Pack-Ice', DetectedPacker) > 0 then
   begin
     if DecompressPackIce(InBuf, InSize, OutBuf) then Exit(True);
@@ -4106,6 +4232,10 @@ begin
   end;
 
   SetLength(OutBuf, 0);
+  except
+    SetLength(OutBuf, 0);
+    Result := False;
+  end;
 end;
 
 

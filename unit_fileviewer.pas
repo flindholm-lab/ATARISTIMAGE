@@ -504,9 +504,21 @@ begin
       if ThreatRes.TargetType = vtProtector then
         ThreatLine := Format('Protection Status: [PROTECTOR / VACCINE] %s' + sLineBreak +
                              'Description:       %s' + sLineBreak, [ThreatRes.Name, ThreatRes.Description])
+      else if ThreatRes.TargetType = vtCustomBoot then
+        ThreatLine := Format('Bootloader Status: [CUSTOM BOOTLOADER] %s' + sLineBreak +
+                             'Description:       %s' + sLineBreak, [ThreatRes.Name, ThreatRes.Description])
       else if Pos('unrecognized', LowerCase(ThreatRes.Name)) > 0 then
-        ThreatLine := Format('Threat Status:    *** POTENTIAL VIRUS DETECTED: %s ***' + sLineBreak +
+        ThreatLine := Format('Threat Status:    *** POTENTIAL VIRUS DETECTED (YELLOW WARNING): %s ***' + sLineBreak +
                              'Description:      %s' + sLineBreak, [ThreatRes.Name, ThreatRes.Description])
+      else if Pos('suspicious', LowerCase(ThreatRes.Name)) > 0 then
+      begin
+        if HasFloppyWriteRoutine(ThreatRes) then
+          ThreatLine := Format('Threat Status:    *** VIRUS DETECTED (RED ALERT / FLOPPY WRITE): %s ***' + sLineBreak +
+                               'Description:      %s' + sLineBreak, [ThreatRes.Name, ThreatRes.Description])
+        else
+          ThreatLine := Format('Threat Status:    *** SUSPICIOUS BOOT (YELLOW CAUTION / NO WRITE): %s ***' + sLineBreak +
+                               'Description:      %s' + sLineBreak, [ThreatRes.Name, ThreatRes.Description]);
+      end
       else
         ThreatLine := Format('Threat Status:    *** VIRUS DETECTED: %s ***' + sLineBreak +
                              'Description:      %s' + sLineBreak, [ThreatRes.Name, ThreatRes.Description]);

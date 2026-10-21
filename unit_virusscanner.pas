@@ -9,7 +9,7 @@ uses
   StdCtrls, ExtCtrls, Math;
 
 type
-  TVirusTargetType = (vtBootSector, vtFile, vtProtector, vtNone);
+  TVirusTargetType = (vtBootSector, vtFile, vtProtector, vtCustomBoot, vtNone);
 
   TVirusScanResult = record
     VirusFound: Boolean;
@@ -90,6 +90,9 @@ var
 
 // Engine Functions
 function CalculateBootChecksum(const Sector: PByte; Size: Integer = 512): Word;
+function HasFloppyWriteRoutine(const TraitsOrDescription: string): Boolean; overload;
+function HasFloppyWriteRoutine(const Threat: TVirusScanResult): Boolean; overload;
+function AnalyzeBootSectorHeuristics(const SectorBytes: PByte; SectorSize: Integer; out ViralTraits: string): Boolean;
 function ScanBootSector(const SectorBytes: PByte; SectorSize: Integer; out Threat: TVirusScanResult): Boolean;
 function ScanFileBuffer(const Buffer: PByte; BufLen: Integer; const AFileName: string; ACluster: Word; out Threat: TVirusScanResult): Boolean;
 function ScanDiskImage(const AImagePath: string; out Summary: TDiskScanSummary; OnProgress: TScanProgressEvent = nil): Boolean;
@@ -219,6 +222,251 @@ begin
   Result := Word(Sum);
 end;
 
+function HasFloppyWriteRoutine(const TraitsOrDescription: string): Boolean;
+begin
+  Result := (Pos('Floppy Write', TraitsOrDescription) > 0) or
+            (Pos('Rwabs Write', TraitsOrDescription) > 0) or
+            (Pos('Sector Write', TraitsOrDescription) > 0) or
+            (Pos('Floppy Controller Write', TraitsOrDescription) > 0) or
+            (Pos('Protobt', TraitsOrDescription) > 0) or
+            (Pos('floppy write', LowerCase(TraitsOrDescription)) > 0);
+end;
+
+function HasFloppyWriteRoutine(const Threat: TVirusScanResult): Boolean;
+begin
+  Result := HasFloppyWriteRoutine(Threat.Description) or
+            HasFloppyWriteRoutine(Threat.Name);
+end;
+
+function AnalyzeBootSectorHeuristics(const SectorBytes: PByte; SectorSize: Integer; out ViralTraits: string): Boolean;
+var
+  TraitsList: TStringList;
+  I, J, K, LookbackStart: Integer;
+  B0, B1: Byte;
+  W: Word;
+  HasRwabsWrite: Boolean;
+begin
+  Result := False;
+  ViralTraits := '';
+  if (SectorBytes = nil) or (SectorSize < 512) then Exit;
+
+  TraitsList := TStringList.Create;
+  try
+    // 1. Reset vector hooks / magic: $31415926 and $426 / $42A
+    if BufferContainsString(SectorBytes, SectorSize, #$31#$41#$59#$26) then
+      TraitsList.Add('Reset Magic Key ($31415926 resvalid)');
+
+    for I := 2 to SectorSize - 4 do
+    begin
+      W := (Word(SectorBytes[I]) shl 8) or Word(SectorBytes[I + 1]);
+      if (W = $042A) and (I >= 2) then
+      begin
+        B0 := SectorBytes[I - 2];
+        B1 := SectorBytes[I - 1];
+        if ((B0 in [$21, $23, $48, $43]) and ((B1 and $C0) = $C0)) or ((B0 = $04) and (B1 = $78)) then
+        begin
+          if TraitsList.IndexOf('Reset Vector Hook ($42A resvector)') = -1 then
+            TraitsList.Add('Reset Vector Hook ($42A resvector)');
+        end;
+      end
+      else if (W = $0426) and (I >= 2) then
+      begin
+        B0 := SectorBytes[I - 2];
+        B1 := SectorBytes[I - 1];
+        if (B0 in [$21, $23, $48, $43]) and ((B1 and $C0) = $C0) then
+        begin
+          if TraitsList.IndexOf('Reset Valid Hook ($426 resvalid)') = -1 then
+            TraitsList.Add('Reset Valid Hook ($426 resvalid)');
+        end;
+      end;
+    end;
+
+    // 2. System Disk Vectors: hdv_rw ($476), hdv_bpb ($472), hdv_boot ($47A), hdv_mediach ($47E)
+    for I := 2 to SectorSize - 4 do
+    begin
+      W := (Word(SectorBytes[I]) shl 8) or Word(SectorBytes[I + 1]);
+      if (W = $0476) or (W = $0472) or (W = $047A) or (W = $047E) then
+      begin
+        B0 := SectorBytes[I - 2];
+        B1 := SectorBytes[I - 1];
+        if ((B0 in [$20, $22, $24, $26, $28, $2A, $2C, $2E]) and (B1 in [$78, $38, $79, $39])) or
+           ((B0 in [$21, $23, $25, $27, $29, $2B, $2D, $2F]) and ((B1 and $C0) in [$C0, $80])) or
+           ((B0 = $48) and (B1 = $78)) or ((B0 = $41) and (B1 = $F8)) then
+        begin
+          case W of
+            $0476: if TraitsList.IndexOf('Disk R/W Vector Hook ($476 hdv_rw)') = -1 then TraitsList.Add('Disk R/W Vector Hook ($476 hdv_rw)');
+            $0472: if TraitsList.IndexOf('Disk BPB Vector Hook ($472 hdv_bpb)') = -1 then TraitsList.Add('Disk BPB Vector Hook ($472 hdv_bpb)');
+            $047A: if TraitsList.IndexOf('Boot Vector Hook ($47A hdv_boot)') = -1 then TraitsList.Add('Boot Vector Hook ($47A hdv_boot)');
+            $047E: if TraitsList.IndexOf('Media Change Vector Hook ($47E hdv_mediach)') = -1 then TraitsList.Add('Media Change Vector Hook ($47E hdv_mediach)');
+          end;
+        end;
+      end;
+    end;
+
+    // 3. Low OS Trap Vectors: Trap #1 ($84), Trap #13 ($B4), Trap #14 ($B8)
+    for I := 2 to SectorSize - 4 do
+    begin
+      W := (Word(SectorBytes[I]) shl 8) or Word(SectorBytes[I + 1]);
+      if (W = $0084) or (W = $00B4) or (W = $00B8) then
+      begin
+        B0 := SectorBytes[I - 2];
+        B1 := SectorBytes[I - 1];
+        if ((B0 in [$21, $23]) and ((B1 and $C0) = $C0)) or
+           ((B0 in [$20, $22]) and (B1 = $78)) then
+        begin
+          case W of
+            $0084: if TraitsList.IndexOf('GEMDOS Trap Vector Hook ($84 Trap #1)') = -1 then TraitsList.Add('GEMDOS Trap Vector Hook ($84 Trap #1)');
+            $00B4: if TraitsList.IndexOf('BIOS Trap Vector Hook ($B4 Trap #13)') = -1 then TraitsList.Add('BIOS Trap Vector Hook ($B4 Trap #13)');
+            $00B8: if TraitsList.IndexOf('XBIOS Trap Vector Hook ($B8 Trap #14)') = -1 then TraitsList.Add('XBIOS Trap Vector Hook ($B8 Trap #14)');
+          end;
+        end;
+      end;
+    end;
+
+    // 4. Memory Residency: phystop ($42E) and memtop ($436)
+    for I := 2 to SectorSize - 4 do
+    begin
+      W := (Word(SectorBytes[I]) shl 8) or Word(SectorBytes[I + 1]);
+      if (W = $042E) or (W = $0436) then
+      begin
+        B0 := SectorBytes[I - 2];
+        B1 := SectorBytes[I - 1];
+        if ((B0 in [$20, $22, $24, $21, $23, $91, $93, $90, $92, $04, $53, $51]) and (B1 in [$78, $38, $F8, $B8, $C0, $C8])) or
+           ((B0 = $21) and ((B1 and $C0) = $C0)) then
+        begin
+          if W = $042E then
+          begin
+            if TraitsList.IndexOf('RAM Top Manipulation ($42E phystop)') = -1 then
+              TraitsList.Add('RAM Top Manipulation ($42E phystop)');
+          end
+          else
+          begin
+            if TraitsList.IndexOf('User RAM Manipulation ($436 memtop)') = -1 then
+              TraitsList.Add('User RAM Manipulation ($436 memtop)');
+          end;
+        end;
+      end;
+    end;
+
+    // 5. Replication / Sector Write Mechanisms
+    for I := 4 to SectorSize - 2 do
+    begin
+      // Trap #14 ($4E $4E) - Function opcode must be pushed immediately prior to TRAP #14
+      if (SectorBytes[I] = $4E) and (SectorBytes[I + 1] = $4E) then
+      begin
+        // Check if opcode immediately preceding TRAP #14 is #9 (Flopwr)
+        // move.w #9, -(sp) -> $3F $3C $00 $09
+        // pea 9.w          -> $48 $78 $00 $09
+        // move.w d0, -(sp) with moveq #9, d0 -> $70 $09 $3F $00
+        if ((SectorBytes[I - 4] = $3F) and (SectorBytes[I - 3] = $3C) and
+            (SectorBytes[I - 2] = $00) and (SectorBytes[I - 1] = $09)) or
+           ((SectorBytes[I - 4] = $48) and (SectorBytes[I - 3] = $78) and
+            (SectorBytes[I - 2] = $00) and (SectorBytes[I - 1] = $09)) or
+           ((I >= 6) and (SectorBytes[I - 4] = $70) and (SectorBytes[I - 3] = $09) and
+            (SectorBytes[I - 2] = $3F) and (SectorBytes[I - 1] = $00)) then
+        begin
+          if TraitsList.IndexOf('Floppy Write Routine (XBIOS 9 Flopwr)') = -1 then
+            TraitsList.Add('Floppy Write Routine (XBIOS 9 Flopwr)');
+        end
+        // Check if opcode immediately preceding TRAP #14 is #18 (Protobt) -> $12
+        else if ((SectorBytes[I - 4] = $3F) and (SectorBytes[I - 3] = $3C) and
+                 (SectorBytes[I - 2] = $00) and (SectorBytes[I - 1] = $12)) or
+                ((SectorBytes[I - 4] = $48) and (SectorBytes[I - 3] = $78) and
+                 (SectorBytes[I - 2] = $00) and (SectorBytes[I - 1] = $12)) or
+                ((I >= 6) and (SectorBytes[I - 4] = $70) and (SectorBytes[I - 3] = $12) and
+                 (SectorBytes[I - 2] = $3F) and (SectorBytes[I - 1] = $00)) then
+        begin
+          if TraitsList.IndexOf('Boot Sector Creation Routine (XBIOS 18 Protobt)') = -1 then
+            TraitsList.Add('Boot Sector Creation Routine (XBIOS 18 Protobt)');
+        end;
+      end
+      // Trap #13 ($4E $4D) - Function opcode #4 (Rwabs) must be pushed immediately prior to TRAP #13
+      else if (SectorBytes[I] = $4E) and (SectorBytes[I + 1] = $4D) then
+      begin
+        // Check if opcode immediately preceding TRAP #13 is #4 (Rwabs)
+        if ((SectorBytes[I - 4] = $3F) and (SectorBytes[I - 3] = $3C) and
+            (SectorBytes[I - 2] = $00) and (SectorBytes[I - 1] = $04)) or
+           ((SectorBytes[I - 4] = $48) and (SectorBytes[I - 3] = $78) and
+            (SectorBytes[I - 2] = $00) and (SectorBytes[I - 1] = $04)) then
+        begin
+          // Check if rw parameter pushed right before opcode #4 is write mode (1 or 3)
+          // Case 1: Immediate push: move.w #1/3, -(sp) -> $3F $3C $00 $01 / $03
+          LookbackStart := Max(0, I - 16);
+          HasRwabsWrite := False;
+          for K := LookbackStart to I - 5 do
+          begin
+            if (SectorBytes[K] = $3F) and (SectorBytes[K + 1] = $3C) and
+               (SectorBytes[K + 2] = $00) and (SectorBytes[K + 3] in [$01, $03]) then
+            begin
+              HasRwabsWrite := True;
+              Break;
+            end;
+          end;
+
+          // Case 2: Register push: move.w Dn, -(sp) -> $3F $00..$3F $07 right before opcode #4
+          if not HasRwabsWrite and (I >= 6) and (SectorBytes[I - 6] = $3F) and ((SectorBytes[I - 5] and $F8) = $00) then
+          begin
+            LookbackStart := Max(0, I - 48);
+            for K := LookbackStart to I - 7 do
+            begin
+              if (SectorBytes[K] in [$70, $72, $74, $76, $78, $7A, $7C, $7E]) and
+                 (SectorBytes[K + 1] in [$01, $03]) then
+              begin
+                HasRwabsWrite := True;
+                Break;
+              end
+              else if (SectorBytes[K] in [$30, $32, $34, $36, $38, $3A, $3C, $3E]) and
+                      (SectorBytes[K + 1] = $3C) and (SectorBytes[K + 2] = $00) and
+                      (SectorBytes[K + 3] in [$01, $03]) then
+              begin
+                HasRwabsWrite := True;
+                Break;
+              end;
+            end;
+          end;
+
+          if HasRwabsWrite then
+          begin
+            if TraitsList.IndexOf('Disk Sector Write Routine (BIOS 4 Rwabs Write)') = -1 then
+              TraitsList.Add('Disk Sector Write Routine (BIOS 4 Rwabs Write)');
+          end;
+        end;
+      end;
+    end;
+
+    // Direct hardware FDC / DMA Floppy Controller write ($FFFF8604 / $FFFF8606)
+    for I := 2 to SectorSize - 3 do
+    begin
+      W := (Word(SectorBytes[I]) shl 8) or Word(SectorBytes[I + 1]);
+      if (W = $8604) or (W = $8606) then
+      begin
+        B0 := SectorBytes[I - 2];
+        B1 := SectorBytes[I - 1];
+        if ((B0 in [$11, $13, $31, $33, $41]) and ((B1 and $C0) in [$C0, $80])) or
+           ((I >= 4) and (SectorBytes[I - 4] in [$31, $33]) and (SectorBytes[I - 3] = $FC)) then
+        begin
+          if TraitsList.IndexOf('Direct Hardware Floppy Controller Write ($FFFF8604)') = -1 then
+            TraitsList.Add('Direct Hardware Floppy Controller Write ($FFFF8604)');
+          Break;
+        end;
+      end;
+    end;
+
+    if TraitsList.Count > 0 then
+    begin
+      ViralTraits := '';
+      for I := 0 to TraitsList.Count - 1 do
+      begin
+        if ViralTraits <> '' then ViralTraits := ViralTraits + '; ';
+        ViralTraits := ViralTraits + TraitsList[I];
+      end;
+      Result := True;
+    end;
+  finally
+    TraitsList.Free;
+  end;
+end;
+
 function ScanBootSector(const SectorBytes: PByte; SectorSize: Integer; out Threat: TVirusScanResult): Boolean;
 var
   BootSum: Word;
@@ -226,7 +474,8 @@ var
   MatchOff: Integer;
   I, K, TargetOff: Integer;
   IsDummy: Boolean;
-  Sigs: array[0..38] of TMaskedSig;
+  ViralTraits: string;
+  Sigs: array[0..44] of TMaskedSig;
   SafeSigs: array[0..5] of TMaskedSig;
   GenericSigs: array[0..0] of TMaskedSig;
 begin
@@ -356,7 +605,7 @@ begin
   Sigs[12].Description := 'Vintage 1987 floppy resident boot infector.';
   Sigs[12].Bytes := [$56, $49, $52, $45, $20, $38, $37]; // "VIRE 87"
   Sigs[12].Mask := 'xxxxxxx';
-  Sigs[12].FixedOffset := 0;
+  Sigs[12].FixedOffset := -1;
   Sigs[12].RequiredString := '';
 
   // 14. Green Goblins Virus
@@ -441,11 +690,11 @@ begin
 
   // 24. Kobold #2 Virus
   Sigs[23].Name := 'Kobold #2 Virus';
-  Sigs[23].Description := 'Destructive loader partition virus which alters the root allocation structure.';
-  Sigs[23].Bytes := [$4B, $4F, $42, $4F, $44, $23, $32, $20, $41, $4B, $54, $49, $56, $21]; // "KOBOLD#2 AKTIV!"
-  Sigs[23].Mask := 'x?xxxx?xxxxxxxx';
+  Sigs[23].Description := 'Destructive resident boot infector which displays "KOBOLD#2 AKTIV!" and replicates via Rwabs sector 0 write.';
+  Sigs[23].Bytes := [$4B, $4F, $42, $4F, $4C, $44, $23, $32, $20, $41, $4B, $54, $49, $56, $21]; // "KOBOLD#2 AKTIV!"
+  Sigs[23].Mask := 'xxxxxxxxxxxxxxx';
   Sigs[23].FixedOffset := -1;
-  Sigs[23].RequiredString := '';
+  Sigs[23].RequiredString := 'KOBOLD#2';
 
   // 25. Greenpeace Virus
   Sigs[24].Name := 'Greenpeace Virus';
@@ -566,6 +815,54 @@ begin
   Sigs[38].Mask := 'xxxxxx';
   Sigs[38].FixedOffset := -1;
   Sigs[38].RequiredString := 'BELL';
+
+  // 40. Laxy 1 Boot Virus
+  Sigs[39].Name := 'Laxy 1 Boot Virus';
+  Sigs[39].Description := 'Deceptive resident boot infector masquerading as an immunization sector (Immunsektor-Täuschung).';
+  Sigs[39].Bytes := [$4C, $41, $58, $59, $20, $31]; // "LAXY 1"
+  Sigs[39].Mask := 'xxxxxx';
+  Sigs[39].FixedOffset := -1;
+  Sigs[39].RequiredString := '';
+
+  // 41. Arnold / Rambo Boot Virus
+  Sigs[40].Name := 'Arnold / Rambo Boot Virus';
+  Sigs[40].Description := 'Resident boot sector infector spreading across floppy drives A and B on disk access.';
+  Sigs[40].Bytes := [$41, $52, $4E, $4F, $4C, $44, $2F, $52, $41, $4D, $42, $4F]; // "ARNOLD/RAMBO"
+  Sigs[40].Mask := 'xxxxxxxxxxxx';
+  Sigs[40].FixedOffset := -1;
+  Sigs[40].RequiredString := '';
+
+  // 42. Screen Darkener Boot Virus (Bildschirmverdunkler)
+  Sigs[41].Name := 'Screen Darkener Boot Virus (Bildschirmverdunkler)';
+  Sigs[41].Description := 'Resident boot infector activating after 10 disk copies or accesses, darkening the display.';
+  Sigs[41].Bytes := [$6C, $64, $41]; // "ldA"
+  Sigs[41].Mask := 'xxx';
+  Sigs[41].FixedOffset := -1;
+  Sigs[41].RequiredString := 'Virus';
+
+  // 43. Memory Corruptor Boot Virus (Speicherstörer)
+  Sigs[42].Name := 'Memory Corruptor Boot Virus (Speicherstörer)';
+  Sigs[42].Description := 'Resident boot sector infector spreading across drives A and B, disrupting and altering system memory bounds.';
+  Sigs[42].Bytes := [$56, $78, $61]; // "Vxa"
+  Sigs[42].Mask := 'xxx';
+  Sigs[42].FixedOffset := -1;
+  Sigs[42].RequiredString := 'Bi';
+
+  // 44. VDU Boot Virus (VDU-Imune)
+  Sigs[43].Name := 'VDU Boot Virus (VDU-Imune)';
+  Sigs[43].Description := 'Floppy boot infector spreading across drives A and B, erasing standard boot sector loaders.';
+  Sigs[43].Bytes := [$44, $65, $6E, $74]; // "Dent"
+  Sigs[43].Mask := 'xxxx';
+  Sigs[43].FixedOffset := -1;
+  Sigs[43].RequiredString := 'gRC';
+
+  // 45. Zoch Boot Virus
+  Sigs[44].Name := 'Zoch Boot Virus';
+  Sigs[44].Description := 'Resident floppy boot sector infector identified by "ZOCH". Replicates using Protobt (XBIOS 18) and Flopwr (XBIOS 9) via _dskbufp ($4C6).';
+  Sigs[44].Bytes := [$0C, $A8, $5A, $4F, $43, $48, $00, $02]; // CMPI.L #'ZOCH', 2(A0)
+  Sigs[44].Mask := 'xxxxxxxx';
+  Sigs[44].FixedOffset := -1;
+  Sigs[44].RequiredString := 'ZOCH';
 
   // -------------------------------------------------------------------------
   // TIER 1.5: Known Boot Sector Protectors and Vaccines
@@ -919,8 +1216,35 @@ begin
     Exit(True);
   end;
 
+  // Boot-Viren Killer V1.0 by Marcus Klocke-Sewing (Scheibenkleister)
+  if BufferContainsText(SectorBytes, 512, 'Boot-Viren Killer') or
+     BufferContainsText(SectorBytes, 512, 'Boot-Viren-Killer') or
+     BufferContainsText(SectorBytes, 512, 'Klocke-Sewing') or
+     (BufferContainsText(SectorBytes, 512, 'geheilt!') and BufferContainsText(SectorBytes, 512, 'Boot-Viren')) or
+     (BufferContainsText(SectorBytes, 512, 'geschützt') and BufferContainsText(SectorBytes, 512, 'Boot-Viren')) or
+     (BufferContainsText(SectorBytes, 512, 'geschtzt') and BufferContainsText(SectorBytes, 512, 'Boot-Viren')) then
+  begin
+    Threat.VirusFound := False;
+    Threat.TargetType := vtProtector;
+    Threat.Name := 'Boot-Viren Killer Vaccine (Scheibenkleister)';
+    Threat.Description := 'Resident boot protector and vaccine by Marcus Klocke-Sewing from the book "Scheibenkleister" (Claus Brod & Anton Stepper).';
+    Threat.Offset := 0;
+    Exit(True);
+  end;
+
+  // Virentod Boot Vaccine
+  if BufferContainsText(SectorBytes, 512, 'VIRENTOD') then
+  begin
+    Threat.VirusFound := False;
+    Threat.TargetType := vtProtector;
+    Threat.Name := 'Virentod Boot Protector / Vaccine';
+    Threat.Description := 'German resident boot sector vaccine and protector (Virentod). Immunizes floppy track 0 against unauthorized modifications.';
+    Threat.Offset := 0;
+    Exit(True);
+  end;
+
   // -------------------------------------------------------------------------
-  // Check Specific Virus Signatures Database (39 Boot Sector Viruses)
+  // Check Specific Virus Signatures Database (44 Boot Sector Viruses)
   // -------------------------------------------------------------------------
   for I := 0 to High(Sigs) do
   begin
@@ -1022,7 +1346,8 @@ begin
      BufferContainsText(SectorBytes, 512, 'AMIGA DEMO') or
      BufferContainsText(SectorBytes, 512, 'BIG DEMO') or
      BufferContainsText(SectorBytes, 512, 'Whattaheck') or
-     BufferContainsText(SectorBytes, 512, 'Union Demo') then
+     BufferContainsText(SectorBytes, 512, 'Union Demo') or
+     ((SectorBytes[0] = $60) and (SectorBytes[1] = $38) and BufferContainsString(SectorBytes, 512, 'CUBE')) then
     Exit(False);
 
   // Generic BRA / JMP instructions are only benign if the sector is NOT executable (checksum <> $1234)
@@ -1081,15 +1406,32 @@ begin
   end;
 
   // -------------------------------------------------------------------------
-  // TIER 4: Unrecognized Executable Boot Sector
+  // TIER 4: Heuristic Behavioral Analysis for Executable Boot Sectors
   // -------------------------------------------------------------------------
   if IsExec then
   begin
-    Threat.VirusFound := True;
-    Threat.Name := 'Unrecognized Executable Boot Sector';
-    Threat.Description := 'The boot sector checksum validates to $1234, but its binary code matches no known safe OS configuration.';
-    Threat.Offset := 0;
-    Exit(True);
+    if AnalyzeBootSectorHeuristics(SectorBytes, 512, ViralTraits) then
+    begin
+      Threat.VirusFound := True;
+      Threat.TargetType := vtBootSector;
+      if HasFloppyWriteRoutine(ViralTraits) then
+        Threat.Name := 'Suspicious Boot Sector (Floppy Write Routine / Infector)'
+      else
+        Threat.Name := 'Suspicious Boot Sector (Vector Hijack / Non-Replicating)';
+      Threat.Description := 'Behavioral heuristic detection: Executable boot sector contains active viral routines (' +
+                            ViralTraits + '). Matches resident boot virus behavior profile.';
+      Threat.Offset := 0;
+      Exit(True);
+    end
+    else
+    begin
+      Threat.VirusFound := False;
+      Threat.TargetType := vtCustomBoot;
+      Threat.Name := 'Custom Bootloader (Standard Bootable Disk)';
+      Threat.Description := 'Executable boot sector (checksum $1234) contains standard non-resident loader code. No vector hooks, memory residency, or replication routines detected.';
+      Threat.Offset := 0;
+      Exit(True);
+    end;
   end;
 end;
 
@@ -1778,8 +2120,8 @@ begin
     IsExecutable := (CalculateBootChecksum(@BootSec[0], 512) = $1234);
     if ScanBootSector(@BootSec[0], 512, Threat) then
     begin
-      // Only treat as threat if it is an actual threat, not a protector/vaccine
-      if Threat.TargetType <> vtProtector then
+      // Only treat as threat if it is an actual threat, not a protector/vaccine or standard custom loader
+      if (Threat.TargetType in [vtBootSector, vtFile]) and Threat.VirusFound then
       begin
         ThreatName := Threat.Name;
         Result := True;
@@ -1862,26 +2204,35 @@ end;
 
 procedure TFormVirusScanner.UpdateUI;
 var
-  HasBootThreat, HasAnyThreat, OnlyPotentialThreats: Boolean;
-  ThreatCount, ProtectorCount: Integer;
+  HasBootThreat, HasFloppyWriteBootThreat, HasCustomBoot, HasAnyThreat, OnlyPotentialThreats: Boolean;
+  ThreatCount, ProtectorCount, CustomBootCount: Integer;
   FirstProtectorName: string;
   I: Integer;
 begin
   HasBootThreat := False;
+  HasFloppyWriteBootThreat := False;
+  HasCustomBoot := False;
+  HasAnyThreat := False;
   ThreatCount := 0;
   ProtectorCount := 0;
+  CustomBootCount := 0;
   FirstProtectorName := '';
   OnlyPotentialThreats := True;
 
   for I := 0 to High(FSummary.Threats) do
   begin
     if (FSummary.Threats[I].TargetType = vtBootSector) and not FSummary.Threats[I].Disinfected then
+    begin
       HasBootThreat := True;
+      if HasFloppyWriteRoutine(FSummary.Threats[I]) then
+        HasFloppyWriteBootThreat := True;
+    end;
 
-    if (FSummary.Threats[I].TargetType <> vtProtector) and not FSummary.Threats[I].Disinfected then
+    if (FSummary.Threats[I].TargetType in [vtBootSector, vtFile]) and not FSummary.Threats[I].Disinfected then
     begin
       Inc(ThreatCount);
-      if Pos('unrecognized', LowerCase(FSummary.Threats[I].Name)) = 0 then
+      if (Pos('unrecognized', LowerCase(FSummary.Threats[I].Name)) = 0) and
+         ((Pos('suspicious', LowerCase(FSummary.Threats[I].Name)) = 0) or HasFloppyWriteRoutine(FSummary.Threats[I])) then
         OnlyPotentialThreats := False;
     end
     else if FSummary.Threats[I].TargetType = vtProtector then
@@ -1889,6 +2240,11 @@ begin
       Inc(ProtectorCount);
       if FirstProtectorName = '' then
         FirstProtectorName := FSummary.Threats[I].Name;
+    end
+    else if FSummary.Threats[I].TargetType = vtCustomBoot then
+    begin
+      Inc(CustomBootCount);
+      HasCustomBoot := True;
     end;
   end;
 
@@ -1899,20 +2255,47 @@ begin
     if FSummary.BootIsExecutable then
     begin
       if ProtectorCount > 0 then
-        LabelBootStatus.Caption := Format('Boot Sector: Checksum $%.4X [PROTECTED / VACCINE: %s]', [FSummary.BootChecksum, FirstProtectorName])
+      begin
+        LabelBootStatus.Font.Color := $00804000; // Teal
+        LabelBootStatus.Caption := Format('Boot Sector: Checksum $%.4X [PROTECTED / VACCINE: %s]', [FSummary.BootChecksum, FirstProtectorName]);
+      end
+      else if CustomBootCount > 0 then
+      begin
+        LabelBootStatus.Font.Color := RGBToColor(0, 100, 160); // Blue
+        LabelBootStatus.Caption := Format('Boot Sector: Checksum $%.4X [STANDARD CUSTOM BOOTLOADER]', [FSummary.BootChecksum]);
+      end
+      else if HasBootThreat then
+      begin
+        if HasFloppyWriteBootThreat then
+        begin
+          LabelBootStatus.Font.Color := clRed;
+          LabelBootStatus.Caption := Format('Boot Sector: Checksum $%.4X [SUSPICIOUS / INFECTED BOOT: FLOPPY WRITE - RED ALERT]', [FSummary.BootChecksum]);
+        end
+        else
+        begin
+          LabelBootStatus.Font.Color := RGBToColor(160, 110, 0); // Dark yellow / amber
+          LabelBootStatus.Caption := Format('Boot Sector: Checksum $%.4X [SUSPICIOUS BOOT: VECTOR HOOK - YELLOW CAUTION]', [FSummary.BootChecksum]);
+        end;
+      end
       else
+      begin
+        LabelBootStatus.Font.Color := clGreen;
         LabelBootStatus.Caption := Format('Boot Sector: Checksum $%.4X [EXECUTABLE BOOT BLOCK]', [FSummary.BootChecksum]);
+      end;
     end
     else
+    begin
+      LabelBootStatus.Font.Color := clWindowText;
       LabelBootStatus.Caption := Format('Boot Sector: Checksum $%.4X [Non-executable / Clean]', [FSummary.BootChecksum]);
+    end;
   end;
 
   if HasAnyThreat then
   begin
     if OnlyPotentialThreats then
     begin
-      LabelScanStatus.Font.Color := $000080FF; // Amber / orange
-      LabelScanStatus.Caption := Format('CAUTION: %d Potential Threat(s) Detected!', [ThreatCount]);
+      LabelScanStatus.Font.Color := RGBToColor(180, 120, 0); // Amber / yellow
+      LabelScanStatus.Caption := Format('CAUTION: %d Potential / Non-Replicating Threat(s) Detected!', [ThreatCount]);
     end
     else
     begin
@@ -1924,6 +2307,11 @@ begin
   begin
     LabelScanStatus.Font.Color := $00804000; // Deep teal / green
     LabelScanStatus.Caption := Format('PROTECTED: %s Active (0 Threats Found)', [FirstProtectorName]);
+  end
+  else if CustomBootCount > 0 then
+  begin
+    LabelScanStatus.Font.Color := RGBToColor(0, 100, 160); // Muted navy / blue
+    LabelScanStatus.Caption := 'INFORMATIONAL: Standard Bootable Disk (0 Threats Found)';
   end
   else if FSummary.TotalFilesScanned > 0 then
   begin
@@ -1943,7 +2331,7 @@ begin
   end
   else
   begin
-    ButtonDisinfectBoot.Enabled := HasBootThreat or (ProtectorCount > 0);
+    ButtonDisinfectBoot.Enabled := HasBootThreat or (ProtectorCount > 0) or (CustomBootCount > 0);
     ButtonDisinfectAll.Enabled := HasAnyThreat;
   end;
   ButtonInspectHex.Enabled := (ListViewThreats.Selected <> nil);
@@ -1989,16 +2377,27 @@ begin
         CatStr := 'Boot Sector'
       else if FSummary.Threats[I].TargetType = vtProtector then
         CatStr := 'Protector / Vaccine'
+      else if FSummary.Threats[I].TargetType = vtCustomBoot then
+        CatStr := 'Custom Bootloader'
       else
         CatStr := 'File Infector';
       Item.SubItems.Add(CatStr);
 
       if FSummary.Threats[I].TargetType = vtProtector then
         StatusStr := 'Active / Protected'
+      else if FSummary.Threats[I].TargetType = vtCustomBoot then
+        StatusStr := 'Standard / Bootable'
       else if FSummary.Threats[I].Disinfected then
         StatusStr := 'Cleaned / Safe'
       else if Pos('unrecognized', LowerCase(FSummary.Threats[I].Name)) > 0 then
         StatusStr := 'Potential Threat'
+      else if Pos('suspicious', LowerCase(FSummary.Threats[I].Name)) > 0 then
+      begin
+        if HasFloppyWriteRoutine(FSummary.Threats[I]) then
+          StatusStr := 'Suspicious (Floppy Write)'
+        else
+          StatusStr := 'Suspicious (Vector Hook)';
+      end
       else if FSummary.Threats[I].CanDisinfect then
         StatusStr := 'Disinfectable'
       else
@@ -2040,16 +2439,27 @@ begin
     CatStr := 'Boot Sector'
   else if AThreat.TargetType = vtProtector then
     CatStr := 'Protector / Vaccine'
+  else if AThreat.TargetType = vtCustomBoot then
+    CatStr := 'Custom Bootloader'
   else
     CatStr := 'File Infector';
   Item.SubItems.Add(CatStr);
 
   if AThreat.TargetType = vtProtector then
     StatusStr := 'Active / Protected'
+  else if AThreat.TargetType = vtCustomBoot then
+    StatusStr := 'Standard / Bootable'
   else if AThreat.Disinfected then
     StatusStr := 'Cleaned / Safe'
   else if Pos('unrecognized', LowerCase(AThreat.Name)) > 0 then
     StatusStr := 'Potential Threat'
+  else if Pos('suspicious', LowerCase(AThreat.Name)) > 0 then
+  begin
+    if HasFloppyWriteRoutine(AThreat) then
+      StatusStr := 'Suspicious (Floppy Write)'
+    else
+      StatusStr := 'Suspicious (Vector Hook)';
+  end
   else if AThreat.CanDisinfect then
     StatusStr := 'Disinfectable'
   else
@@ -2104,7 +2514,7 @@ var
   ChosenDir: string;
   FileList: TStringList;
   FileIdx, EntryIdx, K: Integer;
-  ActualThreatCount, PotentialThreatCount, ProtectorCount: Integer;
+  ActualThreatCount, PotentialThreatCount, ProtectorCount, CustomBootCount: Integer;
   CurFile, Ext, TempST, TempConvertedST, DiskToScan: string;
   TempSummary: TDiskScanSummary;
   TotalImagesProcessed, TotalFilesInsideImages: Integer;
@@ -2351,11 +2761,15 @@ begin
     ActualThreatCount := 0;
     PotentialThreatCount := 0;
     ProtectorCount := 0;
+    CustomBootCount := 0;
     for K := 0 to High(FSummary.Threats) do
     begin
       if FSummary.Threats[K].TargetType = vtProtector then
         Inc(ProtectorCount)
-      else if Pos('unrecognized', LowerCase(FSummary.Threats[K].Name)) > 0 then
+      else if FSummary.Threats[K].TargetType = vtCustomBoot then
+        Inc(CustomBootCount)
+      else if (Pos('unrecognized', LowerCase(FSummary.Threats[K].Name)) > 0) or
+              ((Pos('suspicious', LowerCase(FSummary.Threats[K].Name)) > 0) and not HasFloppyWriteRoutine(FSummary.Threats[K])) then
         Inc(PotentialThreatCount)
       else
         Inc(ActualThreatCount);
@@ -2430,7 +2844,7 @@ end;
 procedure TFormVirusScanner.ButtonDisinfectBootClick(Sender: TObject);
 var
   I, TargetIdx: Integer;
-  HasUnrecBoot, HasProtector: Boolean;
+  HasUnrecBoot, HasProtector, HasCustomBoot: Boolean;
   BakPath, TargetDisk: string;
 begin
   TargetIdx := -1;
@@ -2459,10 +2873,13 @@ begin
 
   HasUnrecBoot := False;
   HasProtector := False;
+  HasCustomBoot := False;
   if TargetIdx >= 0 then
   begin
     if FSummary.Threats[TargetIdx].TargetType = vtProtector then
       HasProtector := True
+    else if FSummary.Threats[TargetIdx].TargetType = vtCustomBoot then
+      HasCustomBoot := True
     else if (FSummary.Threats[TargetIdx].TargetType = vtBootSector) and
        (Pos('Unrecognized Executable', FSummary.Threats[TargetIdx].Name) > 0) then
       HasUnrecBoot := True;
@@ -2473,6 +2890,8 @@ begin
     begin
       if FSummary.Threats[I].TargetType = vtProtector then
         HasProtector := True
+      else if FSummary.Threats[I].TargetType = vtCustomBoot then
+        HasCustomBoot := True
       else if (FSummary.Threats[I].TargetType = vtBootSector) and
          (Pos('Unrecognized Executable', FSummary.Threats[I].Name) > 0) then
         HasUnrecBoot := True;
@@ -2488,12 +2907,11 @@ begin
       'Are you sure you want to proceed?',
       mtConfirmation, [mbYes, mbNo], 0) <> mrYes then Exit;
   end
-  else if HasUnrecBoot then
+  else if HasCustomBoot or HasUnrecBoot then
   begin
     if MessageDlg('Custom Bootloader Warning',
-      'Caution: The boot sector contains an unrecognized custom executable loader.' + sLineBreak +
-      'This is often a legitimate custom loader for Atari games and demos.' + sLineBreak +
-      'Disinfecting will disable the boot code and may prevent the disk from booting!' + sLineBreak + sLineBreak +
+      'Caution: The boot sector contains a custom executable loader (e.g. for games or demos).' + sLineBreak +
+      'Disinfecting will disable the boot code and may prevent the disk from auto-booting!' + sLineBreak + sLineBreak +
       'A backup (' + ExtractFileName(TargetDisk) + '.bak) will be created.' + sLineBreak +
       'Are you sure you want to proceed?',
       mtWarning, [mbYes, mbNo], 0) <> mrYes then Exit;
@@ -2520,7 +2938,7 @@ begin
     begin
       for I := 0 to High(FSummary.Threats) do
       begin
-        if (FSummary.Threats[I].TargetType = vtBootSector) or (FSummary.Threats[I].TargetType = vtProtector) then
+        if (FSummary.Threats[I].TargetType in [vtBootSector, vtProtector, vtCustomBoot]) then
           FSummary.Threats[I].Disinfected := True;
       end;
       FSummary.BootChecksum := 0;
@@ -2548,7 +2966,7 @@ begin
   CleanedCount := 0;
   for I := 0 to High(FSummary.Threats) do
   begin
-    if not FSummary.Threats[I].Disinfected and (FSummary.Threats[I].TargetType <> vtProtector) then
+    if not FSummary.Threats[I].Disinfected and not (FSummary.Threats[I].TargetType in [vtProtector, vtCustomBoot]) then
     begin
       Inc(CleanedCount);
       if (FSummary.Threats[I].TargetType = vtBootSector) and
@@ -2559,7 +2977,7 @@ begin
 
   if CleanedCount = 0 then
   begin
-    ShowMessage('No active threats to disinfect (boot protectors and vaccines are already safe).');
+    ShowMessage('No active threats to disinfect (boot protectors, vaccines, and standard bootloaders are safe).');
     Exit;
   end;
 
@@ -2711,7 +3129,7 @@ begin
       Exit;
     end;
 
-    if (FSummary.Threats[Idx].TargetType = vtBootSector) or (FSummary.Threats[Idx].TargetType = vtProtector) then
+    if FSummary.Threats[Idx].TargetType in [vtBootSector, vtProtector, vtCustomBoot] then
     begin
       FS := TFileStream.Create(ImagePath, fmOpenRead or fmShareDenyNone);
       try
@@ -2759,7 +3177,6 @@ procedure TFormVirusScanner.ListViewThreatsCustomDrawItem(Sender: TCustomListVie
   Item: TListItem; State: TCustomDrawState; var DefaultDraw: Boolean);
 var
   Idx: Integer;
-  IsRealThreat: Boolean;
 begin
   DefaultDraw := True;
   if Item = nil then Exit;
@@ -2768,17 +3185,7 @@ begin
 
   if not (cdsSelected in State) then
   begin
-    IsRealThreat := (FSummary.Threats[Idx].TargetType <> vtProtector) and
-                    not FSummary.Threats[Idx].Disinfected and
-                    (Pos('unrecognized', LowerCase(FSummary.Threats[Idx].Name)) = 0);
-
-    if IsRealThreat then
-    begin
-      Sender.Canvas.Brush.Color := RGBToColor(255, 224, 224); // Light pastel red row background
-      Sender.Canvas.Font.Color := RGBToColor(160, 0, 0);     // Dark bold red text
-      Sender.Canvas.Font.Style := [fsBold];
-    end
-    else if FSummary.Threats[Idx].Disinfected then
+    if FSummary.Threats[Idx].Disinfected then
     begin
       Sender.Canvas.Brush.Color := clWindow;
       Sender.Canvas.Font.Color := clGrayText;
@@ -2790,11 +3197,41 @@ begin
       Sender.Canvas.Font.Color := $00804000; // Deep teal / green
       Sender.Canvas.Font.Style := [];
     end
-    else if Pos('unrecognized', LowerCase(FSummary.Threats[Idx].Name)) > 0 then
+    else if FSummary.Threats[Idx].TargetType = vtCustomBoot then
     begin
       Sender.Canvas.Brush.Color := clWindow;
-      Sender.Canvas.Font.Color := RGBToColor(180, 90, 0); // Amber / brown
+      Sender.Canvas.Font.Color := RGBToColor(0, 100, 160); // Muted navy / blue
       Sender.Canvas.Font.Style := [];
+    end
+    else if Pos('suspicious', LowerCase(FSummary.Threats[Idx].Name)) > 0 then
+    begin
+      if HasFloppyWriteRoutine(FSummary.Threats[Idx]) then
+      begin
+        // RED: Suspicious Boot Sector with Floppy Write routine
+        Sender.Canvas.Brush.Color := RGBToColor(255, 224, 224); // Light pastel red row background
+        Sender.Canvas.Font.Color := RGBToColor(160, 0, 0);     // Dark bold red text
+        Sender.Canvas.Font.Style := [fsBold];
+      end
+      else
+      begin
+        // YELLOW: Suspicious Boot Sector WITHOUT Floppy Write routine
+        Sender.Canvas.Brush.Color := RGBToColor(255, 255, 204); // Light pastel yellow row background
+        Sender.Canvas.Font.Color := RGBToColor(140, 95, 0);    // Dark golden amber text
+        Sender.Canvas.Font.Style := [fsBold];
+      end;
+    end
+    else if Pos('unrecognized', LowerCase(FSummary.Threats[Idx].Name)) > 0 then
+    begin
+      Sender.Canvas.Brush.Color := RGBToColor(255, 255, 225); // Very pale cream background
+      Sender.Canvas.Font.Color := RGBToColor(180, 90, 0);     // Amber / brown text
+      Sender.Canvas.Font.Style := [];
+    end
+    else if (FSummary.Threats[Idx].TargetType in [vtBootSector, vtFile]) then
+    begin
+      // Recognized virus threats -> RED
+      Sender.Canvas.Brush.Color := RGBToColor(255, 224, 224); // Light pastel red row background
+      Sender.Canvas.Font.Color := RGBToColor(160, 0, 0);     // Dark bold red text
+      Sender.Canvas.Font.Style := [fsBold];
     end
     else
     begin
@@ -2821,7 +3258,7 @@ begin
     Idx := Item.Index;
     if (Idx >= 0) and (Idx <= High(FSummary.Threats)) then
     begin
-      ButtonDisinfectBoot.Enabled := (FSummary.Threats[Idx].TargetType in [vtBootSector, vtProtector]) and
+      ButtonDisinfectBoot.Enabled := (FSummary.Threats[Idx].TargetType in [vtBootSector, vtProtector, vtCustomBoot]) and
                                      (FSummary.Threats[Idx].ActualImagePath <> '') and
                                      FileExists(FSummary.Threats[Idx].ActualImagePath) and
                                      SameText(ExtractFileExt(FSummary.Threats[Idx].ActualImagePath), '.st');
