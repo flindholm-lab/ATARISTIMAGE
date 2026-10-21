@@ -22,6 +22,7 @@ type
     ButtonSaveCopy: TButton;
     ButtonSaveDepacked: TButton;
     ButtonPlayAudio: TButton;
+    CheckBoxWordWrap: TCheckBox;
     MemoContent: TMemo;
     ScrollBoxImage: TScrollBox;
     ImagePicture: TImage;
@@ -29,6 +30,7 @@ type
 
     procedure FormCreate(Sender: TObject);
     procedure FormDestroy(Sender: TObject);
+    procedure CheckBoxWordWrapChange(Sender: TObject);
     procedure ButtonHexModeClick(Sender: TObject);
     procedure ButtonTextModeClick(Sender: TObject);
     procedure ButtonImageModeClick(Sender: TObject);
@@ -106,6 +108,8 @@ begin
   FZoomMode := 0; // Default to 2x zoom
   FHasAudio := False;
   FIsAudioPlaying := False;
+  CheckBoxWordWrap.Visible := False;
+  CheckBoxWordWrap.Checked := False;
 end;
 
 procedure TFormFileViewer.FormDestroy(Sender: TObject);
@@ -118,12 +122,27 @@ begin
   end;
 end;
 
+procedure TFormFileViewer.CheckBoxWordWrapChange(Sender: TObject);
+begin
+  if FCurrentMode = 1 then
+  begin
+    MemoContent.WordWrap := CheckBoxWordWrap.Checked;
+    if CheckBoxWordWrap.Checked then
+      MemoContent.ScrollBars := ssVertical
+    else
+      MemoContent.ScrollBars := ssBoth;
+  end;
+end;
+
 procedure TFormFileViewer.ButtonHexModeClick(Sender: TObject);
 begin
   FCurrentMode := 0;
   ScrollBoxImage.Visible := False;
   ButtonZoom.Visible := False;
+  CheckBoxWordWrap.Visible := False;
   MemoContent.Visible := True;
+  MemoContent.WordWrap := False;
+  MemoContent.ScrollBars := ssBoth;
   RenderHexView;
 end;
 
@@ -133,6 +152,12 @@ begin
   ScrollBoxImage.Visible := False;
   ButtonZoom.Visible := False;
   MemoContent.Visible := True;
+  CheckBoxWordWrap.Visible := True;
+  MemoContent.WordWrap := CheckBoxWordWrap.Checked;
+  if CheckBoxWordWrap.Checked then
+    MemoContent.ScrollBars := ssVertical
+  else
+    MemoContent.ScrollBars := ssBoth;
   RenderTextView;
 end;
 
@@ -141,6 +166,7 @@ begin
   if not FHasPicture then Exit;
   FCurrentMode := 2;
   MemoContent.Visible := False;
+  CheckBoxWordWrap.Visible := False;
   ScrollBoxImage.Visible := True;
   ButtonZoom.Visible := True;
   RenderImageView;
@@ -900,6 +926,7 @@ begin
   if FHasPicture then
   begin
     FCurrentMode := 2; // Picture View
+    CheckBoxWordWrap.Visible := False;
     RenderImageView;
   end
   else
@@ -907,7 +934,10 @@ begin
     FCurrentMode := 0; // Hex View
     ScrollBoxImage.Visible := False;
     ButtonZoom.Visible := False;
+    CheckBoxWordWrap.Visible := False;
     MemoContent.Visible := True;
+    MemoContent.WordWrap := False;
+    MemoContent.ScrollBars := ssBoth;
     RenderHexView;
   end;
 end;

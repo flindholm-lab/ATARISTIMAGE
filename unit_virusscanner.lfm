@@ -6,12 +6,15 @@ object FormVirusScanner: TFormVirusScanner
   Caption = 'Atari ST Anti-Virus Scanner & Disinfection'
   ClientHeight = 520
   ClientWidth = 940
+  Constraints.MinHeight = 400
+  Constraints.MinWidth = 800
   Color = clBtnFace
   Font.Color = clWindowText
   Font.Height = -11
   Font.Name = 'Tahoma'
   Position = poScreenCenter
   OnCreate = FormCreate
+  OnResize = FormResize
   object PanelTop: TPanel
     Left = 0
     Height = 84
@@ -63,6 +66,15 @@ object FormVirusScanner: TFormVirusScanner
       Font.Style = [fsBold]
       ParentFont = False
     end
+    object CheckBoxBootOnly: TCheckBox
+      Left = 712
+      Height = 22
+      Top = 46
+      Width = 214
+      Anchors = [akTop, akRight]
+      Caption = 'Quick Scan (Boot sectors only)'
+      TabOrder = 0
+    end
   end
   object ListViewThreats: TListView
     Left = 0
@@ -100,6 +112,8 @@ object FormVirusScanner: TFormVirusScanner
     RowSelect = True
     TabOrder = 1
     ViewStyle = vsReport
+    OnCustomDrawItem = ListViewThreatsCustomDrawItem
+    OnCustomDrawSubItem = ListViewThreatsCustomDrawSubItem
     OnSelectItem = ListViewThreatsSelectItem
   end
   object PanelBottom: TPanel

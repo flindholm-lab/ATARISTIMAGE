@@ -48,6 +48,7 @@ type
     LabelDiskPath: TLabel;
     LabelBootStatus: TLabel;
     LabelScanStatus: TLabel;
+    CheckBoxBootOnly: TCheckBox;
     ListViewThreats: TListView;
     PanelBottom: TPanel;
     ProgressBarScan: TProgressBar;
@@ -60,6 +61,7 @@ type
     ButtonClose: TButton;
 
     procedure FormCreate(Sender: TObject);
+    procedure FormResize(Sender: TObject);
     procedure ButtonScanClick(Sender: TObject);
     procedure ButtonScanFolderClick(Sender: TObject);
     procedure ButtonCancelScanClick(Sender: TObject);
@@ -77,6 +79,7 @@ type
     FFolderScanMode: Boolean;
     FCurrentFileIndex: Integer;
     FTotalFilesToScan: Integer;
+    procedure UpdateLayout;
     procedure UpdateUI;
     procedure OnScanProgress(const CurrentItem: string; Percent: Integer; var Abort: Boolean);
     procedure PopulateThreatsList;
@@ -95,7 +98,7 @@ function HasFloppyWriteRoutine(const Threat: TVirusScanResult): Boolean; overloa
 function AnalyzeBootSectorHeuristics(const SectorBytes: PByte; SectorSize: Integer; out ViralTraits: string): Boolean;
 function ScanBootSector(const SectorBytes: PByte; SectorSize: Integer; out Threat: TVirusScanResult): Boolean;
 function ScanFileBuffer(const Buffer: PByte; BufLen: Integer; const AFileName: string; ACluster: Word; out Threat: TVirusScanResult): Boolean;
-function ScanDiskImage(const AImagePath: string; out Summary: TDiskScanSummary; OnProgress: TScanProgressEvent = nil): Boolean;
+function ScanDiskImage(const AImagePath: string; out Summary: TDiskScanSummary; OnProgress: TScanProgressEvent = nil; BootSectorOnly: Boolean = False): Boolean;
 function DisinfectBootSector(const AImagePath: string): Boolean;
 function DisinfectFile(const AImagePath: string; const AFileName: string; ACluster: Word): Boolean;
 function QuickCheckBootSector(const AImagePath: string; out ThreatName: string; out IsExecutable: Boolean): Boolean;
@@ -1598,7 +1601,7 @@ begin
   Result := HasNonSpace;
 end;
 
-function ScanDiskImage(const AImagePath: string; out Summary: TDiskScanSummary; OnProgress: TScanProgressEvent = nil): Boolean;
+function ScanDiskImage(const AImagePath: string; out Summary: TDiskScanSummary; OnProgress: TScanProgressEvent = nil; BootSectorOnly: Boolean = False): Boolean;
 var
   FS: TFileStream;
   BootSec: array[0..511] of Byte;
@@ -1844,6 +1847,12 @@ begin
 
     if ScanBootSector(@BootSec[0], 512, BootThreat) then
       AddThreat(BootThreat);
+
+    if BootSectorOnly then
+    begin
+      Result := True;
+      Exit;
+    end;
 
     // 2. Parse BPB Geometry
     BytesPerSec := Word(BootSec[$0B]) or (Word(BootSec[$0C]) shl 8);
@@ -2165,6 +2174,47 @@ end;
 
 { TFormVirusScanner }
 
+procedure TFormVirusScanner.UpdateLayout;
+var
+  FixedWidth, Remainder, FileColWidth, DescColWidth: Integer;
+begin
+  if ListViewThreats = nil then Exit;
+
+  // Auto-expand columns to fill ListViewThreats without blank space right of Description
+  if ListViewThreats.Columns.Count >= 6 then
+  begin
+    // Sum of standard fixed columns: Target (1) + Threat Name (2) + Category (3) + Action/Status (4)
+    FixedWidth := ListViewThreats.Columns[1].Width +
+                  ListViewThreats.Columns[2].Width +
+                  ListViewThreats.Columns[3].Width +
+                  ListViewThreats.Columns[4].Width;
+
+    Remainder := ListViewThreats.ClientWidth - FixedWidth;
+    if Remainder < 420 then
+    begin
+      ListViewThreats.Columns[0].Width := 180;
+      ListViewThreats.Columns[5].Width := 240;
+    end
+    else
+    begin
+      // Distribute remainder space: approx 35% to Scanned File (min 180), rest to Description (min 240)
+      FileColWidth := Round(Remainder * 0.35);
+      if FileColWidth < 180 then FileColWidth := 180;
+      if (Remainder - FileColWidth) < 240 then FileColWidth := Remainder - 240;
+      DescColWidth := Remainder - FileColWidth;
+      if DescColWidth < 200 then DescColWidth := 200;
+
+      ListViewThreats.Columns[0].Width := FileColWidth;
+      ListViewThreats.Columns[5].Width := DescColWidth;
+    end;
+  end;
+end;
+
+procedure TFormVirusScanner.FormResize(Sender: TObject);
+begin
+  UpdateLayout;
+end;
+
 procedure TFormVirusScanner.FormCreate(Sender: TObject);
 begin
   FCurrentDiskPath := '';
@@ -2172,6 +2222,7 @@ begin
   FCancelScan := False;
   ProgressBarScan.Position := 0;
   ButtonCancelScan.Enabled := False;
+  UpdateLayout;
 end;
 
 procedure TFormVirusScanner.OpenForDisk(const ADiskPath: string; AutoScan: Boolean);
@@ -2195,6 +2246,7 @@ begin
   end;
 
   UpdateUI;
+  UpdateLayout;
   Show;
   BringToFront;
 
@@ -2312,6 +2364,11 @@ begin
   begin
     LabelScanStatus.Font.Color := RGBToColor(0, 100, 160); // Muted navy / blue
     LabelScanStatus.Caption := 'INFORMATIONAL: Standard Bootable Disk (0 Threats Found)';
+  end
+  else if CheckBoxBootOnly.Checked and (FSummary.DiskImagePath <> '') then
+  begin
+    LabelScanStatus.Font.Color := clGreen;
+    LabelScanStatus.Caption := 'CLEAN: Boot Sector Scanned (No Threats)';
   end
   else if FSummary.TotalFilesScanned > 0 then
   begin
@@ -2491,7 +2548,7 @@ begin
   LabelScanStatus.Caption := 'Scanning disk...';
   Screen.Cursor := crHourGlass;
   try
-    ScanDiskImage(FCurrentDiskPath, FSummary, @OnScanProgress);
+    ScanDiskImage(FCurrentDiskPath, FSummary, @OnScanProgress, CheckBoxBootOnly.Checked);
     for I := 0 to High(FSummary.Threats) do
     begin
       FSummary.Threats[I].SourceFile := ExtractFileName(FCurrentDiskPath);
@@ -2597,7 +2654,7 @@ begin
         begin
           TempSummary.TotalFilesScanned := 0;
           SetLength(TempSummary.Threats, 0);
-          if ScanDiskImage(CurFile, TempSummary, @OnScanProgress) then
+          if ScanDiskImage(CurFile, TempSummary, @OnScanProgress, CheckBoxBootOnly.Checked) then
           begin
             Inc(TotalImagesProcessed);
             Inc(TotalFilesInsideImages, TempSummary.TotalFilesScanned);
@@ -2617,7 +2674,7 @@ begin
             begin
               TempSummary.TotalFilesScanned := 0;
               SetLength(TempSummary.Threats, 0);
-              if ScanDiskImage(TempST, TempSummary, @OnScanProgress) then
+              if ScanDiskImage(TempST, TempSummary, @OnScanProgress, CheckBoxBootOnly.Checked) then
               begin
                 Inc(TotalImagesProcessed);
                 Inc(TotalFilesInsideImages, TempSummary.TotalFilesScanned);
@@ -2642,7 +2699,7 @@ begin
             begin
               TempSummary.TotalFilesScanned := 0;
               SetLength(TempSummary.Threats, 0);
-              if ScanDiskImage(TempST, TempSummary, @OnScanProgress) then
+              if ScanDiskImage(TempST, TempSummary, @OnScanProgress, CheckBoxBootOnly.Checked) then
               begin
                 Inc(TotalImagesProcessed);
                 Inc(TotalFilesInsideImages, TempSummary.TotalFilesScanned);
@@ -2719,7 +2776,7 @@ begin
                       begin
                         TempSummary.TotalFilesScanned := 0;
                         SetLength(TempSummary.Threats, 0);
-                        if ScanDiskImage(DiskToScan, TempSummary, @OnScanProgress) then
+                        if ScanDiskImage(DiskToScan, TempSummary, @OnScanProgress, CheckBoxBootOnly.Checked) then
                         begin
                           Inc(TotalImagesProcessed);
                           Inc(TotalFilesInsideImages, TempSummary.TotalFilesScanned);
@@ -2815,14 +2872,22 @@ begin
       else if ProtectorCount > 0 then
       begin
         LabelScanStatus.Font.Color := $00804000; // Deep teal / green
-        LabelScanStatus.Caption := Format('CLEAN & PROTECTED: %d images scanned, %d files checked (%d boot protector(s), 0 threats)',
-          [TotalImagesProcessed, TotalFilesInsideImages, ProtectorCount]);
+        if CheckBoxBootOnly.Checked then
+          LabelScanStatus.Caption := Format('CLEAN & PROTECTED: %d image boot sectors scanned (%d boot protector(s), 0 threats)',
+            [TotalImagesProcessed, ProtectorCount])
+        else
+          LabelScanStatus.Caption := Format('CLEAN & PROTECTED: %d images scanned, %d files checked (%d boot protector(s), 0 threats)',
+            [TotalImagesProcessed, TotalFilesInsideImages, ProtectorCount]);
       end
       else
       begin
         LabelScanStatus.Font.Color := clGreen;
-        LabelScanStatus.Caption := Format('CLEAN: %d images scanned, %d files checked (No threats)',
-          [TotalImagesProcessed, TotalFilesInsideImages]);
+        if CheckBoxBootOnly.Checked then
+          LabelScanStatus.Caption := Format('CLEAN: %d image boot sectors scanned (No threats)',
+            [TotalImagesProcessed])
+        else
+          LabelScanStatus.Caption := Format('CLEAN: %d images scanned, %d files checked (No threats)',
+            [TotalImagesProcessed, TotalFilesInsideImages]);
       end;
     end;
   finally
@@ -3239,6 +3304,12 @@ begin
       Sender.Canvas.Font.Color := clWindowText;
       Sender.Canvas.Font.Style := [];
     end;
+  end
+  else
+  begin
+    Sender.Canvas.Brush.Color := clHighlight;
+    Sender.Canvas.Font.Color := clHighlightText;
+    Sender.Canvas.Font.Style := [];
   end;
 end;
 

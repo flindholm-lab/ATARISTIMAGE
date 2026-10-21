@@ -6,6 +6,8 @@ object FormFileViewer: TFormFileViewer
   Caption = 'File Viewer / Hex Inspector'
   ClientHeight = 560
   ClientWidth = 840
+  Constraints.MinHeight = 400
+  Constraints.MinWidth = 650
   Color = clBtnFace
   Font.Color = clWindowText
   Font.Height = -11
@@ -123,6 +125,17 @@ object FormFileViewer: TFormFileViewer
       Caption = 'Save Depacked...'
       TabOrder = 6
       OnClick = ButtonSaveDepackedClick
+    end
+    object CheckBoxWordWrap: TCheckBox
+      Left = 728
+      Height = 22
+      Top = 44
+      Width = 104
+      Anchors = [akTop, akRight]
+      Caption = 'Word Wrap'
+      TabOrder = 8
+      Visible = False
+      OnChange = CheckBoxWordWrapChange
     end
   end
   object MemoContent: TMemo
