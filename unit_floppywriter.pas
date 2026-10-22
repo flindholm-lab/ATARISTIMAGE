@@ -829,6 +829,11 @@ begin
     end;
 
     ImageSize := Length(FSourceData);
+
+    // Check if the files and directory payload can fit on a standard 720 KB floppy
+    FCanRepack720 := (Form1 <> nil) and
+      Form1.AnalyzeDiskImageFor720KB(AFilePath, FRepackFileCount, FRepackDirCount, FRepackTotalBytes, FRepackClusters, RepackReason);
+
     if ImageSize = 737280 then
     begin
       FSourceGeometryValid := True;
@@ -837,7 +842,7 @@ begin
       FSourceSectorsPerTrack := 9;
       ButtonWrite.Enabled := True;
       CheckBoxRepack720.Checked := False;
-      CheckBoxRepack720.Enabled := False;
+      CheckBoxRepack720.Enabled := FCanRepack720;
       LabelImageDetails.Caption := Format('Format: 720 KB Double-Density (%s) - 80 Tracks, 2 Sides, 9 Sectors/Track', [FSourceFormatDesc]);
       LabelImageDetails.Font.Color := clGreen;
       LabelCompatibilityWarning.Caption := '✅ Fully compatible with standard 3.5" USB and PC internal floppy drives.';
@@ -854,8 +859,6 @@ begin
       LabelImageDetails.Caption := Format('Format: 1.44 MB High-Density (%s) - 80 Tracks, 2 Sides, 18 Sectors/Track', [FSourceFormatDesc]);
       LabelImageDetails.Font.Color := clGreen;
 
-      FCanRepack720 := (Form1 <> nil) and
-        Form1.AnalyzeDiskImageFor720KB(AFilePath, FRepackFileCount, FRepackDirCount, FRepackTotalBytes, FRepackClusters, RepackReason);
       CheckBoxRepack720.Enabled := FCanRepack720;
       CheckBoxRepack720.Checked := False;
 
@@ -873,24 +876,24 @@ begin
       FSourceSides := 1;
       FSourceSectorsPerTrack := 9;
       ButtonWrite.Enabled := True;
+      CheckBoxRepack720.Enabled := FCanRepack720;
       CheckBoxRepack720.Checked := False;
-      CheckBoxRepack720.Enabled := False;
       LabelImageDetails.Caption := Format('Format: 360 KB Single-Sided (%s) - 80 Tracks, 1 Side, 9 Sectors/Track', [FSourceFormatDesc]);
       LabelImageDetails.Font.Color := $00804000;
-      LabelCompatibilityWarning.Caption := 'ℹ️ Single-sided image will be mapped onto Side 0 of a Double-Density diskette (supported by Atari TOS).';
+      if FCanRepack720 then
+        LabelCompatibilityWarning.Caption := 'ℹ️ Single-sided 360 KB image. (Tip: Check "Repack files into standard 720 KB image" to write as standard 2-sided 720 KB floppy).'
+      else
+        LabelCompatibilityWarning.Caption := 'ℹ️ Single-sided image will be mapped onto Side 0 of a Double-Density diskette (supported by Atari TOS).';
       LabelCompatibilityWarning.Font.Color := $00804000;
       Result := True;
     end
     else
     begin
+      // Non-standard disk size (e.g. < 720 KB, 800 KB, 880 KB, 820 KB, etc.)
       FSourceGeometryValid := False;
-      FCanRepack720 := False;
 
-      // If image is larger than 720 KB, check whether its files can fit on a standard 720 KB floppy
-      if (ImageSize > 737280) and (Form1 <> nil) and
-         Form1.AnalyzeDiskImageFor720KB(AFilePath, FRepackFileCount, FRepackDirCount, FRepackTotalBytes, FRepackClusters, RepackReason) then
+      if FCanRepack720 then
       begin
-        FCanRepack720 := True;
         CheckBoxRepack720.Enabled := True;
         CheckBoxRepack720.Checked := True;
         ButtonWrite.Enabled := True;
@@ -901,19 +904,20 @@ begin
           LabelImageDetails.Caption := 'Format: Atari 880 KB Extended (80T, 2S, 11SPT) - Files Fit on 720 KB Floppy!'
         else if ImageSize = 839680 then
           LabelImageDetails.Caption := 'Format: Atari 820 KB Extended (82T, 2S, 10SPT) - Files Fit on 720 KB Floppy!'
+        else if ImageSize < 737280 then
+          LabelImageDetails.Caption := Format('Format: Non-Standard Image (%s bytes < 720 KB) - Files Fit on 720 KB Floppy!', [FormatFloat('#,##0', ImageSize)])
         else
           LabelImageDetails.Caption := Format('Format: Extended Disk Image (%s bytes) - Files Fit on 720 KB Floppy!', [FormatFloat('#,##0', ImageSize)]);
 
         LabelImageDetails.Font.Color := $00804000;
-        LabelCompatibilityWarning.Caption := Format('💡 Image exceeds 720 KB, but all %d file(s) and %d folder(s) (%s) fit on a standard 720 KB floppy.' + sLineBreak +
+        LabelCompatibilityWarning.Caption := Format('💡 Non-standard geometry (%s bytes), but all %d file(s) and %d folder(s) (%s) fit on a standard 720 KB floppy.' + sLineBreak +
           '"Repack files into standard 720 KB image" is checked: A temporary 720 KB image will be transferred to disk.',
-          [FRepackFileCount, FRepackDirCount, Form1.FormatSizeStr(FRepackTotalBytes, False)]);
+          [FormatFloat('#,##0', ImageSize), FRepackFileCount, FRepackDirCount, Form1.FormatSizeStr(FRepackTotalBytes, False)]);
         LabelCompatibilityWarning.Font.Color := clGreen;
         Result := True;
       end
       else
       begin
-        FCanRepack720 := False;
         CheckBoxRepack720.Checked := False;
         CheckBoxRepack720.Enabled := False;
         ButtonWrite.Enabled := False;
@@ -928,7 +932,12 @@ begin
             LabelCompatibilityWarning.Caption := '❌ Non-standard image size. Content exceeds 720 KB floppy capacity.';
         end
         else
-          LabelCompatibilityWarning.Caption := '❌ Unsupported disk size. USB floppy drives only support standard 720 KB and 1.44 MB sector layouts.';
+        begin
+          if RepackReason <> '' then
+            LabelCompatibilityWarning.Caption := '❌ Non-standard disk image format: ' + RepackReason
+          else
+            LabelCompatibilityWarning.Caption := '❌ Unsupported disk size. USB floppy drives only support standard 720 KB and 1.44 MB sector layouts.';
+        end;
         LabelCompatibilityWarning.Font.Color := clRed;
       end;
     end;
@@ -1136,10 +1145,10 @@ begin
     // CheckBoxRepack720 is NOT checked: direct image write
     if not FSourceGeometryValid or (ImageSize = 0) then
     begin
-      if (ImageSize > 737280) and FCanRepack720 then
+      if FCanRepack720 then
       begin
-        if MessageDlg('Extended Image Format',
-          'This disk image has an extended/non-standard geometry which USB floppy drives cannot write directly.' + sLineBreak + sLineBreak +
+        if MessageDlg('Non-Standard Image Format',
+          'This disk image has a non-standard geometry which USB floppy drives cannot write directly.' + sLineBreak + sLineBreak +
           'Would you like to enable "Repack files into standard 720 KB image" to transfer its files to floppy?',
           mtConfirmation, [mbYes, mbNo], 0) = mrYes then
         begin
@@ -1303,7 +1312,8 @@ var
 begin
   if FOperationInProgress then Exit;
   ImageSize := Length(FSourceData);
-  if (ImageSize > 737280) and (ImageSize <> 1474560) then
+
+  if not FSourceGeometryValid then
   begin
     if CheckBoxRepack720.Checked then
     begin
@@ -1349,10 +1359,41 @@ begin
       LabelCompatibilityWarning.Caption := '✅ Fully compatible with High-Density 1.44 MB USB and internal floppy drives.';
       LabelCompatibilityWarning.Font.Color := clGreen;
     end;
+    ButtonWrite.Enabled := True;
+  end
+  else if ImageSize = 368640 then
+  begin
+    if CheckBoxRepack720.Checked then
+    begin
+      LabelCompatibilityWarning.Caption := Format('💡 360 KB image will be repacked into a temporary standard 720 KB Double-Density image (%d files, %d folders, %s) before writing to floppy.',
+        [FRepackFileCount, FRepackDirCount, Form1.FormatSizeStr(FRepackTotalBytes, False)]);
+      LabelCompatibilityWarning.Font.Color := clGreen;
+    end
+    else
+    begin
+      LabelCompatibilityWarning.Caption := 'ℹ️ Single-sided 360 KB image will be mapped onto Side 0 of a Double-Density diskette (supported by Atari TOS).';
+      LabelCompatibilityWarning.Font.Color := $00804000;
+    end;
+    ButtonWrite.Enabled := True;
+  end
+  else if ImageSize = 737280 then
+  begin
+    if CheckBoxRepack720.Checked then
+    begin
+      LabelCompatibilityWarning.Caption := Format('💡 Files (%d files, %d folders, %s) will be repacked into a pristine 720 KB image before writing.',
+        [FRepackFileCount, FRepackDirCount, Form1.FormatSizeStr(FRepackTotalBytes, False)]);
+      LabelCompatibilityWarning.Font.Color := clGreen;
+    end
+    else
+    begin
+      LabelCompatibilityWarning.Caption := '✅ Fully compatible with standard 3.5" USB and PC internal floppy drives.';
+      LabelCompatibilityWarning.Font.Color := clGreen;
+    end;
+    ButtonWrite.Enabled := True;
   end
   else
   begin
-    ButtonWrite.Enabled := FSourceGeometryValid;
+    ButtonWrite.Enabled := FSourceGeometryValid or (CheckBoxRepack720.Checked and FCanRepack720);
   end;
 end;
 
