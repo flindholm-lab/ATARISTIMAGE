@@ -8,7 +8,7 @@ uses
   LCLType, ExtCtrls, ComCtrls, StrUtils, Math, DateUtils, LazFileUtils,
   FileUtil, Menus, zipper, unit_clustermap, unit_msa, unit_fileviewer, unit_dragout,
   unit_depacker, unit_virusscanner, unit_newimage, unit_archivevault,
-  unit_dim, unit_search;
+  unit_dim, unit_search, unit_floppywriter;
 
 type
   { TDiskItemInfo represents a single file or directory in the Atari disk image }
@@ -92,6 +92,7 @@ type
     MenuItemSep2: TMenuItem;
     MenuItemConvertMSA: TMenuItem;
     MenuItemConvertDIM: TMenuItem;
+    MenuItemWriteFloppyFile: TMenuItem;
     MenuItemSep3: TMenuItem;
     MenuItemExit: TMenuItem;
     MenuItemEdit: TMenuItem;
@@ -128,6 +129,8 @@ type
     MenuItemVirusScanner: TMenuItem;
     MenuItemSepTools2: TMenuItem;
     MenuItemMakePCBoot: TMenuItem;
+    MenuItemSepTools3: TMenuItem;
+    MenuItemFloppyWriter: TMenuItem;
     MenuItemHelp: TMenuItem;
     MenuItemAbout: TMenuItem;
     PopupMenuFiles: TPopupMenu;
@@ -183,6 +186,7 @@ type
     procedure ButtonSetLabelClick(Sender: TObject);
     procedure MenuItemConvertMSAClick(Sender: TObject);
     procedure MenuItemVirusScannerClick(Sender: TObject);
+    procedure MenuItemWriteFloppyClick(Sender: TObject);
     procedure FormDropFiles(Sender: TObject; const FileNames: array of string);
     procedure FormShow(Sender: TObject);
     procedure PopupMenuFilesPopup(Sender: TObject);
@@ -275,7 +279,6 @@ type
     // Core Procedures and Functions
     function GetSelectedFileName(out AItemText, ACleanName: string; out AIsDir, AIsStaged, AIsDeleted, AIsMarkedDelete: Boolean): Boolean;
     procedure AddDiskItemToListView(const AInfo: TDiskItemInfo);
-    function FormatSizeStr(Size: Int64; IsDir: Boolean): string;
     function FormatFATDateTime(DateVal, TimeVal: Word): string;
     function FormatFATAttr(Attr: Byte): string;
 
@@ -330,7 +333,6 @@ type
     procedure CreateBlankDiskImage(const ATargetFile: string; ASides, ASectorsPerTrack, ATracks, ARootEntries, ASectorsPerCluster: Integer);
     procedure CreateBlank720KBImage(const ATargetFile: string);
       // Creates a clean, standard 720KB Atari ST floppy image
-    function LoadDiskImage(const AFileName: string): Boolean;
     function LoadZipArchive(const AZipPath: string): Boolean;
     function SelectDiskImageFromZip(const AZipPath: string; MatchingEntries: TStrings): Integer;
     procedure AddFolderToZipper(const ABaseDir, ARelPath: string; AZip: TZipper);
@@ -381,6 +383,12 @@ type
     procedure HandleSearchNavigate(const ADirPath, AFileName: string);
     procedure HandleSearchView(const ADirPath, AFileName: string);
   public
+    function LoadDiskImage(const AFileName: string): Boolean;
+    function FormatSizeStr(Size: Int64; IsDir: Boolean): string;
+    function AnalyzeDiskImageFor720KB(const ASourceFile: string; out AFileCount, ADirCount: Integer;
+      out ATotalBytes: Int64; out AReqClusters: Integer; out AReason: string): Boolean;
+    function RepackDiskImageTo720KB(const ASourcePath, ATarget720Path: string;
+      out AFileCount, ADirCount: Integer; out ATotalBytes: Int64; out AErrorMsg: string): Boolean;
   end;
 
 var
@@ -4121,6 +4129,9 @@ var
   VirusThreatName: string;
   IsBootExec: Boolean;
   Spt, Sds, StTrack, EndTrack: Integer;
+  DummyFiles, DummyDirs, DummyClusters: Integer;
+  DummyBytes: Int64;
+  DummyReason: string;
 begin
   Result := False;
   if not FileExists(AFileName) then Exit;
@@ -4254,10 +4265,47 @@ begin
   else
     Self.Caption := 'Atari .ST Image File Manager - ' + ExtractFileName(FImagePath);
 
+  // Real-time check if image is > 720 KB and whether its files can fit on a standard 720 KB floppy
+  if (FileSize(FImagePath) > 737280) and
+     AnalyzeDiskImageFor720KB(FImagePath, DummyFiles, DummyDirs, DummyBytes, DummyClusters, DummyReason) then
+  begin
+    if (StatusBar1 <> nil) and (StatusBar1.Panels.Count >= 4) then
+      StatusBar1.Panels[3].Text := Format('💡 Files fit on 720 KB Floppy (%d files, %s)',
+        [DummyFiles, FormatSizeStr(DummyBytes, False)]);
+  end;
+
   // Real-time Anti-Virus Boot Sector check
   if QuickCheckBootSector(FImagePath, VirusThreatName, IsBootExec) then
   begin
-    if Pos('unrecognized', LowerCase(VirusThreatName)) > 0 then
+    if Pos('suspicious', LowerCase(VirusThreatName)) > 0 then
+    begin
+      if (Pos('floppy write', LowerCase(VirusThreatName)) > 0) or
+         (Pos('infector', LowerCase(VirusThreatName)) > 0) then
+      begin
+        if MessageDlg('Atari ST Anti-Virus Guard',
+          Format('CRITICAL ALERT (RED): Suspicious Boot Sector with FLOPPY WRITE detected: %s!' + sLineBreak + sLineBreak +
+                 'Heuristic analysis detected active floppy write / replication routines.' + sLineBreak +
+                 'Would you like to open the Anti-Virus Scanner now to inspect and disinfect the disk?',
+                 [VirusThreatName]),
+          mtError, [mbYes, mbNo], 0) = mrYes then
+        begin
+          FormVirusScanner.OpenForDisk(FImagePath, True);
+        end;
+      end
+      else
+      begin
+        if MessageDlg('Atari ST Anti-Virus Guard',
+          Format('CAUTION (YELLOW): Suspicious Boot Sector detected: %s!' + sLineBreak + sLineBreak +
+                 'Heuristic analysis detected active system vector hooks or memory manipulation, but NO floppy write routine.' + sLineBreak +
+                 'Would you like to open the Anti-Virus Scanner now to inspect the disk?',
+                 [VirusThreatName]),
+          mtWarning, [mbYes, mbNo], 0) = mrYes then
+        begin
+          FormVirusScanner.OpenForDisk(FImagePath, True);
+        end;
+      end;
+    end
+    else if Pos('unrecognized', LowerCase(VirusThreatName)) > 0 then
     begin
       if MessageDlg('Atari ST Anti-Virus Guard',
         Format('CAUTION: Potential virus threat detected in Boot Sector: %s!' + sLineBreak + sLineBreak +
@@ -5168,6 +5216,433 @@ begin
     FormVirusScanner.OpenForDisk(FImagePath, True)
   else
     FormVirusScanner.OpenForDisk('', False);
+end;
+
+{------------------------------------------------------------------
+  Procedure: MenuItemWriteFloppyClick
+  Purpose:  Opens the Atari ST Physical & USB Floppy Disk Writer / Reader Tool
+ ------------------------------------------------------------------}
+procedure TForm1.MenuItemWriteFloppyClick(Sender: TObject);
+begin
+  FormFloppyWriter.OpenForWriting(FImagePath);
+end;
+
+
+
+{------------------------------------------------------------------
+  Function: AnalyzeDiskImageFor720KB
+  Purpose:  Analyzes any disk image to determine if its file payload
+            can fit on a standard 720 KB floppy (<= 711 clusters, <= 112 root entries).
+ ------------------------------------------------------------------}
+function TForm1.AnalyzeDiskImageFor720KB(const ASourceFile: string; out AFileCount, ADirCount: Integer;
+  out ATotalBytes: Int64; out AReqClusters: Integer; out AReason: string): Boolean;
+var
+  WorkingFile, Ext: string;
+  NeedsTempClean: Boolean;
+  FS: TFileStream;
+  BootSec: array[0..511] of Byte;
+  BytesPerSec, SecPerFAT, ResSec, NumFATs, RootEntries, TotalSec: Word;
+  SecPerClust: Byte;
+  RootDirStart, DataAreaStart, CurrClust, FileSizeVal: Int64;
+  BytesPerClust: Word;
+  DirEntry: array[0..31] of Byte;
+  EntryIdx, MaxEntries, RootCount: Integer;
+  DirQueue: TList;
+  VisitedClusters: TList;
+  TargetClust: Word;
+  IsSubDir: Boolean;
+  EntryName: string;
+  LoopGuard: Integer;
+begin
+  Result := False;
+  AFileCount := 0;
+  ADirCount := 0;
+  ATotalBytes := 0;
+  AReqClusters := 0;
+  AReason := '';
+  NeedsTempClean := False;
+  WorkingFile := ASourceFile;
+
+  if not FileExists(ASourceFile) then
+  begin
+    AReason := 'File does not exist: ' + ASourceFile;
+    Exit;
+  end;
+
+  Ext := LowerCase(ExtractFileExt(ASourceFile));
+  if Ext = '.msa' then
+  begin
+    WorkingFile := IncludeTrailingPathDelimiter(GetTempDir) + 'check720_' + FormatDateTime('hhnnsszzz', Now) + '.st';
+    if not UnpackMSAToST(ASourceFile, WorkingFile) or not FileExists(WorkingFile) then
+    begin
+      AReason := 'Failed to decompress MSA image.';
+      Exit;
+    end;
+    NeedsTempClean := True;
+  end
+  else if Ext = '.dim' then
+  begin
+    WorkingFile := IncludeTrailingPathDelimiter(GetTempDir) + 'check720_' + FormatDateTime('hhnnsszzz', Now) + '.st';
+    if not UnpackDIMToST(ASourceFile, WorkingFile) or not FileExists(WorkingFile) then
+    begin
+      AReason := 'Failed to decompress DIM image.';
+      Exit;
+    end;
+    NeedsTempClean := True;
+  end;
+
+  try
+    FS := TFileStream.Create(WorkingFile, fmOpenRead or fmShareDenyNone);
+    try
+      if FS.Size < 512 then
+      begin
+        AReason := 'Image file is too small to be a valid floppy image.';
+        Exit;
+      end;
+
+      FillChar(BootSec[0], 512, 0);
+      FS.Read(BootSec[0], 512);
+
+      BytesPerSec := Word(BootSec[$0B]) + (Word(BootSec[$0C]) shl 8);
+      if BytesPerSec <> 512 then BytesPerSec := 512;
+      SecPerClust := BootSec[$0D];
+      if not (SecPerClust in [1, 2, 4, 8]) then SecPerClust := 2;
+      ResSec := Word(BootSec[$0E]) + (Word(BootSec[$0F]) shl 8);
+      if (ResSec < 1) or (ResSec > 32) then ResSec := 1;
+      NumFATs := BootSec[$10];
+      if not (NumFATs in [1, 2]) then NumFATs := 2;
+      RootEntries := Word(BootSec[$11]) + (Word(BootSec[$12]) shl 8);
+      if (RootEntries < 16) or (RootEntries > 1024) then RootEntries := 112;
+      TotalSec := Word(BootSec[$13]) + (Word(BootSec[$14]) shl 8);
+      if TotalSec = 0 then TotalSec := FS.Size div BytesPerSec;
+      SecPerFAT := Word(BootSec[$16]) + (Word(BootSec[$17]) shl 8);
+      if (SecPerFAT < 1) or (SecPerFAT > 32) then SecPerFAT := 5;
+
+      RootDirStart := (ResSec + (NumFATs * SecPerFAT)) * BytesPerSec;
+      DataAreaStart := RootDirStart + (((Int64(RootEntries) * 32) + (BytesPerSec - 1)) div BytesPerSec) * BytesPerSec;
+      BytesPerClust := SecPerClust * BytesPerSec;
+
+      DirQueue := TList.Create;
+      VisitedClusters := TList.Create;
+      try
+        // 1. Scan Root Directory (Cluster 0)
+        RootCount := 0;
+        FS.Position := RootDirStart;
+        for EntryIdx := 0 to RootEntries - 1 do
+        begin
+          if FS.Read(DirEntry[0], 32) <> 32 then Break;
+          if DirEntry[0] = $00 then Break; // End of directory
+          if DirEntry[0] = $E5 then Continue; // Deleted entry
+          if (DirEntry[11] and $08) <> 0 then Continue; // Volume label
+
+          EntryName := ExtractFileNameFromEntry(DirEntry);
+          if (EntryName = '') or (EntryName = '.') or (EntryName = '..') then Continue;
+
+          Inc(RootCount);
+          IsSubDir := (DirEntry[11] and $10) <> 0;
+          TargetClust := Word(DirEntry[26]) or (Word(DirEntry[27]) shl 8);
+
+          if IsSubDir then
+          begin
+            Inc(ADirCount);
+            Inc(AReqClusters); // Subdirectory takes at least 1 cluster on 720K
+            if (TargetClust >= 2) and (TargetClust < $FF8) then
+              DirQueue.Add(Pointer(PtrUInt(TargetClust)));
+          end
+          else
+          begin
+            Inc(AFileCount);
+            FileSizeVal := Int64(DirEntry[28]) or (Int64(DirEntry[29]) shl 8) or
+                           (Int64(DirEntry[30]) shl 16) or (Int64(DirEntry[31]) shl 24);
+            Inc(ATotalBytes, FileSizeVal);
+            if FileSizeVal > 0 then
+              AReqClusters := AReqClusters + ((FileSizeVal + 1023) div 1024);
+          end;
+        end;
+
+        if RootCount > 112 then
+        begin
+          AReason := Format('Root directory has %d items, which exceeds standard 720 KB root limit of 112 entries.', [RootCount]);
+          Exit;
+        end;
+
+        // 2. Scan Subdirectories in DirQueue
+        while DirQueue.Count > 0 do
+        begin
+          CurrClust := PtrUInt(DirQueue[0]);
+          DirQueue.Delete(0);
+
+          if VisitedClusters.IndexOf(Pointer(PtrUInt(CurrClust))) <> -1 then Continue;
+          VisitedClusters.Add(Pointer(PtrUInt(CurrClust)));
+
+          LoopGuard := 0;
+          while (CurrClust >= 2) and (CurrClust < $FF8) do
+          begin
+            Inc(LoopGuard);
+            if LoopGuard > 4096 then Break;
+
+            FS.Position := DataAreaStart + (CurrClust - 2) * BytesPerClust;
+            MaxEntries := BytesPerClust div 32;
+
+            for EntryIdx := 0 to MaxEntries - 1 do
+            begin
+              if FS.Read(DirEntry[0], 32) <> 32 then Break;
+              if DirEntry[0] = $00 then Break;
+              if DirEntry[0] = $E5 then Continue;
+              if (DirEntry[11] and $08) <> 0 then Continue;
+
+              EntryName := ExtractFileNameFromEntry(DirEntry);
+              if (EntryName = '') or (EntryName = '.') or (EntryName = '..') then Continue;
+
+              IsSubDir := (DirEntry[11] and $10) <> 0;
+              TargetClust := Word(DirEntry[26]) or (Word(DirEntry[27]) shl 8);
+
+              if IsSubDir then
+              begin
+                Inc(ADirCount);
+                Inc(AReqClusters); // Subdirectory takes at least 1 cluster
+                if (TargetClust >= 2) and (TargetClust < $FF8) then
+                  DirQueue.Add(Pointer(PtrUInt(TargetClust)));
+              end
+              else
+              begin
+                Inc(AFileCount);
+                FileSizeVal := Int64(DirEntry[28]) or (Int64(DirEntry[29]) shl 8) or
+                               (Int64(DirEntry[30]) shl 16) or (Int64(DirEntry[31]) shl 24);
+                Inc(ATotalBytes, FileSizeVal);
+                if FileSizeVal > 0 then
+                  AReqClusters := AReqClusters + ((FileSizeVal + 1023) div 1024);
+              end;
+            end;
+
+            // Follow FAT chain for this subdirectory in source image
+            CurrClust := GetNextCluster(FS, CurrClust);
+          end;
+        end;
+
+        // Standard 720 KB data cluster capacity is 711 clusters (728,064 bytes)
+        if AReqClusters <= 711 then
+        begin
+          Result := True;
+          AReason := Format('Files occupy %s (%d clusters / 711 max). Fits on 720 KB floppy!',
+            [FormatSizeStr(ATotalBytes, False), AReqClusters]);
+        end
+        else
+        begin
+          Result := False;
+          AReason := Format('Files require %d clusters (%s), which exceeds 720 KB capacity (max 711 clusters / 728,064 bytes).',
+            [AReqClusters, FormatSizeStr(ATotalBytes, False)]);
+        end;
+      finally
+        DirQueue.Free;
+        VisitedClusters.Free;
+      end;
+    finally
+      FS.Free;
+    end;
+  finally
+    if NeedsTempClean and FileExists(WorkingFile) then
+      SysUtils.DeleteFile(WorkingFile);
+  end;
+end;
+
+{------------------------------------------------------------------
+  Function: RepackDiskImageTo720KB
+  Purpose:  Extracts all files and directories from ASourcePath and
+            reconstructs a pristine standard 720 KB Atari ST image at ATarget720Path.
+ ------------------------------------------------------------------}
+function TForm1.RepackDiskImageTo720KB(const ASourcePath, ATarget720Path: string;
+  out AFileCount, ADirCount: Integer; out ATotalBytes: Int64; out AErrorMsg: string): Boolean;
+var
+  TempWorkingST, TempExtractDir, WorkingSource: string;
+  NeedsTempSourceClean: Boolean;
+  SrcFs, TargetFs: TFileStream;
+  ExtractedFileCount: Integer;
+  ExtractedByteCount: Int64;
+  OrigVolLabel: string;
+  SavedImagePath, SavedCurrentPath: string;
+
+  procedure WalkAndWriteSubdirs(const AHostParent, ARelParent: string);
+  var
+    SR: TSearchRec;
+    HostSub, RelSub: string;
+  begin
+    if FindFirst(AppendPathDelim(AHostParent) + '*', faDirectory, SR) = 0 then
+    begin
+      try
+        repeat
+          if (SR.Name = '.') or (SR.Name = '..') then Continue;
+          if (SR.Attr and faDirectory) <> 0 then
+          begin
+            HostSub := AppendPathDelim(AHostParent) + SR.Name;
+            RelSub := ARelParent + SR.Name + '\';
+            CreateDirectoryInImage(TargetFs, RelSub);
+            Inc(ADirCount);
+            WalkAndWriteSubdirs(HostSub, RelSub);
+          end;
+        until FindNext(SR) <> 0;
+      finally
+        FindClose(SR);
+      end;
+    end;
+  end;
+
+  procedure WalkAndWriteFiles(const AHostParent, ARelParent: string);
+  var
+    SR: TSearchRec;
+    HostFile: string;
+    FileFs: TFileStream;
+  begin
+    if FindFirst(AppendPathDelim(AHostParent) + '*', faAnyFile, SR) = 0 then
+    begin
+      try
+        repeat
+          if (SR.Name = '.') or (SR.Name = '..') then Continue;
+          if (SR.Attr and faDirectory) <> 0 then
+          begin
+            WalkAndWriteFiles(AppendPathDelim(AHostParent) + SR.Name, ARelParent + SR.Name + '\');
+          end
+          else
+          begin
+            HostFile := AppendPathDelim(AHostParent) + SR.Name;
+            FileFs := TFileStream.Create(HostFile, fmOpenRead or fmShareDenyNone);
+            try
+              WriteFileToImage(TargetFs, SR.Name, FileFs, ARelParent);
+              Inc(AFileCount);
+              Inc(ATotalBytes, FileFs.Size);
+            finally
+              FileFs.Free;
+            end;
+          end;
+        until FindNext(SR) <> 0;
+      finally
+        FindClose(SR);
+      end;
+    end;
+  end;
+
+begin
+  Result := False;
+  AFileCount := 0;
+  ADirCount := 0;
+  ATotalBytes := 0;
+  AErrorMsg := '';
+  NeedsTempSourceClean := False;
+  WorkingSource := ASourcePath;
+
+  if not FileExists(ASourcePath) then
+  begin
+    AErrorMsg := 'Source image does not exist: ' + ASourcePath;
+    Exit;
+  end;
+
+  // Unpack MSA or DIM if needed
+  if SameText(ExtractFileExt(ASourcePath), '.msa') then
+  begin
+    TempWorkingST := IncludeTrailingPathDelimiter(GetTempDir) + 'repack_src_' + FormatDateTime('hhnnsszzz', Now) + '.st';
+    if not UnpackMSAToST(ASourcePath, TempWorkingST) or not FileExists(TempWorkingST) then
+    begin
+      AErrorMsg := 'Failed to decompress source MSA image.';
+      Exit;
+    end;
+    WorkingSource := TempWorkingST;
+    NeedsTempSourceClean := True;
+  end
+  else if SameText(ExtractFileExt(ASourcePath), '.dim') then
+  begin
+    TempWorkingST := IncludeTrailingPathDelimiter(GetTempDir) + 'repack_src_' + FormatDateTime('hhnnsszzz', Now) + '.st';
+    if not UnpackDIMToST(ASourcePath, TempWorkingST) or not FileExists(TempWorkingST) then
+    begin
+      AErrorMsg := 'Failed to decompress source DIM image.';
+      Exit;
+    end;
+    WorkingSource := TempWorkingST;
+    NeedsTempSourceClean := True;
+  end;
+
+  TempExtractDir := IncludeTrailingPathDelimiter(GetTempDir) + 'st_repack_' + FormatDateTime('yyyymmdd_hhnnsszzz', Now);
+  if not ForceDirectories(TempExtractDir) then
+  begin
+    AErrorMsg := 'Failed to create temporary extraction folder: ' + TempExtractDir;
+    if NeedsTempSourceClean and FileExists(WorkingSource) then SysUtils.DeleteFile(WorkingSource);
+    Exit;
+  end;
+
+  SavedImagePath := FImagePath;
+  SavedCurrentPath := FCurrentPath;
+
+  try
+    // Step 1: Extract all files and directories from source image
+    ExtractedFileCount := 0;
+    ExtractedByteCount := 0;
+    OrigVolLabel := '';
+
+    SrcFs := TFileStream.Create(WorkingSource, fmOpenRead or fmShareDenyNone);
+    try
+      GetFATDetails(SrcFs);
+      OrigVolLabel := FVolumeLabel;
+      ExtractDiskDirectory(SrcFs, 0, TempExtractDir, ExtractedFileCount, ExtractedByteCount);
+    finally
+      SrcFs.Free;
+    end;
+
+    // Step 2: Create a clean, standard 720 KB Atari ST image
+    if FileExists(ATarget720Path) then SysUtils.DeleteFile(ATarget720Path);
+    CreateBlank720KBImage(ATarget720Path);
+
+    if not FileExists(ATarget720Path) then
+    begin
+      AErrorMsg := 'Failed to create blank 720 KB disk image: ' + ATarget720Path;
+      Exit;
+    end;
+
+    // Step 3: Populate 720 KB image with subdirectories and files
+    TargetFs := TFileStream.Create(ATarget720Path, fmOpenReadWrite or fmShareDenyNone);
+    try
+      GetFATDetails(TargetFs); // Initialize FAT layout variables for 720KB
+
+      // Create all subdirectories first
+      WalkAndWriteSubdirs(TempExtractDir, '');
+
+      // Write all files into their destination directories
+      WalkAndWriteFiles(TempExtractDir, '');
+
+      // Preserve volume label if present
+      if OrigVolLabel <> '' then
+        WriteVolumeLabelToImage(TargetFs, OrigVolLabel);
+
+      // Enforce standard 720 KB size (737,280 bytes)
+      TargetFs.Size := 737280;
+    finally
+      TargetFs.Free;
+    end;
+
+    Result := True;
+  except
+    on E: Exception do
+    begin
+      AErrorMsg := 'Repack failed: ' + E.Message;
+      Result := False;
+    end;
+  end;
+
+  // Cleanup temporary extraction folder and temp source
+  try
+    FileUtil.DeleteDirectory(TempExtractDir, False);
+  except
+  end;
+
+  if NeedsTempSourceClean and FileExists(WorkingSource) then
+    SysUtils.DeleteFile(WorkingSource);
+
+  // Restore Form1 active image state
+  if (SavedImagePath <> '') and FileExists(SavedImagePath) then
+  begin
+    FImagePath := SavedImagePath;
+    FCurrentPath := SavedCurrentPath;
+    ReadSTImage(FImagePath, FCurrentPath);
+    UpdateFreeSpaceDisplay;
+  end;
 end;
 
 {------------------------------------------------------------------
@@ -7084,6 +7559,9 @@ var
   I, FileCount, DirCount: Integer;
   FormatStr, FileStr, CapStr, StatusStr: string;
   SelectedCaption: string;
+  FitFiles, FitDirs, FitClusters: Integer;
+  FitBytes: Int64;
+  FitReason: string;
 begin
   if StatusBar1 = nil then Exit;
 
@@ -7111,6 +7589,12 @@ begin
       FormatStr := FormatStr + 'Atari 360 KB SS (1S, 80T, 9SPT)'
     else
       FormatStr := FormatStr + 'Atari Custom Format (' + IntToStr(FTotalClusters) + ' clusters)';
+
+    if (FTotalClusters >= 1500) or (FileSize(FImagePath) > 737280) then
+    begin
+      if AnalyzeDiskImageFor720KB(FImagePath, FitFiles, FitDirs, FitBytes, FitClusters, FitReason) then
+        FormatStr := FormatStr + ' • [Fits 720K Floppy]';
+    end;
   end
   else
     FormatStr := 'No Disk Image Loaded';

@@ -919,6 +919,10 @@ object Form1: TForm1
         Caption = 'Convert Image (.ST <-> .DIM)...'
         OnClick = MenuItemConvertDIMClick
       end
+      object MenuItemWriteFloppyFile: TMenuItem
+        Caption = '&Write Image to Physical Floppy...'
+        OnClick = MenuItemWriteFloppyClick
+      end
       object MenuItemSep3: TMenuItem
         Caption = '-'
       end
@@ -1058,6 +1062,14 @@ object Form1: TForm1
       object MenuItemMakePCBoot: TMenuItem
         Caption = '&Make PC-Compatible Boot Sector (BPB)...'
         OnClick = MenuItemMakePCBootClick
+      end
+      object MenuItemSepTools3: TMenuItem
+        Caption = '-'
+      end
+      object MenuItemFloppyWriter: TMenuItem
+        Caption = '&Floppy Disk Writer / Reader (720K / 1.44M)...'
+        ShortCut = 118
+        OnClick = MenuItemWriteFloppyClick
       end
     end
     object MenuItemHelp: TMenuItem

@@ -225,6 +225,19 @@
         <IsPartOfProject Value="True"/>
         <UnitName Value="unit_atariaudio"/>
       </Unit>
+      <Unit>
+        <Filename Value="unit_floppywriter.pas"/>
+        <IsPartOfProject Value="True"/>
+        <ComponentName Value="FormFloppyWriter"/>
+        <HasResources Value="True"/>
+        <ResourceBaseClass Value="Form"/>
+        <UnitName Value="unit_floppywriter"/>
+      </Unit>
+      <Unit>
+        <Filename Value="unit_floppywriter.lfm"/>
+        <IsPartOfProject Value="True"/>
+        <HasResources Value="True"/>
+      </Unit>
     </Units>
   </ProjectOptions>
   <CompilerOptions>

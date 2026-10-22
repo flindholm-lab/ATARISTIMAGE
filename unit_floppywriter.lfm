@@ -1,0 +1,525 @@
+object FormFloppyWriter: TFormFloppyWriter
+  Left = 320
+  Height = 560
+  Top = 150
+  Width = 720
+  Caption = 'Atari ST Floppy Disk Writer / Reader'
+  ClientHeight = 560
+  ClientWidth = 720
+  Constraints.MinHeight = 520
+  Constraints.MinWidth = 660
+  Color = clBtnFace
+  Font.Color = clWindowText
+  Font.Height = -11
+  Font.Name = 'Tahoma'
+  Position = poScreenCenter
+  OnCreate = FormCreate
+  OnShow = FormShow
+  object PanelHeader: TPanel
+    Left = 0
+    Height = 65
+    Top = 0
+    Width = 720
+    Align = alTop
+    BevelOuter = bvNone
+    ClientHeight = 65
+    ClientWidth = 720
+    TabOrder = 0
+    object LabelHeaderTitle: TLabel
+      Left = 16
+      Height = 19
+      Top = 10
+      Width = 352
+      Caption = 'Atari ST Physical Floppy Disk Transfer Center'
+      Font.Height = -16
+      Font.Name = 'Tahoma'
+      Font.Style = [fsBold]
+      ParentFont = False
+    end
+    object LabelHeaderSubtitle: TLabel
+      Left = 16
+      Height = 14
+      Top = 35
+      Width = 520
+      Caption = 'Raw sector writing and dumping for 720 KB (Double-Density) and 1.44 MB (High-Density) USB/PC Floppy Drives'
+      Font.Height = -11
+      Font.Name = 'Tahoma'
+      Font.Color = clNavy
+      ParentFont = False
+    end
+  end
+  object PanelAdminBanner: TPanel
+    Left = 0
+    Height = 36
+    Top = 65
+    Width = 720
+    Align = alTop
+    BevelOuter = bvNone
+    Color = 14088959
+    ClientHeight = 36
+    ClientWidth = 720
+    ParentColor = False
+    TabOrder = 1
+    Visible = False
+    object LabelAdminNotice: TLabel
+      Left = 16
+      Height = 14
+      Top = 10
+      Width = 470
+      Caption = '⚠️ Windows requires Administrator privileges for raw sector writes to physical drives.'
+      Font.Height = -11
+      Font.Name = 'Tahoma'
+      Font.Style = [fsBold]
+      Font.Color = clMaroon
+      ParentFont = False
+    end
+    object ButtonRelaunchAdmin: TButton
+      Left = 540
+      Height = 24
+      Top = 6
+      Width = 164
+      Anchors = [akTop, akRight]
+      Caption = 'Restart as Administrator'
+      TabOrder = 0
+      OnClick = ButtonRelaunchAdminClick
+    end
+  end
+  object PageControlFloppy: TPageControl
+    Left = 8
+    Height = 405
+    Top = 105
+    Width = 704
+    ActivePage = TabSheetWrite
+    Align = alClient
+    BorderSpacing.Left = 8
+    BorderSpacing.Right = 8
+    BorderSpacing.Bottom = 8
+    TabIndex = 0
+    TabOrder = 2
+    object TabSheetWrite: TTabSheet
+      Caption = 'Write Image to Floppy'
+      ClientHeight = 377
+      ClientWidth = 696
+      object GroupBoxDrive: TGroupBox
+        Left = 8
+        Height = 78
+        Top = 6
+        Width = 680
+        Anchors = [akTop, akLeft, akRight]
+        Caption = 'Target Floppy Drive'
+        ClientHeight = 58
+        ClientWidth = 676
+        TabOrder = 0
+        object LabelDriveSelect: TLabel
+          Left = 12
+          Height = 14
+          Top = 8
+          Width = 69
+          Caption = 'Select Drive:'
+          ParentFont = False
+        end
+        object ComboBoxDrive: TComboBox
+          Left = 90
+          Height = 21
+          Top = 5
+          Width = 120
+          ItemHeight = 13
+          Style = csDropDownList
+          TabOrder = 0
+          OnChange = ComboBoxDriveChange
+        end
+        object ButtonRefreshDrives: TButton
+          Left = 218
+          Height = 23
+          Top = 4
+          Width = 80
+          Caption = '🔄 Refresh'
+          TabOrder = 1
+          OnClick = ButtonRefreshDrivesClick
+        end
+        object ButtonFormatDrive: TButton
+          Left = 304
+          Height = 23
+          Top = 4
+          Width = 150
+          Caption = 'Format Floppy in Windows...'
+          TabOrder = 2
+          OnClick = ButtonFormatDriveClick
+        end
+        object LabelMediaStatus: TLabel
+          Left = 12
+          Height = 14
+          Top = 36
+          Width = 245
+          Caption = 'Drive Status: Detecting floppy media...'
+          Font.Height = -11
+          Font.Name = 'Tahoma'
+          Font.Style = [fsBold]
+          ParentFont = False
+        end
+      end
+      object GroupBoxImage: TGroupBox
+        Left = 8
+        Height = 110
+        Top = 88
+        Width = 680
+        Anchors = [akTop, akLeft, akRight]
+        Caption = 'Source Atari Disk Image (.ST, .MSA, .DIM)'
+        ClientHeight = 90
+        ClientWidth = 676
+        TabOrder = 1
+        object LabelImageFile: TLabel
+          Left = 12
+          Height = 14
+          Top = 8
+          Width = 64
+          Caption = 'Image File:'
+          ParentFont = False
+        end
+        object EditSourceImage: TEdit
+          Left = 82
+          Height = 21
+          Top = 5
+          Width = 496
+          Anchors = [akTop, akLeft, akRight]
+          TabOrder = 0
+          OnChange = EditSourceImageChange
+        end
+        object ButtonBrowseImage: TButton
+          Left = 586
+          Height = 23
+          Top = 4
+          Width = 78
+          Anchors = [akTop, akRight]
+          Caption = 'Browse...'
+          TabOrder = 1
+          OnClick = ButtonBrowseImageClick
+        end
+        object LabelImageDetails: TLabel
+          Left = 12
+          Height = 14
+          Top = 38
+          Width = 175
+          Caption = 'Format: [No image selected]'
+          Font.Height = -11
+          Font.Name = 'Tahoma'
+          Font.Style = [fsBold]
+          ParentFont = False
+        end
+        object LabelCompatibilityWarning: TLabel
+          Left = 12
+          Height = 14
+          Top = 62
+          Width = 450
+          Caption = 'Please select a standard 720 KB (Double-Density) or 1.44 MB (High-Density) image.'
+          ParentFont = False
+        end
+      end
+      object GroupBoxWriteOptions: TGroupBox
+        Left = 8
+        Height = 64
+        Top = 202
+        Width = 680
+        Anchors = [akTop, akLeft, akRight]
+        Caption = 'Write Options'
+        ClientHeight = 44
+        ClientWidth = 676
+        TabOrder = 2
+        object CheckBoxVerify: TCheckBox
+          Left = 12
+          Height = 19
+          Top = 4
+          Width = 248
+          Caption = 'Verify written tracks after writing (recommended)'
+          Checked = True
+          State = cbChecked
+          TabOrder = 0
+        end
+        object CheckBoxRepack720: TCheckBox
+          Left = 12
+          Height = 19
+          Top = 23
+          Width = 280
+          Caption = 'Repack files into standard 720 KB image'
+          TabOrder = 1
+          OnChange = CheckBoxRepack720Change
+        end
+        object LabelUsbTapeTip: TLabel
+          Left = 300
+          Height = 13
+          Top = 6
+          Width = 365
+          Anchors = [akTop, akLeft, akRight]
+          Caption = '💡 Tip: To write 720 KB onto an HD disk on a USB drive, tape over the density hole.'
+          Font.Color = clGrayText
+          Font.Height = -10
+          ParentFont = False
+        end
+      end
+      object GroupBoxWriteProgress: TGroupBox
+        Left = 8
+        Height = 100
+        Top = 268
+        Width = 680
+        Anchors = [akTop, akLeft, akRight, akBottom]
+        Caption = 'Write Status & Controls'
+        ClientHeight = 80
+        ClientWidth = 676
+        TabOrder = 3
+        object LabelWriteStatus: TLabel
+          Left = 12
+          Height = 14
+          Top = 6
+          Width = 83
+          Caption = 'Ready to write.'
+          Font.Height = -11
+          Font.Name = 'Tahoma'
+          Font.Style = [fsBold]
+          ParentFont = False
+        end
+        object ProgressBarWrite: TProgressBar
+          Left = 12
+          Height = 18
+          Top = 26
+          Width = 652
+          Anchors = [akTop, akLeft, akRight]
+          TabOrder = 0
+        end
+        object ButtonWrite: TButton
+          Left = 12
+          Height = 28
+          Top = 48
+          Width = 140
+          Caption = '&Write to Floppy'
+          Default = True
+          Font.Height = -11
+          Font.Name = 'Tahoma'
+          Font.Style = [fsBold]
+          ParentFont = False
+          TabOrder = 1
+          OnClick = ButtonWriteClick
+        end
+        object ButtonCancelWrite: TButton
+          Left = 160
+          Height = 28
+          Top = 48
+          Width = 90
+          Caption = 'Cancel'
+          Enabled = False
+          TabOrder = 2
+          OnClick = ButtonCancelWriteClick
+        end
+      end
+    end
+    object TabSheetRead: TTabSheet
+      Caption = 'Read Floppy to Image'
+      ClientHeight = 377
+      ClientWidth = 696
+      object GroupBoxReadDrive: TGroupBox
+        Left = 8
+        Height = 78
+        Top = 6
+        Width = 680
+        Anchors = [akTop, akLeft, akRight]
+        Caption = 'Source Floppy Drive'
+        ClientHeight = 58
+        ClientWidth = 676
+        TabOrder = 0
+        object LabelReadDriveSelect: TLabel
+          Left = 12
+          Height = 14
+          Top = 8
+          Width = 69
+          Caption = 'Select Drive:'
+          ParentFont = False
+        end
+        object ComboBoxReadDrive: TComboBox
+          Left = 90
+          Height = 21
+          Top = 5
+          Width = 120
+          ItemHeight = 13
+          Style = csDropDownList
+          TabOrder = 0
+          OnChange = ComboBoxReadDriveChange
+        end
+        object ButtonRefreshReadDrives: TButton
+          Left = 218
+          Height = 23
+          Top = 4
+          Width = 80
+          Caption = '🔄 Refresh'
+          TabOrder = 1
+          OnClick = ButtonRefreshReadDrivesClick
+        end
+        object LabelReadMediaStatus: TLabel
+          Left = 12
+          Height = 14
+          Top = 36
+          Width = 245
+          Caption = 'Drive Status: Detecting floppy media...'
+          Font.Height = -11
+          Font.Name = 'Tahoma'
+          Font.Style = [fsBold]
+          ParentFont = False
+        end
+      end
+      object GroupBoxTargetImage: TGroupBox
+        Left = 8
+        Height = 84
+        Top = 88
+        Width = 680
+        Anchors = [akTop, akLeft, akRight]
+        Caption = 'Destination Image File (.ST)'
+        ClientHeight = 64
+        ClientWidth = 676
+        TabOrder = 1
+        object LabelTargetFile: TLabel
+          Left = 12
+          Height = 14
+          Top = 8
+          Width = 85
+          Caption = 'Save Image As:'
+          ParentFont = False
+        end
+        object EditTargetImage: TEdit
+          Left = 104
+          Height = 21
+          Top = 5
+          Width = 474
+          Anchors = [akTop, akLeft, akRight]
+          TabOrder = 0
+        end
+        object ButtonBrowseTarget: TButton
+          Left = 586
+          Height = 23
+          Top = 4
+          Width = 78
+          Anchors = [akTop, akRight]
+          Caption = 'Browse...'
+          TabOrder = 1
+          OnClick = ButtonBrowseTargetClick
+        end
+      end
+      object GroupBoxReadOptions: TGroupBox
+        Left = 8
+        Height = 60
+        Top = 176
+        Width = 680
+        Anchors = [akTop, akLeft, akRight]
+        Caption = 'Read Options'
+        ClientHeight = 40
+        ClientWidth = 676
+        TabOrder = 2
+        object CheckBoxOpenAfterRead: TCheckBox
+          Left = 12
+          Height = 19
+          Top = 10
+          Width = 245
+          Caption = 'Open image in STIMAGE when read completes'
+          Checked = True
+          State = cbChecked
+          TabOrder = 0
+        end
+        object CheckBoxRetryBadSectors: TCheckBox
+          Left = 290
+          Height = 19
+          Top = 10
+          Width = 245
+          Caption = 'Retry reading on bad sectors (up to 3 times)'
+          Checked = True
+          State = cbChecked
+          TabOrder = 1
+        end
+      end
+      object GroupBoxReadProgress: TGroupBox
+        Left = 8
+        Height = 120
+        Top = 242
+        Width = 680
+        Anchors = [akTop, akLeft, akRight, akBottom]
+        Caption = 'Read Status & Controls'
+        ClientHeight = 100
+        ClientWidth = 676
+        TabOrder = 3
+        object LabelReadStatus: TLabel
+          Left = 12
+          Height = 14
+          Top = 8
+          Width = 82
+          Caption = 'Ready to read.'
+          Font.Height = -11
+          Font.Name = 'Tahoma'
+          Font.Style = [fsBold]
+          ParentFont = False
+        end
+        object ProgressBarRead: TProgressBar
+          Left = 12
+          Height = 18
+          Top = 32
+          Width = 652
+          Anchors = [akTop, akLeft, akRight]
+          TabOrder = 0
+        end
+        object ButtonRead: TButton
+          Left = 12
+          Height = 28
+          Top = 60
+          Width = 140
+          Caption = '&Read from Floppy'
+          Font.Height = -11
+          Font.Name = 'Tahoma'
+          Font.Style = [fsBold]
+          ParentFont = False
+          TabOrder = 1
+          OnClick = ButtonReadClick
+        end
+        object ButtonCancelRead: TButton
+          Left = 160
+          Height = 28
+          Top = 60
+          Width = 90
+          Caption = 'Cancel'
+          Enabled = False
+          TabOrder = 2
+          OnClick = ButtonCancelReadClick
+        end
+      end
+    end
+  end
+  object PanelBottom: TPanel
+    Left = 0
+    Height = 44
+    Top = 516
+    Width = 720
+    Align = alBottom
+    BevelOuter = bvNone
+    ClientHeight = 44
+    ClientWidth = 720
+    TabOrder = 3
+    object ButtonClose: TButton
+      Left = 626
+      Height = 28
+      Top = 8
+      Width = 84
+      Anchors = [akTop, akRight]
+      Cancel = True
+      Caption = '&Close'
+      TabOrder = 0
+      OnClick = ButtonCloseClick
+    end
+  end
+  object OpenDialogImage: TOpenDialog
+    Title = 'Select Disk Image'
+    Filter = 'Atari Disk Images (*.st;*.msa;*.dim)|*.st;*.msa;*.dim|All Files (*.*)|*.*'
+    Left = 450
+    Top = 15
+  end
+  object SaveDialogImage: TSaveDialog
+    Title = 'Save Dumped Floppy Disk Image'
+    Filter = 'Atari ST Disk Image (*.st)|*.st|All Files (*.*)|*.*'
+    DefaultExt = 'st'
+    Left = 520
+    Top = 15
+  end
+end
