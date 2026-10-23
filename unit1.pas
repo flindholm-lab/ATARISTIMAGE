@@ -6239,8 +6239,8 @@ var
   BootSec: array[0..511] of Byte;
   BytesPerSec, SecPerFAT, TotalSec, ReservedSec, RootEntries, SecPerTrack, Sides: Word;
   SecPerClust, NumFATs, MediaByte: Byte;
-  I: Integer;
   BootSum, OriginalBootSum: Word;
+  LabelStr: string;
 begin
   if (FImagePath = '') or not FileExists(FImagePath) then
   begin
@@ -6274,9 +6274,7 @@ begin
     FS.ReadBuffer(BootSec, 512);
 
     // Check if original boot sector contains an executable Atari ST bootloader
-    OriginalBootSum := 0;
-    for I := 0 to 255 do
-      Inc(OriginalBootSum, (Word(BootSec[I * 2]) shl 8) or BootSec[I * 2 + 1]);
+    OriginalBootSum := CalculateBootChecksum(@BootSec[0], 512);
 
     if (OriginalBootSum = $1234) or (BootSec[0] = $60) then
     begin
@@ -6312,7 +6310,7 @@ begin
     begin
       if TotalSec <= 720 then RootEntries := 64 else RootEntries := 112;
     end;
-    if TotalSec = 0 then
+    if (TotalSec = 0) or (Int64(TotalSec) * BytesPerSec > FS.Size + 512) then
     begin
       TotalSec := Word(Min(65535, FS.Size div BytesPerSec));
     end;
@@ -6372,10 +6370,13 @@ begin
       BootSec[$2A] := Byte(Random(256));
     end;
     // Volume label at $2B..$35 (11 bytes)
-    if FVolumeLabel <> '' then
-      Move(PAnsiChar(PadRight(FVolumeLabel, 11))^, BootSec[$2B], 11)
-    else
-      Move(PAnsiChar('NO NAME    ')^, BootSec[$2B], 11);
+    FillChar(BootSec[$2B], 11, Ord(' '));
+    LabelStr := Trim(FVolumeLabel);
+    if LabelStr = '' then
+      LabelStr := 'NO NAME'
+    else if Length(LabelStr) > 11 then
+      LabelStr := Copy(LabelStr, 1, 11);
+    Move(LabelStr[1], BootSec[$2B], Length(LabelStr));
 
     // File System Type: "FAT12   "
     Move(PAnsiChar('FAT12   ')^, BootSec[$36], 8);
@@ -6392,13 +6393,11 @@ begin
 
     // 7. Ensure Atari TOS does NOT treat this as an executable boot sector
     // TOS sums 256 16-bit big-endian words. If sum = $1234, TOS executes it!
-    BootSum := 0;
-    for I := 0 to 255 do
-      Inc(BootSum, (Word(BootSec[I * 2]) shl 8) or BootSec[I * 2 + 1]);
+    BootSum := CalculateBootChecksum(@BootSec[0], 512);
 
     if BootSum = $1234 then
     begin
-      Inc(BootSec[508]);
+      BootSec[508] := Byte((BootSec[508] + 1) and $FF);
     end;
 
     // Write updated Sector 0
@@ -6412,6 +6411,7 @@ begin
     FS.Free;
   end;
 
+  UpdateStatusBar;
   UpdateFreeSpaceDisplay;
   ShowMessage('Boot sector updated successfully!' + sLineBreak + sLineBreak +
     'The disk image now features a standard PC/TOS dual-compatible BPB' + sLineBreak +
