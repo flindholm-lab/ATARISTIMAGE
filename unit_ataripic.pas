@@ -17,7 +17,9 @@ type
     apfDegasPC2,       // DEGAS Elite Compressed Med Res (RLE)
     apfDegasPC3,       // DEGAS Elite Compressed High Res (RLE)
     apfNeoChrome,      // NeoChrome (.NEO) (320x200, 16 colors)
-    apfSpectrum512SPU, // Spectrum 512 (.SPU) (320x200, 512 colors per-line palettes)
+    apfSpectrum512SPU, // Spectrum 512 Uncompressed (.SPU) (320x200, 512 colors per-line palettes)
+    apfSpectrum512SPC, // Spectrum 512 Compressed (.SPC) (320x200, 512 colors)
+    apfSpectrum512SPS, // Spectrum 512 Smooshed (.SPS) (320x200, 512 colors)
     apfRawScreen,      // Raw 32,000 or 32,032 bytes Atari ST screen dump
     apfArtDirector,    // Art Director (.ART) (320x200, 16 colors)
     apfDoodle,         // Doodle (.DOO) (640x400, monochrome)
@@ -27,7 +29,8 @@ type
     apfStosCompactPac, // STOS Picture Compactor / Squashed (.PAC)
     apfGemImg,         // GEM Monochrome Image (.IMG)
     apfTitusPC1,       // Titus / Extended Compressed Picture (.PC1)
-    apfTitusSQ         // Titus SQZ Compressed Screen (.SQ)
+    apfTitusSQ,        // Titus SQZ Compressed Screen (.SQ)
+    apfMurMural        // C.O.L.R. Object Editor Mural (.MUR) (320x200, 16 colors)
   );
 
 const
@@ -149,6 +152,8 @@ begin
     apfDegasPC3:       Result := 'DEGAS Elite RLE High Res (.PC3)';
     apfNeoChrome:      Result := 'NeoChrome Image (.NEO)';
     apfSpectrum512SPU: Result := 'Spectrum 512 Image (.SPU)';
+    apfSpectrum512SPC: Result := 'Spectrum 512 Compressed Image (.SPC)';
+    apfSpectrum512SPS: Result := 'Spectrum 512 Smooshed Image (.SPS)';
     apfRawScreen:      Result := 'Raw Atari ST Screen Dump (320x200)';
     apfArtDirector:    Result := 'Art Director Image (.ART)';
     apfDoodle:         Result := 'Doodle High Res (.DOO)';
@@ -159,6 +164,7 @@ begin
     apfGemImg:         Result := 'GEM Monochrome Image (.IMG)';
     apfTitusPC1:       Result := 'Compressed Low Res Picture (.PC1)';
     apfTitusSQ:        Result := 'Titus Compressed Screen (.SQ)';
+    apfMurMural:        Result := 'C.O.L.R. Object Editor Mural (.MUR)';
   else
     Result := 'Unknown Picture Format';
   end;
@@ -250,12 +256,20 @@ begin
   // 8. Check Quantum Paintbox (.PBX)
   if (Ext = '.PBX') or CheckString(InBuf, InSize, 0, 'PBX') then Exit(apfQuantumPaint);
 
-  // 9. Check Spectrum 512 (.SPU, .SPC, .SPS) - uncompressed .SPU is 51,104 bytes (or 51,200)
-  if (InSize = 51104) or (InSize = 51200) or
-     (((Ext = '.SPU') or (Ext = '.SPC') or (Ext = '.SPS')) and (InSize >= 51104)) then
-  begin
+  // 9a. Check Spectrum 512 Uncompressed (.SPU) - 51,104 or 51,200 bytes
+  if (InSize = 51104) or (InSize = 51200) or ((Ext = '.SPU') and (InSize >= 51104)) then
     Exit(apfSpectrum512SPU);
+
+  // 9b. Check Spectrum 512 Compressed (.SPC) and Smooshed (.SPS)
+  if (InSize >= 12) and (InBuf[0] = Byte('S')) and (InBuf[1] = Byte('P')) then
+  begin
+    if Ext = '.SPS' then
+      Exit(apfSpectrum512SPS)
+    else
+      Exit(apfSpectrum512SPC);
   end;
+  if (Ext = '.SPC') and (InSize >= 12) then Exit(apfSpectrum512SPC);
+  if (Ext = '.SPS') and (InSize >= 12) then Exit(apfSpectrum512SPS);
 
   // 10. Check NeoChrome (.NEO) - 32,128 bytes
   if (Ext = '.NEO') or (InSize = 32128) then
@@ -276,13 +290,17 @@ begin
     if (ResWord = 2) or (Ext = '.PI3') then Exit(apfDegasPI3);
   end;
 
-  // 12. Check Raw Atari ST Screen dumps (32,000 or 32,032 bytes) or .MUR
-  if (InSize = 32000) or (InSize = 32032) or (Ext = '.MUR') then
+  // 12. Check C.O.L.R. Object Editor Mural (.MUR)
+  if (Ext = '.MUR') and (InSize >= 32000) then
+    Exit(apfMurMural);
+
+  // 13. Check Raw Atari ST Screen dumps (32,000 or 32,032 bytes)
+  if (InSize = 32000) or (InSize = 32032) then
   begin
     Exit(apfRawScreen);
   end;
 
-  // 13. Check GEM Image (.IMG)
+  // 14. Check GEM Image (.IMG)
   if (Ext = '.IMG') or ((InSize >= 16) and (ReadBE16(InBuf, 0) = 1) and (ReadBE16(InBuf, 2) >= 8) and (ReadBE16(InBuf, 4) in [1, 4])) then
   begin
     Exit(apfGemImg);
@@ -396,32 +414,355 @@ begin
   end;
 end;
 
-{ Decodes 320x200 Spectrum 512 image with 3 palettes per scanline }
-procedure DecodeSpectrum512(const InBuf: PByte; OutBmp: Graphics.TBitmap);
+const
+  { Standard desktop GEM / C.O.L.R. Object Editor Mural 16-color palette (ST 3-bit RGB) }
+  COLR_MURAL_PALETTE: array[0..15] of Word = (
+    $0777, $0000, $0555, $0444, $0333, $0222, $0111, $0770,
+    $0660, $0550, $0440, $0330, $0220, $0110, $0007, $0000
+  );
+
+{ Decompresses Spectrum 512 Compressed (.SPC) image and palette streams }
+function DecompressSpectrum512SPC(const InBuf: PByte; InSize: Integer;
+  out OutScreen: TBytes; out OutPal: TBytes): Boolean;
+var
+  DataLen, ColorLen: LongWord;
+  InPos, DestPos: Integer;
+  Val: ShortInt;
+  B: Byte;
+  Count: Integer;
+  BufImage: array[0..31839] of Byte;
+  DestW, SrcW: Integer;
+  PalInPos, PalDestIdx: Integer;
+  PalCount, ColorIdx: Integer;
+  ActiveMask: Word;
+  ColorWord: Word;
+begin
+  Result := False;
+  SetLength(OutScreen, 0);
+  SetLength(OutPal, 0);
+
+  if (InBuf = nil) or (InSize < 12) then Exit;
+
+  // Header verification: 'SP' signature ($53, $50)
+  if (InBuf[0] <> Byte('S')) or (InBuf[1] <> Byte('P')) then Exit;
+
+  DataLen := ReadBE32(InBuf, 4);
+  ColorLen := ReadBE32(InBuf, 8);
+
+  if (DataLen = 0) or (ColorLen = 0) then Exit;
+  if 12 + Int64(DataLen) + Int64(ColorLen) > InSize then Exit;
+
+  // 1. Decompress pixel data via RLE into BufImage (31,840 bytes)
+  FillChar(BufImage, SizeOf(BufImage), 0);
+  InPos := 12;
+  DestPos := 0;
+
+  while (DestPos < 31840) and (InPos < 12 + Integer(DataLen)) do
+  begin
+    Val := ShortInt(InBuf[InPos]);
+    Inc(InPos);
+
+    if Val >= 0 then
+    begin
+      Count := Val + 1;
+      if DestPos + Count > 31840 then
+        Count := 31840 - DestPos;
+      if InPos + Count > 12 + Integer(DataLen) then
+        Count := (12 + Integer(DataLen)) - InPos;
+      if Count > 0 then
+      begin
+        Move(InBuf[InPos], BufImage[DestPos], Count);
+        Inc(InPos, Count);
+        Inc(DestPos, Count);
+      end
+      else
+        Break;
+    end
+    else
+    begin
+      Count := -Val + 2;
+      if DestPos + Count > 31840 then
+        Count := 31840 - DestPos;
+      if InPos < 12 + Integer(DataLen) then
+      begin
+        B := InBuf[InPos];
+        Inc(InPos);
+        FillChar(BufImage[DestPos], Count, B);
+        Inc(DestPos, Count);
+      end
+      else
+        Break;
+    end;
+  end;
+
+  // 2. Interleave planar BufImage into standard 32,000-byte VRAM screen buffer
+  SetLength(OutScreen, 32000);
+  FillChar(OutScreen[0], 32000, 0);
+
+  DestW := 80; // Starting at scanline 1 (offset 160 bytes = 80 words)
+  SrcW := 0;
+  while (DestW < 16000) and (SrcW + 1 < 7960) do
+  begin
+    OutScreen[DestW * 2]     := BufImage[SrcW * 2];
+    OutScreen[DestW * 2 + 1] := BufImage[SrcW * 2 + 1];
+    OutScreen[DestW * 2 + 2] := BufImage[7960 + SrcW * 2];
+    OutScreen[DestW * 2 + 3] := BufImage[7960 + SrcW * 2 + 1];
+    OutScreen[DestW * 2 + 4] := BufImage[15920 + SrcW * 2];
+    OutScreen[DestW * 2 + 5] := BufImage[15920 + SrcW * 2 + 1];
+    OutScreen[DestW * 2 + 6] := BufImage[23880 + SrcW * 2];
+    OutScreen[DestW * 2 + 7] := BufImage[23880 + SrcW * 2 + 1];
+    Inc(DestW, 4);
+    Inc(SrcW, 1);
+  end;
+
+  // 3. Decompress palette (19,104 bytes = 597 palettes * 16 words * 2 bytes)
+  SetLength(OutPal, 19104);
+  FillChar(OutPal[0], 19104, 0);
+
+  PalInPos := 12 + Integer(DataLen);
+  PalDestIdx := 0;
+
+  for PalCount := 1 to 597 do
+  begin
+    if PalInPos + 1 >= 12 + Integer(DataLen) + Integer(ColorLen) then
+      Break;
+
+    ActiveMask := ReadBE16(InBuf, PalInPos);
+    Inc(PalInPos, 2);
+
+    for ColorIdx := 0 to 15 do
+    begin
+      if ((ActiveMask and (1 shl ColorIdx)) <> 0) and (ColorIdx in [1..14]) then
+      begin
+        if PalInPos + 1 < 12 + Integer(DataLen) + Integer(ColorLen) then
+        begin
+          ColorWord := ReadBE16(InBuf, PalInPos);
+          Inc(PalInPos, 2);
+        end
+        else
+          ColorWord := 0;
+      end
+      else
+        ColorWord := 0;
+
+      OutPal[PalDestIdx * 2] := Byte((ColorWord shr 8) and $FF);
+      OutPal[PalDestIdx * 2 + 1] := Byte(ColorWord and $FF);
+      Inc(PalDestIdx);
+    end;
+  end;
+
+  Result := True;
+end;
+
+{ Decompresses Spectrum 512 Smooshed (.SPS) image and palette streams }
+function DecompressSpectrum512SPS(const InBuf: PByte; InSize: Integer;
+  out OutScreen: TBytes; out OutPal: TBytes): Boolean;
+var
+  DataLen, ColorLen: LongWord;
+  InPos, DestPos: Integer;
+  ValByte, B: Byte;
+  Count, I: Integer;
+  BufImage: array[0..31839] of Byte;
+  DestW, SrcW: Integer;
+  PalInPos, PalDestIdx: Integer;
+  PalCount, ColorIdx: Integer;
+  BitArray: array of Boolean;
+  TotalBits, BitPos: Integer;
+  ActiveCols: array[1..14] of Boolean;
+  ColorVal: Word;
+begin
+  Result := False;
+  SetLength(OutScreen, 0);
+  SetLength(OutPal, 0);
+
+  if (InBuf = nil) or (InSize < 12) then Exit;
+
+  if (InBuf[0] <> Byte('S')) or (InBuf[1] <> Byte('P')) then Exit;
+
+  DataLen := ReadBE32(InBuf, 4);
+  ColorLen := ReadBE32(InBuf, 8);
+
+  if (DataLen = 0) or (ColorLen = 0) then Exit;
+  if 12 + Int64(DataLen) + Int64(ColorLen) > InSize then Exit;
+
+  // 1. Decompress pixel data via SPS RLE into BufImage (31,840 bytes)
+  FillChar(BufImage, SizeOf(BufImage), 0);
+  InPos := 12;
+  DestPos := 0;
+
+  while (DestPos < 31840) and (InPos < 12 + Integer(DataLen)) do
+  begin
+    ValByte := InBuf[InPos];
+    Inc(InPos);
+
+    if ValByte <= 127 then
+    begin
+      Count := Integer(ValByte) + 3;
+      if DestPos + Count > 31840 then
+        Count := 31840 - DestPos;
+      if InPos < 12 + Integer(DataLen) then
+      begin
+        B := InBuf[InPos];
+        Inc(InPos);
+        FillChar(BufImage[DestPos], Count, B);
+        Inc(DestPos, Count);
+      end
+      else
+        Break;
+    end
+    else
+    begin
+      Count := Integer(ValByte) - 127;
+      if DestPos + Count > 31840 then
+        Count := 31840 - DestPos;
+      if InPos + Count > 12 + Integer(DataLen) then
+        Count := (12 + Integer(DataLen)) - InPos;
+      if Count > 0 then
+      begin
+        Move(InBuf[InPos], BufImage[DestPos], Count);
+        Inc(InPos, Count);
+        Inc(DestPos, Count);
+      end
+      else
+        Break;
+    end;
+  end;
+
+  // 2. Interleave planar BufImage into standard 32,000-byte VRAM screen buffer
+  SetLength(OutScreen, 32000);
+  FillChar(OutScreen[0], 32000, 0);
+
+  DestW := 80;
+  SrcW := 0;
+  while (DestW < 16000) and (SrcW + 1 < 7960) do
+  begin
+    OutScreen[DestW * 2]     := BufImage[SrcW * 2];
+    OutScreen[DestW * 2 + 1] := BufImage[SrcW * 2 + 1];
+    OutScreen[DestW * 2 + 2] := BufImage[7960 + SrcW * 2];
+    OutScreen[DestW * 2 + 3] := BufImage[7960 + SrcW * 2 + 1];
+    OutScreen[DestW * 2 + 4] := BufImage[15920 + SrcW * 2];
+    OutScreen[DestW * 2 + 5] := BufImage[15920 + SrcW * 2 + 1];
+    OutScreen[DestW * 2 + 6] := BufImage[23880 + SrcW * 2];
+    OutScreen[DestW * 2 + 7] := BufImage[23880 + SrcW * 2 + 1];
+    Inc(DestW, 4);
+    Inc(SrcW, 1);
+  end;
+
+  // 3. Decompress palette bitstream
+  SetLength(OutPal, 19104);
+  FillChar(OutPal[0], 19104, 0);
+
+  PalInPos := 12 + Integer(DataLen);
+  TotalBits := Integer(ColorLen) * 8;
+  SetLength(BitArray, TotalBits);
+
+  for I := 0 to Integer(ColorLen) - 1 do
+  begin
+    B := InBuf[PalInPos + I];
+    BitArray[I * 8 + 0] := (B and $80) <> 0;
+    BitArray[I * 8 + 1] := (B and $40) <> 0;
+    BitArray[I * 8 + 2] := (B and $20) <> 0;
+    BitArray[I * 8 + 3] := (B and $10) <> 0;
+    BitArray[I * 8 + 4] := (B and $08) <> 0;
+    BitArray[I * 8 + 5] := (B and $04) <> 0;
+    BitArray[I * 8 + 6] := (B and $02) <> 0;
+    BitArray[I * 8 + 7] := (B and $01) <> 0;
+  end;
+
+  BitPos := 0;
+  PalDestIdx := 0;
+
+  for PalCount := 1 to 597 do
+  begin
+    if BitPos + 14 > TotalBits then Break;
+
+    for ColorIdx := 1 to 14 do
+    begin
+      ActiveCols[ColorIdx] := BitArray[BitPos];
+      Inc(BitPos);
+    end;
+
+    // Color 0 is always 0
+    OutPal[PalDestIdx * 2] := 0;
+    OutPal[PalDestIdx * 2 + 1] := 0;
+    Inc(PalDestIdx);
+
+    for ColorIdx := 1 to 14 do
+    begin
+      if ActiveCols[ColorIdx] then
+      begin
+        if BitPos + 9 > TotalBits then Break;
+
+        ColorVal := 0;
+        if BitArray[BitPos + 0] then ColorVal := ColorVal or 1024; // R bit 2
+        if BitArray[BitPos + 1] then ColorVal := ColorVal or 512;  // R bit 1
+        if BitArray[BitPos + 2] then ColorVal := ColorVal or 256;  // R bit 0
+        if BitArray[BitPos + 3] then ColorVal := ColorVal or 64;   // G bit 2
+        if BitArray[BitPos + 4] then ColorVal := ColorVal or 32;   // G bit 1
+        if BitArray[BitPos + 5] then ColorVal := ColorVal or 16;   // G bit 0
+        if BitArray[BitPos + 6] then ColorVal := ColorVal or 4;    // B bit 2
+        if BitArray[BitPos + 7] then ColorVal := ColorVal or 2;    // B bit 1
+        if BitArray[BitPos + 8] then ColorVal := ColorVal or 1;    // B bit 0
+        Inc(BitPos, 9);
+      end
+      else
+        ColorVal := 0;
+
+      OutPal[PalDestIdx * 2] := Byte((ColorVal shr 8) and $FF);
+      OutPal[PalDestIdx * 2 + 1] := Byte(ColorVal and $FF);
+      Inc(PalDestIdx);
+    end;
+
+    // Color 15 is always 0
+    OutPal[PalDestIdx * 2] := 0;
+    OutPal[PalDestIdx * 2 + 1] := 0;
+    Inc(PalDestIdx);
+  end;
+
+  Result := True;
+end;
+
+{ Decodes 320x200 Spectrum 512 image (SPU, SPC, or SPS) with authentic hardware raster timing }
+procedure DecodeSpectrum512Screen(const ScreenBuf: PByte; const PalBuf: PByte; OutBmp: Graphics.TBitmap);
 var
   Y, Block, X, Shift, ColorIdx, PixelX, LineOffset, BlockOffset, PalIdx: Integer;
-  P0, P1, P2, P3, PalWord: Word;
-  PalOffset: Integer;
+  P0, P1, P2, P3: Word;
+  LinePalOffset: Integer;
+  LinePal: array[0..47] of TColor;
+  PalWord: Word;
+  C, Calcul: Integer;
   Col: TColor;
 begin
   OutBmp.SetSize(320, 200);
   OutBmp.PixelFormat := pf24bit;
-  for Y := 0 to 199 do
+
+  // Scanline 0 is blank/black in Spectrum 512
+  for PixelX := 0 to 319 do
+    OutBmp.Canvas.Pixels[PixelX, 0] := clBlack;
+
+  // Scanlines 1..199
+  for Y := 1 to 199 do
   begin
     LineOffset := Y * 160;
-    // In 51,104 byte .SPU files: line 0 uses first palette (offset 32,000), lines 1..199 use 32000 + (Y - 1) * 96
-    if Y = 0 then
-      PalOffset := 32000
-    else
-      PalOffset := 32000 + (Y - 1) * 96;
+    LinePalOffset := (Y - 1) * 96;
+
+    // Precalculate 48 colors for line Y (3 palettes of 16 colors)
+    for PalIdx := 0 to 2 do
+    begin
+      for C := 0 to 15 do
+      begin
+        PalWord := ReadBE16(PalBuf, LinePalOffset + PalIdx * 32 + C * 2);
+        LinePal[PalIdx * 16 + C] := ConvertAtariColorWord(PalWord, True);
+      end;
+    end;
 
     for Block := 0 to 19 do
     begin
       BlockOffset := LineOffset + Block * 8;
-      P0 := ReadBE16(InBuf, BlockOffset);
-      P1 := ReadBE16(InBuf, BlockOffset + 2);
-      P2 := ReadBE16(InBuf, BlockOffset + 4);
-      P3 := ReadBE16(InBuf, BlockOffset + 6);
+      P0 := ReadBE16(ScreenBuf, BlockOffset);
+      P1 := ReadBE16(ScreenBuf, BlockOffset + 2);
+      P2 := ReadBE16(ScreenBuf, BlockOffset + 4);
+      P3 := ReadBE16(ScreenBuf, BlockOffset + 6);
 
       for X := 0 to 15 do
       begin
@@ -432,21 +773,29 @@ begin
                     (((P2 shr Shift) and 1) shl 2) or
                     (((P3 shr Shift) and 1) shl 3);
 
-        // Spectrum 512 horizontal raster beam palette distribution:
-        // Palette 0: pixels 0..105, Palette 1: pixels 106..212, Palette 2: pixels 213..319
-        if PixelX < 106 then
-          PalIdx := 0
-        else if PixelX < 213 then
-          PalIdx := 1
+        // Hardware-accurate Spectrum 512 raster interrupt color switching formula
+        Calcul := 10 * ColorIdx;
+        if Odd(ColorIdx) then
+          Dec(Calcul, 5)
         else
-          PalIdx := 2;
+          Inc(Calcul);
 
-        PalWord := ReadBE16(InBuf, PalOffset + PalIdx * 32 + ColorIdx * 2);
-        Col := ConvertAtariColorWord(PalWord, True);
+        if (PixelX >= Calcul) and (PixelX < Calcul + 160) then
+          Col := LinePal[16 + ColorIdx]
+        else if PixelX >= Calcul + 160 then
+          Col := LinePal[32 + ColorIdx]
+        else
+          Col := LinePal[ColorIdx];
+
         OutBmp.Canvas.Pixels[PixelX, Y] := Col;
       end;
     end;
   end;
+end;
+
+procedure DecodeSpectrum512(const InBuf: PByte; OutBmp: Graphics.TBitmap);
+begin
+  DecodeSpectrum512Screen(InBuf, InBuf + 32000, OutBmp);
 end;
 
 { Decodes GEM Monochrome .IMG picture }
@@ -1138,6 +1487,7 @@ var
   IsSTE, IsCompressed: Boolean;
   I, DefRes, PalOffset, ScreenOffset: Integer;
   UnpackedBuf, StadVRAM, StosPal, StosVRAM, TinyPal, TinyVRAM, UnsquashedBuf, PackedDepackBuf: TBytes;
+  SpcScreen, SpcPal, SpsScreen, SpsPal: TBytes;
   StosRes, TinyRes: Integer;
   WorkBuf: PByte;
   WorkSize: Integer;
@@ -1296,8 +1646,31 @@ begin
 
       apfSpectrum512SPU:
       begin
-        DecodeSpectrum512(WorkBuf, OutBitmap);
-        FormatDesc := 'Spectrum 512 Image (320x200, 512 Colors)';
+        if WorkSize < 51104 then Exit(False);
+        DecodeSpectrum512Screen(WorkBuf, WorkBuf + 32000, OutBitmap);
+        FormatDesc := 'Spectrum 512 Uncompressed (320x200, 512 Colors)';
+        OutWidth := 320;
+        OutHeight := 200;
+        OutColors := 512;
+        Result := True;
+      end;
+
+      apfSpectrum512SPC:
+      begin
+        if not DecompressSpectrum512SPC(WorkBuf, WorkSize, SpcScreen, SpcPal) then Exit(False);
+        DecodeSpectrum512Screen(@SpcScreen[0], @SpcPal[0], OutBitmap);
+        FormatDesc := 'Spectrum 512 Compressed (320x200, 512 Colors)';
+        OutWidth := 320;
+        OutHeight := 200;
+        OutColors := 512;
+        Result := True;
+      end;
+
+      apfSpectrum512SPS:
+      begin
+        if not DecompressSpectrum512SPS(WorkBuf, WorkSize, SpsScreen, SpsPal) then Exit(False);
+        DecodeSpectrum512Screen(@SpsScreen[0], @SpsPal[0], OutBitmap);
+        FormatDesc := 'Spectrum 512 Smooshed (320x200, 512 Colors)';
         OutWidth := 320;
         OutHeight := 200;
         OutColors := 512;
@@ -1341,12 +1714,39 @@ begin
 
       apfArtDirector:
       begin
-        if WorkSize < 32034 then Exit(False);
-        IsSTE := HasSTEBits(WorkBuf + 2, 16);
+        if WorkSize < 32032 then Exit(False);
+        // Art Director (.ART) is standard 32,000 bytes screen data at offset 0,
+        // followed by 32 bytes (16 words) Atari ST palette at offset 32000.
+        // Some converters might prepend a 2-byte resolution word (32,034 bytes).
+        if (WorkSize >= 32034) and (ReadBE16(WorkBuf, 0) in [0..2]) then
+        begin
+          ScreenOffset := 34;
+          PalOffset := 2;
+        end
+        else
+        begin
+          ScreenOffset := 0;
+          PalOffset := 32000;
+        end;
+
+        IsSTE := HasSTEBits(WorkBuf + PalOffset, 16);
         for I := 0 to 15 do
-          Pal[I] := ConvertAtariColorWord(ReadBE16(WorkBuf, 2 + I * 2), IsSTE);
-        DecodeLowResScreen(WorkBuf + 34, Pal, OutBitmap);
+          Pal[I] := ConvertAtariColorWord(ReadBE16(WorkBuf, PalOffset + I * 2), IsSTE);
+        DecodeLowResScreen(WorkBuf + ScreenOffset, Pal, OutBitmap);
         FormatDesc := 'Art Director (320x200, 16 Colors)';
+        OutWidth := 320;
+        OutHeight := 200;
+        OutColors := 16;
+        Result := True;
+      end;
+
+      apfMurMural:
+      begin
+        if WorkSize < 32000 then Exit(False);
+        for I := 0 to 15 do
+          Pal[I] := ConvertAtariColorWord(COLR_MURAL_PALETTE[I], False);
+        DecodeLowResScreen(WorkBuf, Pal, OutBitmap);
+        FormatDesc := 'C.O.L.R. Object Editor Mural (320x200, 16 Colors)';
         OutWidth := 320;
         OutHeight := 200;
         OutColors := 16;

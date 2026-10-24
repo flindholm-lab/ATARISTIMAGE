@@ -122,30 +122,35 @@ begin
         ASides := 1;
         ASectorsPerTrack := 9;
         AEndTrack := 79;
+        Result := True;
       end
       else if PayloadSize = 409600 then // 400 KB (80 trk, 1 side, 10 sec)
       begin
         ASides := 1;
         ASectorsPerTrack := 10;
         AEndTrack := 79;
+        Result := True;
       end
       else if PayloadSize = 737280 then // 720 KB (80 trk, 2 side, 9 sec)
       begin
         ASides := 2;
         ASectorsPerTrack := 9;
         AEndTrack := 79;
+        Result := True;
       end
       else if PayloadSize = 819200 then // 800 KB (80 trk, 2 side, 10 sec)
       begin
         ASides := 2;
         ASectorsPerTrack := 10;
         AEndTrack := 79;
+        Result := True;
       end
       else if PayloadSize = 1474560 then // 1.44 MB (80 trk, 2 side, 18 sec)
       begin
         ASides := 2;
         ASectorsPerTrack := 18;
         AEndTrack := 79;
+        Result := True;
       end
       else
       begin
@@ -156,9 +161,9 @@ begin
           ASides := 2;
           ASectorsPerTrack := 9;
           AEndTrack := Max(79, TotalTracks - 1);
+          Result := True;
         end;
       end;
-      Result := True;
     finally
       FS.Free;
     end;

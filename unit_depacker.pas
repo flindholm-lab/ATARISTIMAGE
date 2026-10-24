@@ -32,6 +32,10 @@ function DecompressJek(const InBuf: PByte; InSize: Integer; out OutBuf: TBytes):
 function DecompressDegasElite(const InBuf: PByte; InSize: Integer; DefaultRes: Integer; out OutBuf: TBytes): Boolean;
 function DecompressRLE(const InBuf: PByte; InSize: Integer; out OutBuf: TBytes): Boolean;
 function DecompressFire(const InBuf: PByte; InSize: Integer; out OutBuf: TBytes): Boolean;
+function DecompressPompey(const InBuf: PByte; InSize: Integer; out OutBuf: TBytes): Boolean;
+function DecompressSentry(const InBuf: PByte; InSize: Integer; out OutBuf: TBytes): Boolean;
+function Decompress4PAK(const InBuf: PByte; InSize: Integer; out OutBuf: TBytes): Boolean;
+function DecompressHappy(const InBuf: PByte; InSize: Integer; out OutBuf: TBytes): Boolean;
 function DecompressTiny(const InBuf: PByte; InSize: Integer; DefaultRes: Integer; out OutPalette: TBytes; out OutVRAM: TBytes; out OutRes: Integer): Boolean;
 function DecompressStad(const InBuf: PByte; InSize: Integer; out OutScreen: TBytes): Boolean;
 function DecompressStosSquash(const InBuf: PByte; InSize: Integer; out OutBuf: TBytes): Boolean;
@@ -213,7 +217,8 @@ begin
     Exit('Gremlin Packer Raw Data');
 
   // 9. Happy Packer
-  if CheckString(Buffer, Size, 52, 'EASY') then
+  if CheckString(Buffer, Size, 52, 'EASY') or
+     ((Size >= 28) and CheckWord(Buffer, Size, 0, $601A) and (FindEmbeddedSig(Buffer, Min(Size, 512), 'HAPPY COMPUTER PACKER') >= 0)) then
     Exit('Happy Packer Executable');
 
     // Pack-Ice executable banner check (e.g. MENU70, MENU71, MENU72, INTRO)
@@ -343,6 +348,16 @@ begin
   // 22. Pompey Packer
   if CheckLastLongString(Buffer, Size, 'POPI') or CheckLastLongString(Buffer, Size, 'PUFF') then
     Exit('Pompey Packer Raw Data');
+  if CheckWord(Buffer, Size, 0, $601A) and (Size >= 28) then
+  begin
+    if (28 + ReadBE32(Buffer, 2) + ReadBE32(Buffer, 6) <= LongWord(Size)) and
+       (28 + ReadBE32(Buffer, 2) + ReadBE32(Buffer, 6) >= 12) then
+    begin
+      if CheckString(Buffer, Size, 28 + ReadBE32(Buffer, 2) + ReadBE32(Buffer, 6) - 4, 'POPI') or
+         CheckString(Buffer, Size, 28 + ReadBE32(Buffer, 2) + ReadBE32(Buffer, 6) - 4, 'PUFF') then
+        Exit('Pompey Packer Executable');
+    end;
+  end;
   if CheckLong(Buffer, Size, 158, $00847604) then Exit('Pompey Packer v1.5 Executable');
   if CheckLong(Buffer, Size, 158, $60000084) then Exit('Pompey Packer v1.9 Executable');
   if CheckLong(Buffer, Size, 158, $340460F0) then Exit('Pompey Packer v1.9 Var 1 Executable');
@@ -369,6 +384,8 @@ begin
   if CheckLastLongString(Buffer, Size, 'Snt2') then Exit('Sentry Packer v2.05 Raw Data');
   if CheckString(Buffer, Size, 522, '2.05') then Exit('Sentry Packer v2.05 Executable');
   if CheckString(Buffer, Size, 526, '2.11') then Exit('Sentry Packer v2.11 Executable');
+  if CheckWord(Buffer, Size, 0, $601A) and (FindEmbeddedSig(Buffer, Min(Size, 1024), 'Sentry v2') >= 0) then
+    Exit('Sentry Packer Executable');
 
   // 27. Speedpacker
   if CheckString(Buffer, Size, 0, 'SP20') then Exit('Speedpacker v2.0 Raw Data');
@@ -519,6 +536,10 @@ begin
      (Pos('JEK', P) > 0) or (Pos('BYTEKILLER', P) > 0) or (Pos('BYTE KILLER', P) > 0) or
      (Pos('DEGAS', P) > 0) or
      (Pos('FIRE', P) > 0) or
+     (Pos('POMPEY', P) > 0) or
+     (Pos('SENTRY', P) > 0) or
+     (Pos('4PAK', P) > 0) or
+     (Pos('HAPPY', P) > 0) or
      (Pos('STOS', P) > 0) or (Pos('STAD', P) > 0) or (Pos('TINY', P) > 0) or (Pos('SQUASH', P) > 0) or
      (Pos('COMPACTOR', P) > 0) then
     Result := True;
@@ -947,7 +968,7 @@ var
   TrialOrigSizes: array of Integer;
   Ts, Ds, Ss, PackedSize, OrigSize: LongWord;
   PrgEnd, Off, I, Delta, DIdx, SrcIdx, Op, Mode, ImmVal, EndIdx: Integer;
-  IsIce21, UseBytes, IsOld: Boolean;
+  UseBytes, IsOld: Boolean;
 begin
   Result := False;
   SetLength(OutBuf, 0);
@@ -970,7 +991,6 @@ begin
   for I := 0 to High(SearchOffsets) do
   begin
     Off := SearchOffsets[I];
-    IsIce21 := (InBuf[Off+1] = Byte('c'));
     PackedSize := ReadBE32(InBuf, Off + 4);
     OrigSize := ReadBE32(InBuf, Off + 8);
     if (PackedSize > 0) and (PackedSize <= LongWord(InSize)) and (OrigSize > 0) and (OrigSize <= $800000) then
@@ -2416,6 +2436,7 @@ begin
       Dec(J);
     end;
 
+    Result := nil;
     SetLength(Result, RawSize);
     OutStream := TBackwardOutputStream.Create(@Result[0], 0, RawSize);
     try
@@ -2482,6 +2503,7 @@ begin
   InStream := TBackwardInputStream.Create(PackedData, 12, PackedSize);
   BitReader := TMSBBitReader.Create(InStream);
   try
+    Result := nil;
     SetLength(Result, RawSize);
     OutStream := TBackwardOutputStream.Create(@Result[0], 0, RawSize);
     try
@@ -3568,6 +3590,953 @@ begin
 end;
 
 // -----------------------------------------------------------------------------
+// Pompey Pirates Packer Decompressor (v1.5 / v1.9+ / POPI / PUFF)
+// -----------------------------------------------------------------------------
+function DecompressPompey(const InBuf: PByte; InSize: Integer; out OutBuf: TBytes): Boolean;
+var
+  PayloadStart, PayloadEnd: Integer;
+  UncompressedLen, PackedLen: LongWord;
+  InPos, OutPos: Integer;
+  BitBuf, Extend: Byte;
+  BranchOnCarrySet: Boolean;
+  TextLen, DataLen, DataEnd: LongWord;
+
+  function GetBit: Byte; inline;
+  var
+    Carry, NewByte, NewCarry: Byte;
+  begin
+    Carry := BitBuf and 1;
+    BitBuf := BitBuf shr 1;
+    if BitBuf <> 0 then
+    begin
+      Extend := Carry;
+      Exit(Carry);
+    end;
+    Extend := Carry;
+    if InPos <= PayloadStart then
+    begin
+      BitBuf := 0;
+      Exit(0);
+    end;
+    Dec(InPos);
+    NewByte := InBuf[InPos];
+    NewCarry := NewByte and 1;
+    BitBuf := (NewByte shr 1) or (Extend shl 7);
+    Extend := NewCarry;
+    Result := NewCarry;
+  end;
+
+  function ReadBits(Count: Integer): LongWord;
+  var
+    I: Integer;
+  begin
+    Result := 0;
+    for I := 1 to Count do
+      Result := (Result shl 1) or LongWord(GetBit);
+  end;
+
+  function SubE0(D4: Byte; out IsZero: Boolean): LongWord;
+  var
+    D2, D1: LongWord;
+    ZFlag: Boolean;
+  begin
+    D2 := ReadBits(2);
+    D1 := ((D2 + 1) * 4) - 1;
+    ZFlag := ((D4 xor Byte(D1)) and $FF) = 0;
+    if not ZFlag then
+    begin
+      D2 := ReadBits(D1 + 1);
+      IsZero := (D2 = 0);
+      Result := D2;
+    end
+    else
+    begin
+      IsZero := True;
+      Result := D2;
+    end;
+  end;
+
+  function SubDE: LongWord; inline;
+  var
+    DummyZero: Boolean;
+  begin
+    Result := SubE0(0, DummyZero);
+  end;
+
+  function DoDecompress(ABranchOnCarrySet: Boolean): Boolean;
+  var
+    D3, Offset, Shift, Res: LongWord;
+    D2, NumBits: LongWord;
+    I: Integer;
+    Bit5: Byte;
+    TakeBranch, IsZero: Boolean;
+  begin
+    Result := False;
+    InPos := PayloadEnd - 12;
+    if InPos <= PayloadStart then Exit(False);
+
+    // Skip trailing zero padding in bitstream
+    Dec(InPos);
+    BitBuf := InBuf[InPos];
+    while (BitBuf = 0) do
+    begin
+      if InPos <= PayloadStart then Exit(False);
+      Dec(InPos);
+      BitBuf := InBuf[InPos];
+    end;
+
+    Extend := 0;
+    OutPos := Integer(UncompressedLen);
+    SetLength(OutBuf, UncompressedLen);
+
+    while OutPos > 0 do
+    begin
+      if GetBit = 0 then
+      begin
+        // Literal byte
+        if InPos <= PayloadStart then Exit(False);
+        Dec(InPos);
+        Dec(OutPos);
+        OutBuf[OutPos] := InBuf[InPos];
+        Continue;
+      end;
+
+      if GetBit = 0 then
+      begin
+        // $A4 branch
+        if GetBit = 1 then
+        begin
+          // $11C: 2 bytes at 8-bit offset
+          D3 := 1;
+          if InPos <= PayloadStart then Exit(False);
+          Dec(InPos);
+          Offset := InBuf[InPos];
+        end
+        else
+        begin
+          D2 := ReadBits(2);
+          if D2 = 0 then
+          begin
+            // $114: RLE run (Offset = 1)
+            D3 := SubDE;
+            Offset := 1;
+          end
+          else
+          begin
+            NumBits := (D2 + 1) * 2;
+            D3 := ReadBits(NumBits);
+            Offset := SubDE;
+          end;
+        end;
+
+        if (Offset = 0) or (OutPos + Integer(Offset) > Integer(UncompressedLen)) then
+          Exit(False);
+        for I := 0 to Integer(D3) do
+        begin
+          if OutPos = 0 then Exit(False);
+          Dec(OutPos);
+          OutBuf[OutPos] := OutBuf[OutPos + Integer(Offset)];
+        end;
+        Continue;
+      end;
+
+      if GetBit = 0 then
+      begin
+        // $5E branch
+        Res := SubE0($0F, IsZero);
+        if not IsZero then
+        begin
+          Offset := Res;
+          D3 := 2;
+          if (Offset = 0) or (OutPos + Integer(Offset) > Integer(UncompressedLen)) then
+            Exit(False);
+          for I := 0 to Integer(D3) do
+          begin
+            if OutPos = 0 then Exit(False);
+            Dec(OutPos);
+            OutBuf[OutPos] := OutBuf[OutPos + Integer(Offset)];
+          end;
+        end
+        else
+        begin
+          if OutPos = 0 then Exit(False);
+          Dec(OutPos);
+          OutBuf[OutPos] := 0;
+        end;
+        Continue;
+      end;
+
+      if GetBit = 0 then
+      begin
+        // Single power-of-2 bit (1 shl Shift)
+        Shift := ReadBits(3);
+        if OutPos = 0 then Exit(False);
+        Dec(OutPos);
+        OutBuf[OutPos] := Byte(1 shl Shift);
+        Continue;
+      end;
+
+      Bit5 := GetBit;
+      if ABranchOnCarrySet then
+        TakeBranch := (Bit5 = 1)
+      else
+        TakeBranch := (Bit5 = 0);
+
+      if TakeBranch then
+      begin
+        // $A0 branch
+        D3 := 4;
+        Offset := SubDE;
+        if (Offset = 0) or (OutPos + Integer(Offset) > Integer(UncompressedLen)) then
+          Exit(False);
+        for I := 0 to Integer(D3) do
+        begin
+          if OutPos = 0 then Exit(False);
+          Dec(OutPos);
+          OutBuf[OutPos] := OutBuf[OutPos + Integer(Offset)];
+        end;
+        Continue;
+      end;
+
+      // Fall-through branch ($0088)
+      Res := SubE0($0F, IsZero);
+      if not IsZero then
+      begin
+        Offset := Res;
+        D3 := 3;
+        if (Offset = 0) or (OutPos + Integer(Offset) > Integer(UncompressedLen)) then
+          Exit(False);
+        for I := 0 to Integer(D3) do
+        begin
+          if OutPos = 0 then Exit(False);
+          Dec(OutPos);
+          OutBuf[OutPos] := OutBuf[OutPos + Integer(Offset)];
+        end;
+      end
+      else
+      begin
+        // Duplicate previous byte
+        if (OutPos = 0) or (OutPos >= Integer(UncompressedLen)) then
+          Exit(False);
+        Dec(OutPos);
+        OutBuf[OutPos] := OutBuf[OutPos + 1];
+      end;
+    end;
+
+    Result := (OutPos = 0);
+  end;
+
+begin
+  Result := False;
+  SetLength(OutBuf, 0);
+  if (InBuf = nil) or (InSize < 16) then Exit(False);
+
+  PayloadStart := 0;
+  PayloadEnd := 0;
+  BranchOnCarrySet := False;
+
+  // 1. Check if executable
+  if (InSize >= 28) and (InBuf[0] = $60) and (InBuf[1] = $1A) then
+  begin
+    TextLen := ReadBE32(InBuf, 2);
+    DataLen := ReadBE32(InBuf, 6);
+    DataEnd := 28 + TextLen + DataLen;
+    if (DataEnd <= LongWord(InSize)) and (DataEnd >= 12) and
+       (CheckString(InBuf, InSize, DataEnd - 4, 'POPI') or CheckString(InBuf, InSize, DataEnd - 4, 'PUFF')) then
+    begin
+      PayloadStart := 28 + Integer(TextLen);
+      PayloadEnd := Integer(DataEnd);
+      if (InSize > $86) and (InBuf[$86] = $65) then
+        BranchOnCarrySet := True;
+    end;
+  end;
+
+  // 2. Check if raw at end of buffer
+  if PayloadEnd = 0 then
+  begin
+    if CheckString(InBuf, InSize, InSize - 4, 'POPI') or CheckString(InBuf, InSize, InSize - 4, 'PUFF') then
+    begin
+      PayloadStart := 0;
+      PayloadEnd := InSize;
+    end
+    else
+    begin
+      // Embedded scan
+      PayloadEnd := FindEmbeddedSig(InBuf, InSize, 'POPI');
+      if PayloadEnd >= 0 then
+        PayloadEnd := PayloadEnd + 4
+      else
+      begin
+        PayloadEnd := FindEmbeddedSig(InBuf, InSize, 'PUFF');
+        if PayloadEnd >= 0 then
+          PayloadEnd := PayloadEnd + 4
+        else
+          Exit(False);
+      end;
+      PayloadStart := 0;
+    end;
+  end;
+
+  if (PayloadEnd < 12) or (PayloadEnd - PayloadStart < 12) then Exit(False);
+
+  UncompressedLen := ReadBE32(InBuf, PayloadEnd - 8);
+  PackedLen := ReadBE32(InBuf, PayloadEnd - 12);
+
+  // Sanity check (max 32MB)
+  if (UncompressedLen = 0) or (UncompressedLen > 32 * 1024 * 1024) then Exit(False);
+
+  try
+    // Try primary branch mode
+    if DoDecompress(BranchOnCarrySet) then
+      Exit(True);
+
+    // If that failed, try alternate branch mode
+    if DoDecompress(not BranchOnCarrySet) then
+      Exit(True);
+  except
+    Result := False;
+    SetLength(OutBuf, 0);
+  end;
+end;
+
+// -----------------------------------------------------------------------------
+// Sentry Packer Decompressor (v2.05 / v2.11 / Snt2)
+// -----------------------------------------------------------------------------
+function DecompressSentry(const InBuf: PByte; InSize: Integer; out OutBuf: TBytes): Boolean;
+var
+  UncompressedLen: LongWord;
+  InPos, OutPos: Integer;
+  BitBuf: LongWord;
+  D3, Offset, Count, Val: LongWord;
+  I, MoveIdx: Integer;
+  Bit, Bit2, Bit3: Byte;
+
+  const
+    Table1CA_Bits: array[0..3] of Byte = (4, 7, 8, 12);
+    Table1CA_Base: array[0..3] of LongWord = (1, $21, $121, $321);
+
+    Table1D6_Bits: array[0..3] of Byte = (1, 2, 4, 8);
+    Table1D6_Base: array[0..3] of LongWord = (6, 10, 18, 50);
+
+    Table1E2_Bits: array[0..3] of Byte = (3, 4, 6, 8);
+    Table1E2_Base: array[0..3] of LongWord = (1, $11, $31, $B1);
+
+    Table1EE_Base: array[0..3] of LongWord = (2, 5, 12, 27);
+    Table1EE_Bits: array[0..3] of Byte = (1, 2, 3, 4);
+
+  function Refill4: Boolean;
+  var
+    K: Integer;
+  begin
+    if InPos < 4 then Exit(False);
+    BitBuf := 0;
+    for K := 0 to 3 do
+    begin
+      Dec(InPos);
+      BitBuf := (BitBuf shl 8) or LongWord(InBuf[InPos]);
+    end;
+    Result := True;
+  end;
+
+  function GetBit: Byte; inline;
+  var
+    Carry: Byte;
+  begin
+    Carry := Byte((BitBuf shr 31) and 1);
+    BitBuf := (BitBuf shl 1) and $FFFFFFFF;
+    if BitBuf <> 0 then
+      Exit(Carry);
+
+    if not Refill4 then
+      Exit(0);
+
+    Carry := Byte((BitBuf shr 31) and 1);
+    BitBuf := ((BitBuf shl 1) or 1) and $FFFFFFFF;
+    Result := Carry;
+  end;
+
+  function ReadBits(Count: Integer): LongWord;
+  var
+    K: Integer;
+  begin
+    Result := 0;
+    for K := 1 to Count do
+      Result := (Result shl 1) or LongWord(GetBit);
+  end;
+
+  function Sub140(const BitsTable: array of Byte; const BaseTable: array of LongWord): LongWord;
+  var
+    SubIdx: LongWord;
+  begin
+    SubIdx := ReadBits(2);
+    Result := BaseTable[SubIdx] + ReadBits(BitsTable[SubIdx] + 1);
+  end;
+
+begin
+  Result := False;
+  SetLength(OutBuf, 0);
+  if (InBuf = nil) or (InSize < 32) then Exit(False);
+
+  UncompressedLen := 0;
+  InPos := InSize;
+
+  // 1. Check if executable ($601A)
+  if (InSize >= 28) and (InBuf[0] = $60) and (InBuf[1] = $1A) then
+  begin
+    InPos := 28 + Integer(ReadBE32(InBuf, 2));
+    if (InPos > InSize) or (InPos <= 28) then
+      InPos := InSize;
+
+    // Scan for uncompressed length loader in stub: 24 7C [len] 2E 0A
+    for MoveIdx := 28 to Min(InSize - 10, 512) do
+    begin
+      if (InBuf[MoveIdx] = $24) and (InBuf[MoveIdx + 1] = $7C) and
+         (InBuf[MoveIdx + 6] = $2E) and (InBuf[MoveIdx + 7] = $0A) then
+      begin
+        UncompressedLen := ReadBE32(InBuf, MoveIdx + 2);
+        Break;
+      end;
+    end;
+
+    if (UncompressedLen = 0) and (InSize > 262) then
+    begin
+      if (InBuf[256] = $24) and (InBuf[257] = $7C) then
+        UncompressedLen := ReadBE32(InBuf, 258);
+    end;
+  end;
+
+  // 2. Check if raw data ending with 'Snt2'
+  if (UncompressedLen = 0) and CheckLastLongString(InBuf, InSize, 'Snt2') then
+  begin
+    InPos := InSize - 4;
+    if InPos >= 4 then
+    begin
+      UncompressedLen := ReadBE32(InBuf, InPos - 4);
+      Dec(InPos, 4);
+    end;
+  end;
+
+  // Sanity check uncompressed length (max 32MB)
+  if (UncompressedLen = 0) or (UncompressedLen > 32 * 1024 * 1024) then Exit(False);
+  if InPos < 4 then Exit(False);
+
+  try
+    if not Refill4 then Exit(False);
+
+    OutPos := Integer(UncompressedLen);
+    SetLength(OutBuf, UncompressedLen);
+
+    while OutPos > 0 do
+    begin
+      Bit := GetBit;
+      if Bit = 0 then
+      begin
+        Bit2 := GetBit;
+        if Bit2 = 0 then
+        begin
+          // Single literal byte
+          if InPos <= 0 then Exit(False);
+          Dec(InPos);
+          Dec(OutPos);
+          OutBuf[OutPos] := InBuf[InPos];
+        end
+        else
+        begin
+          Bit3 := GetBit;
+          if Bit3 = 0 then
+            Count := 2
+          else
+          begin
+            Count := 0;
+            for I := 0 to 3 do
+            begin
+              Val := ReadBits(Table1EE_Bits[I] + 1);
+              if Val > 0 then
+              begin
+                Count := (Val - 1) + Table1EE_Base[I] + 1;
+                Break;
+              end;
+            end;
+            if Count = 0 then Exit(False);
+          end;
+
+          if (Count = 0) or (LongWord(OutPos) < Count) or (LongWord(InPos) < Count) then
+            Exit(False);
+
+          for I := 1 to Integer(Count) do
+          begin
+            Dec(InPos);
+            Dec(OutPos);
+            OutBuf[OutPos] := InBuf[InPos];
+          end;
+        end;
+        Continue;
+      end;
+
+      // Bit == 1 (LZ match copy)
+      Bit2 := GetBit;
+      if Bit2 = 0 then
+      begin
+        D3 := 1; // Length 2
+        Offset := ReadBits(8);
+      end
+      else
+      begin
+        Bit3 := GetBit;
+        if Bit3 = 0 then
+        begin
+          D3 := 2; // Length 3
+          Offset := Sub140(Table1E2_Bits, Table1E2_Base);
+        end
+        else
+        begin
+          Val := ReadBits(2);
+          if Val > 0 then
+          begin
+            D3 := 2 + Val; // Length 3 + Val (4..6)
+            Offset := Sub140(Table1E2_Bits, Table1E2_Base);
+          end
+          else
+          begin
+            D3 := Sub140(Table1D6_Bits, Table1D6_Base);
+            Offset := Sub140(Table1CA_Bits, Table1CA_Base);
+          end;
+        end;
+      end;
+
+      if (Offset = 0) or (OutPos + Integer(Offset) - 1 >= Integer(UncompressedLen)) then
+        Exit(False);
+
+      for I := 0 to Integer(D3) do
+      begin
+        if OutPos = 0 then Exit(False);
+        Dec(OutPos);
+        OutBuf[OutPos] := OutBuf[OutPos + Integer(Offset)];
+      end;
+    end;
+
+    Result := (OutPos = 0);
+  except
+    Result := False;
+    SetLength(OutBuf, 0);
+  end;
+end;
+
+// -----------------------------------------------------------------------------
+// 4PAK Executable Decompressor
+// -----------------------------------------------------------------------------
+function Decompress4PAK(const InBuf: PByte; InSize: Integer; out OutBuf: TBytes): Boolean;
+var
+  TextLen, DataLen, BssLen: LongWord;
+  SrcOffset, SrcPos, OutPos, MatchOffset: Integer;
+  D0, D1, MatchLen, I, B, NextB, PatternPos, P2, P3: Integer;
+  RawDst: TBytes;
+  AllocSize: Integer;
+begin
+  Result := False;
+  SetLength(OutBuf, 0);
+  if (InBuf = nil) or (InSize < 66) then Exit;
+
+  TextLen := 0;
+  DataLen := 0;
+  BssLen := 0;
+  SrcOffset := 0;
+
+  // 1. If GEMDOS Executable ($601A)
+  if (InSize >= 28) and (InBuf[0] = $60) and (InBuf[1] = $1A) then
+  begin
+    // Scan backwards for the section lengths pattern in stub:
+    // 22 C0 D1 C0 22 C8 2A 48
+    PatternPos := -1;
+    for I := InSize - 8 downto Max(28, InSize - 512) do
+    begin
+      if (InBuf[I] = $22) and (InBuf[I + 1] = $C0) and
+         (InBuf[I + 2] = $D1) and (InBuf[I + 3] = $C0) and
+         (InBuf[I + 4] = $22) and (InBuf[I + 5] = $C8) and
+         (InBuf[I + 6] = $2A) and (InBuf[I + 7] = $48) then
+      begin
+        PatternPos := I;
+        Break;
+      end;
+    end;
+
+    if (PatternPos >= 6) and (InBuf[PatternPos - 6] = $20) and (InBuf[PatternPos - 5] = $3C) then
+    begin
+      TextLen := ReadBE32(InBuf, PatternPos - 4);
+      P2 := PatternPos + 8;
+      if (P2 + 14 <= InSize) and (InBuf[P2] = $20) and (InBuf[P2 + 1] = $3C) then
+      begin
+        DataLen := ReadBE32(InBuf, P2 + 2);
+        P3 := P2 + 6 + 8; // 22 C0 D1 C0 22 C8 28 48 = 8 bytes
+        if (P3 + 6 <= InSize) and (InBuf[P3] = $20) and (InBuf[P3 + 1] = $3C) then
+          BssLen := ReadBE32(InBuf, P3 + 2);
+      end;
+    end;
+    SrcOffset := 66;
+  end;
+
+  // Initial allocation
+  AllocSize := 65536;
+  SetLength(RawDst, AllocSize);
+  OutPos := 0;
+  SrcPos := SrcOffset;
+
+  try
+    while SrcPos < InSize do
+    begin
+      B := InBuf[SrcPos];
+      Inc(SrcPos);
+      if B = 0 then
+        Break // End of stream
+      else if B < 128 then
+      begin
+        // Literal copy of B bytes
+        if SrcPos + B > InSize then Exit(False);
+        if OutPos + B > Length(RawDst) then
+          SetLength(RawDst, Max(OutPos + B + 32768, Length(RawDst) * 2));
+        Move(InBuf[SrcPos], RawDst[OutPos], B);
+        Inc(SrcPos, B);
+        Inc(OutPos, B);
+      end
+      else
+      begin
+        // Match copy
+        D1 := B and $1F;
+        if SrcPos >= InSize then Exit(False);
+        NextB := InBuf[SrcPos];
+        Inc(SrcPos);
+        D0 := ((B shl 3) and $FF00) or NextB;
+        MatchOffset := OutPos - $800 + D0;
+        MatchLen := D1 + 3;
+        if (MatchOffset < 0) or (MatchOffset >= OutPos) then Exit(False);
+        if OutPos + MatchLen > Length(RawDst) then
+          SetLength(RawDst, Max(OutPos + MatchLen + 32768, Length(RawDst) * 2));
+        for I := 0 to MatchLen - 1 do
+        begin
+          RawDst[OutPos] := RawDst[MatchOffset + I];
+          Inc(OutPos);
+        end;
+      end;
+    end;
+
+    if OutPos = 0 then Exit(False);
+
+    // If reconstructed GEMDOS executable
+    if TextLen > 0 then
+    begin
+      SetLength(OutBuf, 28 + OutPos);
+      // Header: $601A
+      OutBuf[0] := $60;
+      OutBuf[1] := $1A;
+      // Text size
+      OutBuf[2] := Byte((TextLen shr 24) and $FF);
+      OutBuf[3] := Byte((TextLen shr 16) and $FF);
+      OutBuf[4] := Byte((TextLen shr 8) and $FF);
+      OutBuf[5] := Byte(TextLen and $FF);
+      // Data size
+      OutBuf[6] := Byte((DataLen shr 24) and $FF);
+      OutBuf[7] := Byte((DataLen shr 16) and $FF);
+      OutBuf[8] := Byte((DataLen shr 8) and $FF);
+      OutBuf[9] := Byte(DataLen and $FF);
+      // BSS size
+      OutBuf[10] := Byte((BssLen shr 24) and $FF);
+      OutBuf[11] := Byte((BssLen shr 16) and $FF);
+      OutBuf[12] := Byte((BssLen shr 8) and $FF);
+      OutBuf[13] := Byte(BssLen and $FF);
+      // Symbols (0), Reserved (0), Flags (0), RelocFlag (0)
+      FillChar(OutBuf[14], 14, 0);
+      Move(RawDst[0], OutBuf[28], OutPos);
+    end
+    else
+    begin
+      SetLength(OutBuf, OutPos);
+      Move(RawDst[0], OutBuf[0], OutPos);
+    end;
+
+    Result := True;
+  except
+    Result := False;
+    SetLength(OutBuf, 0);
+  end;
+end;
+
+// -----------------------------------------------------------------------------
+// Happy Computer Packer Decompressor
+// -----------------------------------------------------------------------------
+type
+  THappyNode = record
+    IsLeaf: Boolean;
+    Left: Integer;
+    Right: Integer;
+    Symbol: Byte;
+  end;
+
+function DecompressHappy(const InBuf: PByte; InSize: Integer; out OutBuf: TBytes): Boolean;
+var
+  TextLen, Pass1Len, UncompressedLen: LongWord;
+  PStore, PEsc, PTree, Disp, TargetPos, TargetEsc, TreeStart, DataSegPos: Integer;
+  Esc1, Esc2, Esc3, Esc2Fill: Byte;
+  TreeBytePos, TreeBitPos, DataBytePos, DataBitPos: Integer;
+  TreeNodes: array of THappyNode;
+  NodeCount: Integer;
+  Pass1Buf: TBytes;
+  Pass1Pos, Pass2Pos, I, P: Integer;
+  B, Val, Cnt, ChunkLen, RepeatCnt, K: Integer;
+
+  function ReadTreeBit: Byte;
+  var
+    CurByte: Byte;
+  begin
+    if TreeBytePos >= InSize then Exit(0);
+    CurByte := InBuf[TreeBytePos];
+    Result := (CurByte shr TreeBitPos) and 1;
+    Dec(TreeBitPos);
+    if TreeBitPos < 0 then
+    begin
+      TreeBitPos := 7;
+      Inc(TreeBytePos);
+    end;
+  end;
+
+  function BuildNode: Integer;
+  var
+    Idx, Sym, BitK, LChild, RChild: Integer;
+  begin
+    if NodeCount >= Length(TreeNodes) then
+      Exit(-1);
+    Idx := NodeCount;
+    Inc(NodeCount);
+
+    if ReadTreeBit = 1 then
+    begin
+      TreeNodes[Idx].IsLeaf := False;
+      LChild := BuildNode();
+      RChild := BuildNode();
+      TreeNodes[Idx].Left := LChild;
+      TreeNodes[Idx].Right := RChild;
+    end
+    else
+    begin
+      TreeNodes[Idx].IsLeaf := True;
+      TreeNodes[Idx].Left := -1;
+      TreeNodes[Idx].Right := -1;
+      Sym := 0;
+      for BitK := 7 downto 0 do
+        if ReadTreeBit = 1 then
+          Sym := Sym or (1 shl BitK);
+      TreeNodes[Idx].Symbol := Byte(Sym and $FF);
+    end;
+    Result := Idx;
+  end;
+
+  function ReadDataBit: Byte; inline;
+  var
+    CurByte: Byte;
+  begin
+    if DataBytePos >= InSize then Exit(0);
+    CurByte := InBuf[DataBytePos];
+    Result := (CurByte shr DataBitPos) and 1;
+    Dec(DataBitPos);
+    if DataBitPos < 0 then
+    begin
+      DataBitPos := 7;
+      Inc(DataBytePos);
+    end;
+  end;
+
+var
+  CurrNode: Integer;
+begin
+  Result := False;
+  SetLength(OutBuf, 0);
+  if (InBuf = nil) or (InSize < 28) or (InBuf[0] <> $60) or (InBuf[1] <> $1A) then Exit;
+
+  TextLen := ReadBE32(InBuf, 2);
+  if Integer(TextLen) + 28 > InSize then Exit;
+
+  Pass1Len := 0;
+  UncompressedLen := 0;
+
+  // Scan for 21 56 00 14 (move.l (a6), $14(a0))
+  PStore := -1;
+  for I := 28 to Min(InSize - 4, 2048) do
+  begin
+    if (InBuf[I] = $21) and (InBuf[I + 1] = $56) and
+       (InBuf[I + 2] = $00) and (InBuf[I + 3] = $14) then
+    begin
+      PStore := I;
+      Break;
+    end;
+  end;
+
+  if PStore >= 4 then
+  begin
+    Disp := SmallInt(ReadBE16(InBuf, PStore - 2));
+    TargetPos := (PStore - 4) + 2 + Disp;
+    if (TargetPos >= 4) and (TargetPos + 4 <= InSize) then
+    begin
+      Pass1Len := ReadBE32(InBuf, TargetPos);
+      UncompressedLen := ReadBE32(InBuf, TargetPos - 4);
+    end;
+  end;
+
+  if (Pass1Len = 0) and (InSize >= 28 + $582) then
+  begin
+    Pass1Len := ReadBE32(InBuf, 28 + $57E);
+    UncompressedLen := ReadBE32(InBuf, 28 + $57A);
+  end;
+
+  if (Pass1Len = 0) or (Pass1Len > 10 * 1024 * 1024) or (UncompressedLen = 0) or (UncompressedLen > 10 * 1024 * 1024) then
+    Exit;
+
+  // Escape markers
+  Esc1 := $5B; Esc2 := $5D; Esc3 := $97; Esc2Fill := $00;
+  PEsc := -1;
+  for I := 28 to Min(InSize - 6, 1024) do
+  begin
+    if (InBuf[I] = $10) and (InBuf[I + 1] = $13) and
+       (InBuf[I + 2] = $B0) and (InBuf[I + 3] = $2A) and
+       (InBuf[I + 4] = $00) and (InBuf[I + 5] = $01) then
+    begin
+      PEsc := I;
+      Break;
+    end;
+  end;
+
+  if PEsc >= 4 then
+  begin
+    Disp := SmallInt(ReadBE16(InBuf, PEsc - 2));
+    TargetEsc := (PEsc - 4) + 2 + Disp;
+    if (TargetEsc >= 0) and (TargetEsc + 8 <= InSize) then
+    begin
+      Esc1 := InBuf[TargetEsc + 1];
+      Esc2 := InBuf[TargetEsc + 3];
+      Esc3 := InBuf[TargetEsc + 5];
+      Esc2Fill := InBuf[TargetEsc + 7];
+    end;
+  end;
+
+  TreeStart := 28 + $594;
+  PTree := -1;
+  for I := 28 to Min(InSize - 6, 2048) do
+  begin
+    if (InBuf[I] = $3F) and (InBuf[I + 1] = $3C) and
+       (InBuf[I + 2] = $00) and (InBuf[I + 3] = $00) and
+       (InBuf[I + 4] = $4D) and (InBuf[I + 5] = $FA) then
+    begin
+      PTree := I;
+      Break;
+    end;
+  end;
+
+  if PTree >= 4 then
+  begin
+    Disp := SmallInt(ReadBE16(InBuf, PTree - 2));
+    TargetPos := (PTree - 4) + 2 + Disp;
+    if (TargetPos >= 0) and (TargetPos < InSize) then
+      TreeStart := TargetPos;
+  end;
+
+  try
+    // Build tree
+    SetLength(TreeNodes, 1024);
+    NodeCount := 0;
+    TreeBytePos := TreeStart;
+    TreeBitPos := 7;
+    BuildNode();
+
+    if NodeCount = 0 then Exit(False);
+
+    // Pass 1: Decode Huffman stream from DATA segment
+    DataSegPos := 28 + Integer(TextLen);
+    DataBytePos := DataSegPos;
+    DataBitPos := 7;
+
+    SetLength(Pass1Buf, Pass1Len);
+    Pass1Pos := 0;
+
+    while Pass1Pos < Integer(Pass1Len) do
+    begin
+      CurrNode := 0;
+      while not TreeNodes[CurrNode].IsLeaf do
+      begin
+        if ReadDataBit = 1 then
+          CurrNode := TreeNodes[CurrNode].Right
+        else
+          CurrNode := TreeNodes[CurrNode].Left;
+        if (CurrNode < 0) or (CurrNode >= NodeCount) then Exit(False);
+      end;
+      Pass1Buf[Pass1Pos] := TreeNodes[CurrNode].Symbol;
+      Inc(Pass1Pos);
+    end;
+
+    // Pass 2: RLE / Pattern expansion
+    SetLength(OutBuf, Max(Integer(UncompressedLen) + 1024, 32768));
+    Pass2Pos := 0;
+    P := 0;
+
+    while P < Integer(Pass1Len) do
+    begin
+      B := Pass1Buf[P];
+      if B = Esc1 then
+      begin
+        if P + 2 >= Integer(Pass1Len) then Exit(False);
+        Val := Pass1Buf[P + 1];
+        Cnt := Pass1Buf[P + 2];
+        Inc(P, 3);
+        if Pass2Pos + Cnt > Length(OutBuf) then
+          SetLength(OutBuf, Max(Pass2Pos + Cnt + 32768, Length(OutBuf) * 2));
+        FillChar(OutBuf[Pass2Pos], Cnt, Val);
+        Inc(Pass2Pos, Cnt);
+      end
+      else if B = Esc2 then
+      begin
+        if P + 1 >= Integer(Pass1Len) then Exit(False);
+        Cnt := Pass1Buf[P + 1];
+        Inc(P, 2);
+        if Pass2Pos + Cnt > Length(OutBuf) then
+          SetLength(OutBuf, Max(Pass2Pos + Cnt + 32768, Length(OutBuf) * 2));
+        FillChar(OutBuf[Pass2Pos], Cnt, Esc2Fill);
+        Inc(Pass2Pos, Cnt);
+      end
+      else if B = Esc3 then
+      begin
+        if P + 2 >= Integer(Pass1Len) then Exit(False);
+        ChunkLen := Pass1Buf[P + 1];
+        RepeatCnt := Pass1Buf[P + 2];
+        if P + 3 + ChunkLen > Integer(Pass1Len) then Exit(False);
+        if Pass2Pos + (ChunkLen * RepeatCnt) > Length(OutBuf) then
+          SetLength(OutBuf, Max(Pass2Pos + (ChunkLen * RepeatCnt) + 32768, Length(OutBuf) * 2));
+        for K := 1 to RepeatCnt do
+        begin
+          Move(Pass1Buf[P + 3], OutBuf[Pass2Pos], ChunkLen);
+          Inc(Pass2Pos, ChunkLen);
+        end;
+        Inc(P, 3 + ChunkLen);
+      end
+      else
+      begin
+        if Pass2Pos >= Length(OutBuf) then
+          SetLength(OutBuf, Length(OutBuf) * 2);
+        OutBuf[Pass2Pos] := Byte(B);
+        Inc(Pass2Pos);
+        Inc(P);
+      end;
+    end;
+
+    if (UncompressedLen > 0) and (Pass2Pos >= Integer(UncompressedLen)) then
+      SetLength(OutBuf, UncompressedLen)
+    else
+      SetLength(OutBuf, Pass2Pos);
+
+    Result := (Length(OutBuf) >= 28) and (OutBuf[0] = $60) and (OutBuf[1] = $1A);
+  except
+    Result := False;
+    SetLength(OutBuf, 0);
+  end;
+end;
+
+// -----------------------------------------------------------------------------
 // STOS Squasher Decompressor (unsquash)
 // -----------------------------------------------------------------------------
 function DecompressStosSquash(const InBuf: PByte; InSize: Integer; out OutBuf: TBytes): Boolean;
@@ -4136,7 +5105,31 @@ begin
     if DecompressFire(InBuf, InSize, OutBuf) then Exit(True);
   end;
 
-  // 10. STOS Squasher / Picture Compactor
+  // 10. Pompey Packer
+  if (Pos('POMPEY', UpperCase(DetectedPacker)) > 0) then
+  begin
+    if DecompressPompey(InBuf, InSize, OutBuf) then Exit(True);
+  end;
+
+  // 11. Sentry Packer
+  if (Pos('SENTRY', UpperCase(DetectedPacker)) > 0) then
+  begin
+    if DecompressSentry(InBuf, InSize, OutBuf) then Exit(True);
+  end;
+
+  // 12. 4PAK Executable
+  if (Pos('4PAK', UpperCase(DetectedPacker)) > 0) then
+  begin
+    if Decompress4PAK(InBuf, InSize, OutBuf) then Exit(True);
+  end;
+
+  // 13. Happy Packer
+  if (Pos('HAPPY', UpperCase(DetectedPacker)) > 0) then
+  begin
+    if DecompressHappy(InBuf, InSize, OutBuf) then Exit(True);
+  end;
+
+  // 12. STOS Squasher / Picture Compactor
   if (Pos('STOS', UpperCase(DetectedPacker)) > 0) or (Pos('SQUASH', UpperCase(DetectedPacker)) > 0) or (Pos('COMPACTOR', UpperCase(DetectedPacker)) > 0) then
   begin
     if DecompressStosSquash(InBuf, InSize, OutBuf) then
@@ -4204,6 +5197,30 @@ begin
   if DecompressFire(InBuf, InSize, OutBuf) then
   begin
     DetectedPacker := 'FIRE Packer (Auto-detected)';
+    Exit(True);
+  end;
+
+  if DecompressPompey(InBuf, InSize, OutBuf) then
+  begin
+    DetectedPacker := 'Pompey Packer (Auto-detected)';
+    Exit(True);
+  end;
+
+  if DecompressSentry(InBuf, InSize, OutBuf) then
+  begin
+    DetectedPacker := 'Sentry Packer (Auto-detected)';
+    Exit(True);
+  end;
+
+  if Decompress4PAK(InBuf, InSize, OutBuf) then
+  begin
+    DetectedPacker := '4PAK (Auto-detected)';
+    Exit(True);
+  end;
+
+  if DecompressHappy(InBuf, InSize, OutBuf) then
+  begin
+    DetectedPacker := 'Happy Packer (Auto-detected)';
     Exit(True);
   end;
 

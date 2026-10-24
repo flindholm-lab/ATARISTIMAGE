@@ -113,6 +113,7 @@ function BuildWavHeader(SampleRate, Channels, BitsPerSample, DataBytes: Integer)
 var
   ByteRate, BlockAlign: Integer;
 begin
+  Result := nil;
   SetLength(Result, 44);
   ByteRate := SampleRate * Channels * (BitsPerSample div 8);
   BlockAlign := Channels * (BitsPerSample div 8);
@@ -155,13 +156,12 @@ var
   FrameRate, Digidrums: Word;
   SndhSubtunes: Integer;
   AudioFormat, NumChannels, BitsPerSample: Word;
-  SampleRate, ByteRate, BlockAlign: LongWord;
-  ChunkID, ChunkSize: LongWord;
+  SampleRate: LongWord;
+  ChunkSize: LongWord;
   WavHdr: TBytes;
   AvrRate, AvrSamples: LongWord;
   AvrMonoStereo, AvrRes, AvrSigned: Word;
   AvrName: string;
-  SrcSample, DstSample: Byte;
   ModTag: string;
   NumPatterns, ActiveSamples: Integer;
   SampleLenWords: Word;
@@ -196,8 +196,6 @@ begin
         AudioFormat := ReadLE16(InBuf, Pos + 8);
         NumChannels := ReadLE16(InBuf, Pos + 10);
         SampleRate := ReadLE32(InBuf, Pos + 12);
-        ByteRate := ReadLE32(InBuf, Pos + 16);
-        BlockAlign := ReadLE16(InBuf, Pos + 20);
         BitsPerSample := ReadLE16(InBuf, Pos + 22);
 
         Info.Channels := NumChannels;

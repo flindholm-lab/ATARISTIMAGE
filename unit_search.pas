@@ -6,7 +6,7 @@ interface
 
 uses
   Classes, SysUtils, Forms, Controls, Graphics, Dialogs, StdCtrls,
-  ComCtrls, ExtCtrls, Math, Masks;
+  ComCtrls, ExtCtrls, Math, Masks, unit_fat12;
 
 type
   TSearchResult = record
@@ -197,17 +197,13 @@ end;
 
 function TFormSearch.ReadFAT12Entry(AStream: TStream; ACluster: Word): Word;
 var
-  FATOffset: Int64;
-  B0, B1: Byte;
+  Val: Integer;
 begin
-  FATOffset := FReservedSectors * FBytesPerSector + ((ACluster * 3) div 2);
-  AStream.Position := FATOffset;
-  B0 := AStream.ReadByte;
-  B1 := AStream.ReadByte;
-  if (ACluster and 1) = 0 then
-    Result := (Word(B0) or (Word(B1 and $0F) shl 8))
+  Val := Fat12ReadEntry(AStream, Int64(FReservedSectors) * FBytesPerSector, ACluster);
+  if Val < 0 then
+    Result := $FFF
   else
-    Result := ((Word(B0) shr 4) or (Word(B1) shl 4));
+    Result := Word(Val);
 end;
 
 procedure TFormSearch.ScanDirectory(AStream: TFileStream; const ADirPath: string; ADirCluster: Word;
@@ -438,6 +434,8 @@ var
   QueryStr, StartPath: string;
   StartCluster: Word;
   IsRec, IsCase, IsDel: Boolean;
+  Bpb: TFatBpb;
+  Layout: TFatLayout;
 begin
   QueryStr := Trim(EditQuery.Text);
   if (FImagePath = '') or (not FileExists(FImagePath)) then
@@ -463,27 +461,23 @@ begin
       FS.Position := 0;
       FS.ReadBuffer(BootSec, 512);
 
-      Move(BootSec[$0B], FBytesPerSector, 2);
-      FSectorsPerCluster := BootSec[$0D];
-      Move(BootSec[$0E], FReservedSectors, 2);
-      FNumberOfFATs := BootSec[$10];
-      Move(BootSec[$11], FRootEntries, 2);
-      Move(BootSec[$13], FTotalSectors, 2);
-      Move(BootSec[$16], FSectorsPerFAT, 2);
+      Fat12ParseBpb(@BootSec[0], 512, FS.Size, Bpb);
+      Fat12ComputeLayout(Bpb, FS.Size, Layout);
 
-      if FBytesPerSector <> 512 then FBytesPerSector := 512;
-      if FSectorsPerCluster = 0 then FSectorsPerCluster := 2;
-      if FReservedSectors = 0 then FReservedSectors := 1;
-      if FNumberOfFATs = 0 then FNumberOfFATs := 2;
-      if FRootEntries = 0 then FRootEntries := 112;
-      if FSectorsPerFAT = 0 then FSectorsPerFAT := 5;
+      FBytesPerSector := Bpb.BytesPerSector;
+      FSectorsPerCluster := Bpb.SectorsPerCluster;
+      FReservedSectors := Bpb.ReservedSectors;
+      FNumberOfFATs := Bpb.NumberOfFATs;
+      FRootEntries := Bpb.RootEntries;
+      FTotalSectors := Bpb.TotalSectors;
+      FSectorsPerFAT := Bpb.SectorsPerFAT;
 
       SetLength(FVisitedDirs, 0);
 
-      FRootDirOffset := (Int64(FReservedSectors) + Int64(FNumberOfFATs) * Int64(FSectorsPerFAT)) * Int64(FBytesPerSector);
-      FRootDirSize := Int64(FRootEntries) * 32;
-      FDataAreaOffset := FRootDirOffset + FRootDirSize;
-      FClusterBytes := Int64(FSectorsPerCluster) * Int64(FBytesPerSector);
+      FRootDirOffset := Layout.RootDirStart;
+      FRootDirSize := Int64(Bpb.RootEntries) * 32;
+      FDataAreaOffset := Layout.DataAreaStart;
+      FClusterBytes := Layout.BytesPerCluster;
 
       IsRec := CheckBoxRecursive.Checked;
       IsCase := CheckBoxCaseSensitive.Checked;

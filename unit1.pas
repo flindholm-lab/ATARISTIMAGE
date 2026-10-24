@@ -8,7 +8,7 @@ uses
   LCLType, ExtCtrls, ComCtrls, StrUtils, Math, DateUtils, LazFileUtils,
   FileUtil, Menus, zipper, unit_clustermap, unit_msa, unit_fileviewer, unit_dragout,
   unit_depacker, unit_virusscanner, unit_newimage, unit_archivevault,
-  unit_dim, unit_search, unit_floppywriter;
+  unit_dim, unit_search, unit_floppywriter, unit_fat12;
 
 type
   { TDiskItemInfo represents a single file or directory in the Atari disk image }
@@ -1049,6 +1049,7 @@ var
   LastSlash: Integer;
   ClusterBuffer: array of Byte;
 begin
+  FillChar(DirEntry, SizeOf(DirEntry), 0);
   GetFATDetails(AImageFile);
 
   CleanPath := ExcludeTrailingPathDelimiter(ADirPath);
@@ -1085,14 +1086,14 @@ begin
   // Zero-initialize the entire newly allocated cluster to prevent ghost entries
   SetLength(ClusterBuffer, FBytesPerCluster);
   FillChar(ClusterBuffer[0], FBytesPerCluster, 0);
-  AImageFile.Position := FDataAreaStart + (NewCluster - 2) * FBytesPerCluster;
+  AImageFile.Position := FDataAreaStart + Int64(NewCluster - 2) * FBytesPerCluster;
   AImageFile.Write(ClusterBuffer[0], FBytesPerCluster);
 
   TimeWord := DateTimeToFatTime(Now);
   DateWord := DateTimeToFatDate(Now);
 
   // . entry (points to current directory cluster)
-  AImageFile.Position := FDataAreaStart + (NewCluster - 2) * FBytesPerCluster;
+  AImageFile.Position := FDataAreaStart + Int64(NewCluster - 2) * FBytesPerCluster;
   FillChar(DirEntry, SizeOf(DirEntry), $20);
   Move('.       ', DirEntry[0], 8);
   DirEntry[11] := $10;
@@ -2694,20 +2695,8 @@ end;
   Returns:  Next cluster in the chain
  ------------------------------------------------------------------}
 function TForm1.GetNextCluster(const AImageFile: TFileStream; const ACluster: Int64): Int64;
-var
-  FatPos: Int64;
-  FatByte1, FatByte2: Byte;
-  FatValue: Word;
 begin
-  FatPos := FFatTableStart + (ACluster * 3) div 2;
-  AImageFile.Position := FatPos;
-  AImageFile.Read(FatByte1, 1);
-  AImageFile.Read(FatByte2, 1);
-  FatValue := Word(FatByte1) or (Word(FatByte2) shl 8);
-  if (ACluster mod 2) = 0 then
-    Result := (FatValue and $0FFF)
-  else
-    Result := (FatValue shr 4);
+  Result := Fat12ReadEntry(AImageFile, FFatTableStart, Integer(ACluster));
 end;
 
 {------------------------------------------------------------------
@@ -2721,7 +2710,7 @@ end;
 function TForm1.FindDirectoryInPath(const AImageFile: TFileStream; const APath: string): Int64;
 var
   PathParts: TStringList;
-  I, J: Integer;
+  I: Integer;
   DirFound: Boolean;
   DirCluster, CurrentCluster: Int64;
   DirEntry: array[0..FAT12_DIR_ENTRY_SIZE - 1] of Byte;
@@ -2729,6 +2718,7 @@ var
   LoopGuard, MaxEntriesInCluster, EntryIdx: Integer;
   DirTerminated: Boolean;
 begin
+  FillChar(DirEntry, SizeOf(DirEntry), 0);
   Result := 0;
   if APath = '' then Exit;
 
@@ -2784,7 +2774,7 @@ begin
           DirName := ExtractFileNameFromEntry(DirEntry);
           if IsDirectory(DirEntry) and (UpperCase(DirName) = UpperCase(PathParts[I])) then
           begin
-            DirCluster := Word(DirEntry[$1A]) + (Word(DirEntry[$1B]) shl 8);
+            DirCluster := Word(DirEntry[$1A]) or (Word(DirEntry[$1B]) shl 8);
             DirFound := True;
             Break;
           end;
@@ -2827,9 +2817,10 @@ var
   EntryStartClust: Word;
   EntrySize: Int64;
   EntrySizeStr, EntryDateStr, EntryAttrStr: string;
-  J, LoopGuard, MaxEntriesInCluster, EntryIdx: Integer;
+  LoopGuard, MaxEntriesInCluster, EntryIdx: Integer;
   DirTerminated: Boolean;
 begin
+  FillChar(DirEntry, SizeOf(DirEntry), 0);
   FDisplayItems.Clear;
   SetLength(FDiskItemsRaw, 0);
   ImageFile := TFileStream.Create(AFileName, fmOpenRead or fmShareDenyNone);
@@ -2991,6 +2982,7 @@ var
   LoopGuard, MaxEntriesInCluster, EntryIdx: Integer;
   DirTerminated: Boolean;
 begin
+  FillChar(DirEntry, SizeOf(DirEntry), 0);
   Result := -1;
   CurrentCluster := ADirCluster;
   LoopGuard := 0;
@@ -3058,6 +3050,7 @@ var
   LoopGuard, MaxEntriesInCluster, EntryIdx: Integer;
   DirTerminated: Boolean;
 begin
+  FillChar(DirEntry, SizeOf(DirEntry), 0);
   Result := -1;
   CurrentCluster := ADirCluster;
   SearchName := UpperCase(AFileName);
@@ -3133,6 +3126,7 @@ var
   ClusterBuffer: array of Byte;
   LoopGuard, MaxEntriesInCluster, EntryIdx: Integer;
 begin
+  FillChar(DirEntry, SizeOf(DirEntry), 0);
   Result := -1;
   CurrentCluster := ADirCluster;
   LastCluster := ADirCluster;
@@ -3192,11 +3186,11 @@ begin
         // Zero out the newly allocated directory cluster
         SetLength(ClusterBuffer, FBytesPerCluster);
         FillChar(ClusterBuffer[0], FBytesPerCluster, 0);
-        AImageFile.Position := FDataAreaStart + (NewSubCluster - 2) * FBytesPerCluster;
+        AImageFile.Position := FDataAreaStart + Int64(NewSubCluster - 2) * FBytesPerCluster;
         AImageFile.Write(ClusterBuffer[0], FBytesPerCluster);
 
         // First 32-byte slot in this new cluster is our free directory entry
-        Result := FDataAreaStart + (NewSubCluster - 2) * FBytesPerCluster;
+        Result := FDataAreaStart + Int64(NewSubCluster - 2) * FBytesPerCluster;
       end;
     finally
       FreeList.Free;
@@ -3223,7 +3217,7 @@ begin
   FreeClusterCount := 0;
 
   if FTotalClusters > 0 then
-    MaxCluster := FTotalClusters + 1
+    MaxCluster := Int64(FTotalClusters) + 1
   else if FSingleFATSize > 3 then
     MaxCluster := (FSingleFATSize * 2 div 3) - 1
   else
@@ -3266,6 +3260,8 @@ var
   StartCluster: Word;
   FileTime, FileDate: Word;
 begin
+  FillChar(DirEntry, SizeOf(DirEntry), 0);
+  FillChar(Buffer, SizeOf(Buffer), 0);
   // Calculate how many clusters are needed
   FileSizeInClusters := ASourceFile.Size div FBytesPerCluster;
   if (ASourceFile.Size mod FBytesPerCluster) <> 0 then Inc(FileSizeInClusters);
@@ -3446,6 +3442,8 @@ var
   DirEntry: array[0..FAT12_DIR_ENTRY_SIZE - 1] of Byte;
   StartCluster: Word;
 begin
+  FillChar(DirEntry, SizeOf(DirEntry), 0);
+  if AFileName = '' then ; // silence unused parameter hint
   StartCluster := 0;
   // Read the directory entry
   AImageFile.Position := ADirEntryPos;
@@ -3479,46 +3477,36 @@ end;
 procedure TForm1.GetFATDetails(const AImageFile: TFileStream);
 var
   BootSector: array[0..FAT12_BOOT_SECTOR_SIZE - 1] of Byte;
-  ReservedSectors, RootEntries, TotalSectors, SectorsPerFAT: Word;
+  Bpb: TFatBpb;
+  ReservedSectors, TotalSectors, Tracks: Integer;
   RootDirSectors: Int64;
   DataSectors: Int64;
-  MaxClustersInFile, MaxClustersInFAT: Int64;
   BpbScore, ScanScore: Integer;
   ScannedOffset: Int64;
   ScannedEntries: Word;
 begin
+  FillChar(BootSector, SizeOf(BootSector), 0);
   AImageFile.Position := 0;
-  FillChar(BootSector[0], FAT12_BOOT_SECTOR_SIZE, 0);
   if AImageFile.Size >= FAT12_BOOT_SECTOR_SIZE then
     AImageFile.Read(BootSector, FAT12_BOOT_SECTOR_SIZE);
 
-  // Parse boot sector
-  FBytesPerSector := Word(BootSector[$0B]) + (Word(BootSector[$0C]) shl 8);
-  if FBytesPerSector <> 512 then FBytesPerSector := 512;
-  FSectorsPerCluster := BootSector[$0D];
-  if not (FSectorsPerCluster in [1, 2, 4, 8]) then FSectorsPerCluster := 2;
-  ReservedSectors := Word(BootSector[$0E]) + (Word(BootSector[$0F]) shl 8);
-  if (ReservedSectors < 1) or (ReservedSectors > 32) then ReservedSectors := 1;
-  FNumberOfFATs := BootSector[$10];
-  if not (FNumberOfFATs in [1, 2]) then FNumberOfFATs := 2;
-  RootEntries := Word(BootSector[$11]) + (Word(BootSector[$12]) shl 8);
-  if (RootEntries < 16) or (RootEntries > 1024) then RootEntries := 112;
-  FRootEntries := RootEntries;
-  TotalSectors := Word(BootSector[$13]) + (Word(BootSector[$14]) shl 8);
-  if TotalSectors = 0 then
-    TotalSectors := AImageFile.Size div FBytesPerSector;
-  FSectorsPerFAT := Word(BootSector[$16]) + (Word(BootSector[$17]) shl 8);
-  if (FSectorsPerFAT < 1) or (FSectorsPerFAT > 32) then FSectorsPerFAT := 5;
+  // Parse boot sector (shared, sanitising BPB parser from unit_fat12)
+  Fat12ParseBpb(@BootSector[0], FAT12_BOOT_SECTOR_SIZE, AImageFile.Size, Bpb);
+  FBytesPerSector := Bpb.BytesPerSector;
+  FSectorsPerCluster := Bpb.SectorsPerCluster;
+  ReservedSectors := Bpb.ReservedSectors;
+  FNumberOfFATs := Bpb.NumberOfFATs;
+  FRootEntries := Bpb.RootEntries;
+  TotalSectors := Bpb.TotalSectors;
+  FSectorsPerFAT := Bpb.SectorsPerFAT;
 
-  // Read Atari ST 24-bit disk serial number at offset $08..$0A of boot sector
-  FDiskSerial := (LongWord(BootSector[8]) shl 16) or
-                 (LongWord(BootSector[9]) shl 8) or
-                 LongWord(BootSector[10]);
+  // Atari ST 24-bit disk serial number at offset $08..$0A of boot sector
+  FDiskSerial := Bpb.DiskSerial;
 
   // Read and validate disk geometry
   if not (FSides in [1, 2]) then
   begin
-    FSides := Word(BootSector[$1A]) + (Word(BootSector[$1B]) shl 8);
+    FSides := Bpb.Sides;
     if not (FSides in [1, 2]) then
     begin
       if TotalSectors <= 720 then FSides := 1 else FSides := 2;
@@ -3527,7 +3515,7 @@ begin
 
   if not (FSectorsPerTrack in [8..24]) then
   begin
-    FSectorsPerTrack := Word(BootSector[$18]) + (Word(BootSector[$19]) shl 8);
+    FSectorsPerTrack := Bpb.SectorsPerTrack;
     if not (FSectorsPerTrack in [8..24]) then
     begin
       if (TotalSectors > 0) and (FSides > 0) then
@@ -3545,19 +3533,19 @@ begin
 
   if (FTracks < 40) or (FTracks > 85) then
   begin
+    Tracks := 80;
     if (FSides * FSectorsPerTrack > 0) and (TotalSectors > 0) then
-      FTracks := TotalSectors div (FSides * FSectorsPerTrack)
-    else
-      FTracks := 80;
-    if (FTracks < 40) or (FTracks > 85) then
-      FTracks := 80;
+      Tracks := TotalSectors div (FSides * FSectorsPerTrack);
+    if (Tracks < 40) or (Tracks > 85) then
+      Tracks := 80;
+    FTracks := Tracks;
   end;
 
-  // Standard BPB calculation
-  FSingleFATSize := FSectorsPerFAT * FBytesPerSector;
-  FFatTableStart := ReservedSectors * FBytesPerSector;
-  FFatTableSize := FNumberOfFATs * FSingleFATSize;
-  FRootDirStart := (ReservedSectors + (FNumberOfFATs * FSectorsPerFAT)) * FBytesPerSector;
+  // Standard BPB calculation (Int64 throughout - corrupt BPBs cannot overflow)
+  FSingleFATSize := Int64(FSectorsPerFAT) * FBytesPerSector;
+  FFatTableStart := Int64(ReservedSectors) * FBytesPerSector;
+  FFatTableSize := Int64(FNumberOfFATs) * FSingleFATSize;
+  FRootDirStart := (Int64(ReservedSectors) + Int64(FNumberOfFATs) * FSectorsPerFAT) * FBytesPerSector;
 
   // Validate BPB root directory score
   BpbScore := -1;
@@ -3566,6 +3554,8 @@ begin
      (FRootEntries >= 16) and (FRootEntries <= 1024) and ((FRootEntries mod 16) = 0) then
   begin
     BpbScore := ScoreDirectoryAtOffset(AImageFile, FRootDirStart, Min(FRootEntries, 16));
+    if (BpbScore = 0) and (FRootEntries > 16) then
+      BpbScore := ScoreDirectoryAtOffset(AImageFile, FRootDirStart, Min(FRootEntries, 64));
   end;
 
   // Fallback sliding-window discovery if BPB is non-compliant, missing, or has 0 valid files while another sector does
@@ -3578,10 +3568,10 @@ begin
       FRootEntries := ScannedEntries;
       if FNumberOfFATs < 1 then FNumberOfFATs := 2;
       ReservedSectors := 1;
-      FSectorsPerFAT := Max(1, (FRootDirStart - 512) div (FNumberOfFATs * FBytesPerSector));
-      FSingleFATSize := FSectorsPerFAT * FBytesPerSector;
-      FFatTableStart := ReservedSectors * FBytesPerSector;
-      FFatTableSize := FNumberOfFATs * FSingleFATSize;
+      FSectorsPerFAT := Word(EnsureRange((FRootDirStart - 512) div (Int64(FNumberOfFATs) * FBytesPerSector), 1, 65535));
+      FSingleFATSize := Int64(FSectorsPerFAT) * FBytesPerSector;
+      FFatTableStart := Int64(ReservedSectors) * FBytesPerSector;
+      FFatTableSize := Int64(FNumberOfFATs) * FSingleFATSize;
     end;
   end;
 
@@ -3597,32 +3587,15 @@ begin
 
   FBytesPerCluster := FSectorsPerCluster * FBytesPerSector;
 
-  // Calculate total data clusters dynamically from filesystem layout
-  DataSectors := TotalSectors - (ReservedSectors + (FNumberOfFATs * FSectorsPerFAT) + RootDirSectors);
+  // Calculate total data clusters dynamically from filesystem layout, then cap by
+  // image size, FAT capacity and the FAT12 architectural limit (shared logic)
+  DataSectors := Int64(TotalSectors) -
+    (Int64(ReservedSectors) + Int64(FNumberOfFATs) * FSectorsPerFAT + RootDirSectors);
   if (DataSectors > 0) and (FSectorsPerCluster > 0) then
-    FTotalClusters := DataSectors div FSectorsPerCluster
+    FTotalClusters := Fat12ClampClusters(DataSectors div FSectorsPerCluster,
+      AImageFile.Size, FDataAreaStart, FBytesPerCluster, FSingleFATSize)
   else
     FTotalClusters := 0;
-
-  // Cap by actual image file size if image is truncated or non-standard
-  if (FBytesPerCluster > 0) and (AImageFile.Size > FDataAreaStart) then
-  begin
-    MaxClustersInFile := (AImageFile.Size - FDataAreaStart) div FBytesPerCluster;
-    if (MaxClustersInFile > 0) and (MaxClustersInFile < FTotalClusters) then
-      FTotalClusters := MaxClustersInFile;
-  end;
-
-  // Cap by FAT table capacity (FAT12 uses 1.5 bytes per cluster entry)
-  if FSingleFATSize > 3 then
-  begin
-    MaxClustersInFAT := (FSingleFATSize * 2 div 3) - 2;
-    if (MaxClustersInFAT > 0) and (MaxClustersInFAT < FTotalClusters) then
-      FTotalClusters := MaxClustersInFAT;
-  end;
-
-  // Clamp by FAT12 architectural limit (max 4084 data clusters before $FF7-$FFF markers)
-  if FTotalClusters > 4084 then
-    FTotalClusters := 4084;
 end;
 
 {------------------------------------------------------------------
@@ -3634,20 +3607,8 @@ end;
   Returns:  Value of the FAT entry
  ------------------------------------------------------------------}
 function TForm1.ReadFAT12Entry(const AImageFile: TFileStream; Cluster: Word): Word;
-var
-  posFAT: Int64;
-  b1, b2: Byte;
-  val: Word;
 begin
-  posFAT := FFatTableStart + (Cluster * 3) div 2;
-  AImageFile.Position := posFAT;
-  AImageFile.Read(b1, 1);
-  AImageFile.Read(b2, 1);
-  val := Word(b1) or (Word(b2) shl 8);
-  if (Cluster and 1) = 0 then
-    Result := val and $0FFF
-  else
-    Result := val shr 4;
+  Result := Word(Fat12ReadEntry(AImageFile, FFatTableStart, Cluster));
 end;
 
 {------------------------------------------------------------------
@@ -3659,31 +3620,9 @@ end;
     Value      - Value to write
  ------------------------------------------------------------------}
 procedure TForm1.WriteFAT12EntryAllCopies(const AImageFile: TFileStream; Cluster: Word; Value: Word);
-var
-  fatIdx: Integer;
-  posFAT, base: Int64;
-  b1, b2: Byte;
-  val: Word;
 begin
-  Value := Value and $0FFF; // Ensure it's a 12-bit value
-  for fatIdx := 0 to FNumberOfFATs - 1 do
-  begin
-    base := FFatTableStart + fatIdx * FSingleFATSize;
-    posFAT := base + (Cluster * 3) div 2;
-    AImageFile.Position := posFAT;
-    AImageFile.Read(b1, 1);
-    AImageFile.Read(b2, 1);
-    val := Word(b1) or (Word(b2) shl 8);
-    if (Cluster and 1) = 0 then
-      val := (val and $F000) or (Value and $0FFF)
-    else
-      val := (val and $000F) or ((Value and $0FFF) shl 4);
-    b1 := val and $FF;
-    b2 := val shr 8;
-    AImageFile.Position := posFAT;
-    AImageFile.Write(b1, 1);
-    AImageFile.Write(b2, 1);
-  end;
+  Fat12WriteEntryAllCopies(AImageFile, FFatTableStart, FSingleFATSize,
+    FNumberOfFATs, Cluster, Value);
 end;
 
 {------------------------------------------------------------------
@@ -3785,6 +3724,7 @@ begin
 
   if EntriesToCheck <= 0 then Exit;
 
+  FillChar(Entry, SizeOf(Entry), 0);
   Result := 0;
   AStream.Position := AOffset;
 
@@ -3794,28 +3734,46 @@ begin
     FirstByte := Entry[0];
     if FirstByte = 0 then Continue;
 
-    // Check valid first byte
+    Attr := Entry[11];
+    if (Attr and $C0) <> 0 then Exit(-1); // Invalid attribute bits (bits 6, 7 are never set in FAT12)
+
+    // LFN entry (Attribute $0F)
+    if (Attr and $0F) = $0F then
+    begin
+      Inc(Result);
+      Continue;
+    end;
+
+    // Volume label entry (Bit $08 set)
+    if (Attr and $08) <> 0 then
+    begin
+      // Volume labels can be up to 11 chars, padded with spaces or nulls
+      HasInvalidChars := False;
+      for J := 0 to 10 do
+      begin
+        if (Entry[J] < 32) and (Entry[J] <> 0) and (Entry[J] <> 5) then
+        begin
+          HasInvalidChars := True;
+          Break;
+        end;
+      end;
+      if HasInvalidChars then Exit(-1);
+      Inc(Result);
+      Continue;
+    end;
+
+    // Normal file or directory entry
+    // Check valid first byte: $E5 (deleted), $05 (Kanji), or printable ASCII/Atari characters (32..126, 128..255)
+    // Exclude $F8 and $F9 to prevent media descriptors in FAT tables from being scored as directory entries
     IsValidFirst := (FirstByte = $E5) or (FirstByte = $05) or
-                    ((FirstByte >= Ord('A')) and (FirstByte <= Ord('Z'))) or
-                    ((FirstByte >= Ord('a')) and (FirstByte <= Ord('z'))) or
-                    ((FirstByte >= Ord('0')) and (FirstByte <= Ord('9'))) or
-                    (Char(FirstByte) in ['_', '^', '$', '~', '!', '#', '%', '&', '-', '{', '}', '(', ')', '@', '''']) or
-                    ((FirstByte >= 128) and (FirstByte <= 254) and (FirstByte <> $F8) and (FirstByte <> $F9));
+                    ((FirstByte in [32..126, 128..255]) and (FirstByte <> $F8) and (FirstByte <> $F9));
 
     if not IsValidFirst then Exit(-1); // Garbage penalty
-
-    Attr := Entry[11];
-    if (Attr and $C0) <> 0 then Exit(-1); // Invalid attribute bits
 
     // Check 11 characters of 8.3 name: no nulls, no control characters
     HasInvalidChars := False;
     for J := 0 to 10 do
     begin
-      if Entry[J] = 0 then
-      begin
-        HasInvalidChars := True;
-        Break;
-      end;
       if (Entry[J] < 32) and (Entry[J] <> 5) then
       begin
         HasInvalidChars := True;
@@ -3825,7 +3783,7 @@ begin
     if HasInvalidChars then Exit(-1);
 
     StartClust := Word(Entry[26]) or (Word(Entry[27]) shl 8);
-    if StartClust > 4000 then Exit(-1);
+    if StartClust > FAT12_MAX_CLUSTERS then Exit(-1);
 
     Inc(Result);
   end;
@@ -3842,6 +3800,7 @@ var
   BestScore, Score: Integer;
   BestOffset: Int64;
   ExpectedEntries: Word;
+  PrevHadScore: Boolean;
 begin
   if AStream.Size <= 368640 then
   begin
@@ -3855,13 +3814,14 @@ begin
   end;
 
   BestScore := 0;
+  PrevHadScore := False;
 
   // Scan through first 30 sectors (offsets 512..15360)
   Offset := 512;
   while (Offset < 15360) and (Offset + 512 <= AStream.Size) do
   begin
     Score := ScoreDirectoryAtOffset(AStream, Offset, 16);
-    if Score > BestScore then
+    if (Score > BestScore) and not PrevHadScore then
     begin
       BestScore := Score;
       BestOffset := Offset;
@@ -3870,6 +3830,7 @@ begin
       else
         ExpectedEntries := 112;
     end;
+    PrevHadScore := (Score > 0);
     Inc(Offset, 512);
   end;
 
@@ -3904,6 +3865,7 @@ var
   I, J: Integer;
   RootDirSectors: Int64;
 begin
+  FillChar(Buf, SizeOf(Buf), 0);
   SubDirCount := 0;
   SetLength(SubDirs, 0);
 
@@ -3982,7 +3944,8 @@ function TForm1.CheckAndDeinterleaveSingleSidedST(const ASourceFile: string; out
 var
   InStream, OutStream: TFileStream;
   BootSector: array[0..FAT12_BOOT_SECTOR_SIZE - 1] of Byte;
-  BytesPerSector, SectorsPerTrack, Sides, TotalSectors: Word;
+  Bpb: TFatBpb;
+  BytesPerSector, SectorsPerTrack, Sides, TotalSectors: Integer;
   TrackSize, CylinderSize, TrackCount, T: Integer;
   TrackBuf: TBytes;
   TempFile: string;
@@ -4007,11 +3970,11 @@ begin
     if InStream.Size >= FAT12_BOOT_SECTOR_SIZE then
       InStream.Read(BootSector, FAT12_BOOT_SECTOR_SIZE);
 
-    BytesPerSector := Word(BootSector[$0B]) + (Word(BootSector[$0C]) shl 8);
-    if BytesPerSector <> 512 then BytesPerSector := 512;
-    SectorsPerTrack := Word(BootSector[$18]) + (Word(BootSector[$19]) shl 8);
-    Sides := Word(BootSector[$1A]) + (Word(BootSector[$1B]) shl 8);
-    TotalSectors := Word(BootSector[$13]) + (Word(BootSector[$14]) shl 8);
+    Fat12ParseBpb(@BootSector[0], FAT12_BOOT_SECTOR_SIZE, InStream.Size, Bpb);
+    BytesPerSector := Bpb.BytesPerSector;
+    SectorsPerTrack := Bpb.SectorsPerTrack;
+    Sides := Bpb.Sides;
+    TotalSectors := Bpb.TotalSectors;
 
     ShouldDeinterleave := False;
     UseSpt := 9;
@@ -5023,6 +4986,7 @@ begin
   LabelPos := -1;
   FoundExisting := False;
 
+  FillChar(DirEntry, SizeOf(DirEntry), 0);
   // Search root directory for existing volume label entry or free slot
   AImageFile.Position := FRootDirStart;
   for I := 0 to FRootEntries - 1 do
@@ -5241,10 +5205,11 @@ var
   NeedsTempClean: Boolean;
   FS: TFileStream;
   BootSec: array[0..511] of Byte;
-  BytesPerSec, SecPerFAT, ResSec, NumFATs, RootEntries, TotalSec: Word;
-  SecPerClust: Byte;
+  Bpb: TFatBpb;
+  Layout: TFatLayout;
+  RootEntries: Integer;
   RootDirStart, DataAreaStart, CurrClust, FileSizeVal: Int64;
-  BytesPerClust: Word;
+  BytesPerClust: Integer;
   DirEntry: array[0..31] of Byte;
   EntryIdx, MaxEntries, RootCount: Integer;
   DirQueue: TList;
@@ -5303,24 +5268,12 @@ begin
       FillChar(BootSec[0], 512, 0);
       FS.Read(BootSec[0], 512);
 
-      BytesPerSec := Word(BootSec[$0B]) + (Word(BootSec[$0C]) shl 8);
-      if BytesPerSec <> 512 then BytesPerSec := 512;
-      SecPerClust := BootSec[$0D];
-      if not (SecPerClust in [1, 2, 4, 8]) then SecPerClust := 2;
-      ResSec := Word(BootSec[$0E]) + (Word(BootSec[$0F]) shl 8);
-      if (ResSec < 1) or (ResSec > 32) then ResSec := 1;
-      NumFATs := BootSec[$10];
-      if not (NumFATs in [1, 2]) then NumFATs := 2;
-      RootEntries := Word(BootSec[$11]) + (Word(BootSec[$12]) shl 8);
-      if (RootEntries < 16) or (RootEntries > 1024) then RootEntries := 112;
-      TotalSec := Word(BootSec[$13]) + (Word(BootSec[$14]) shl 8);
-      if TotalSec = 0 then TotalSec := FS.Size div BytesPerSec;
-      SecPerFAT := Word(BootSec[$16]) + (Word(BootSec[$17]) shl 8);
-      if (SecPerFAT < 1) or (SecPerFAT > 32) then SecPerFAT := 5;
-
-      RootDirStart := (ResSec + (NumFATs * SecPerFAT)) * BytesPerSec;
-      DataAreaStart := RootDirStart + (((Int64(RootEntries) * 32) + (BytesPerSec - 1)) div BytesPerSec) * BytesPerSec;
-      BytesPerClust := SecPerClust * BytesPerSec;
+      Fat12ParseBpb(@BootSec[0], 512, FS.Size, Bpb);
+      Fat12ComputeLayout(Bpb, FS.Size, Layout);
+      RootEntries := Bpb.RootEntries;
+      RootDirStart := Layout.RootDirStart;
+      DataAreaStart := Layout.DataAreaStart;
+      BytesPerClust := Integer(Layout.BytesPerCluster);
 
       DirQueue := TList.Create;
       VisitedClusters := TList.Create;
@@ -6241,6 +6194,7 @@ var
   SecPerClust, NumFATs, MediaByte: Byte;
   BootSum, OriginalBootSum: Word;
   LabelStr: string;
+  Bpb: TFatBpb;
 begin
   if (FImagePath = '') or not FileExists(FImagePath) then
   begin
@@ -6286,50 +6240,18 @@ begin
         Exit;
     end;
 
-    // Read current BPB values
-    Move(BootSec[$0B], BytesPerSec, 2);
-    SecPerClust := BootSec[$0D];
-    Move(BootSec[$0E], ReservedSec, 2);
-    NumFATs := BootSec[$10];
-    Move(BootSec[$11], RootEntries, 2);
-    Move(BootSec[$13], TotalSec, 2);
-    MediaByte := BootSec[$15];
-    Move(BootSec[$16], SecPerFAT, 2);
-    Move(BootSec[$18], SecPerTrack, 2);
-    Move(BootSec[$1A], Sides, 2);
-
-    // Validate and fallback to standard geometry if unformatted/invalid
-    if BytesPerSec <> 512 then BytesPerSec := 512;
-    if SecPerClust = 0 then
-    begin
-      if TotalSec <= 720 then SecPerClust := 1 else SecPerClust := 2;
-    end;
-    if ReservedSec = 0 then ReservedSec := 1;
-    if NumFATs = 0 then NumFATs := 2;
-    if RootEntries = 0 then
-    begin
-      if TotalSec <= 720 then RootEntries := 64 else RootEntries := 112;
-    end;
-    if (TotalSec = 0) or (Int64(TotalSec) * BytesPerSec > FS.Size + 512) then
-    begin
-      TotalSec := Word(Min(65535, FS.Size div BytesPerSec));
-    end;
-    if (MediaByte < $F0) then
-    begin
-      if TotalSec <= 720 then MediaByte := $F7 else MediaByte := $F9;
-    end;
-    if SecPerFAT = 0 then
-    begin
-      if TotalSec <= 720 then
-        SecPerFAT := 2
-      else
-      begin
-        // Calculate needed FAT12 sectors: 1.5 bytes per cluster
-        SecPerFAT := Word((((Int64(TotalSec) div Max(1, SecPerClust)) + 2) * 3 div 2 + 511) div 512);
-        if SecPerFAT < 2 then SecPerFAT := 2;
-        if SecPerFAT > 9 then SecPerFAT := 5;
-      end;
-    end;
+    // Read current BPB values via shared parser
+    Fat12ParseBpb(@BootSec[0], 512, FS.Size, Bpb);
+    BytesPerSec := Bpb.BytesPerSector;
+    SecPerClust := Bpb.SectorsPerCluster;
+    ReservedSec := Bpb.ReservedSectors;
+    NumFATs := Bpb.NumberOfFATs;
+    RootEntries := Bpb.RootEntries;
+    TotalSec := Word(Min(65535, Bpb.TotalSectors));
+    MediaByte := Bpb.MediaDescriptor;
+    SecPerFAT := Bpb.SectorsPerFAT;
+    SecPerTrack := Bpb.SectorsPerTrack;
+    Sides := Bpb.Sides;
     if SecPerTrack = 0 then SecPerTrack := 9;
     if Sides = 0 then
     begin

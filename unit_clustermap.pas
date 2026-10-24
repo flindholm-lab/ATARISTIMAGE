@@ -6,7 +6,7 @@ interface
 
 uses
   Classes, SysUtils, Forms, Controls, Graphics, Dialogs, ComCtrls,
-  StdCtrls, ExtCtrls, Grids, Math;
+  StdCtrls, ExtCtrls, Grids, Math, unit_fat12;
 
 const
   FAT12_BOOT_SECTOR_SIZE = 512;
@@ -126,7 +126,7 @@ type
     FNumberOfFATs: Byte;
     FSectorsPerFAT: Word;
     FRootEntries: Word;
-    FTotalSectors: Word;
+    FTotalSectors: Integer;
     FFatTableStart: Int64;
     FSingleFATSize: Int64;
     FRootDirStart: Int64;
@@ -258,99 +258,43 @@ end;
 procedure TFormClusterMap.ReadFATDetails(const AImageFile: TFileStream);
 var
   BootSector: array[0..FAT12_BOOT_SECTOR_SIZE - 1] of Byte;
-  DataSectors: Int64;
-  MaxClustersInFile, MaxClustersInFAT: Int64;
+  Bpb: TFatBpb;
+  Layout: TFatLayout;
 begin
+  FillChar(BootSector[0], FAT12_BOOT_SECTOR_SIZE, 0);
   AImageFile.Position := 0;
   AImageFile.Read(BootSector, FAT12_BOOT_SECTOR_SIZE);
 
-  FBytesPerSector := Word(BootSector[$0B]) + (Word(BootSector[$0C]) shl 8);
-  if FBytesPerSector <> 512 then FBytesPerSector := 512;
-  FSectorsPerCluster := BootSector[$0D];
-  if FSectorsPerCluster = 0 then FSectorsPerCluster := 2;
-  FReservedSectors := Word(BootSector[$0E]) + (Word(BootSector[$0F]) shl 8);
-  if FReservedSectors = 0 then FReservedSectors := 1;
-  FNumberOfFATs := BootSector[$10];
-  if FNumberOfFATs = 0 then FNumberOfFATs := 2;
-  FRootEntries := Word(BootSector[$11]) + (Word(BootSector[$12]) shl 8);
-  if FRootEntries = 0 then FRootEntries := 112;
-  FTotalSectors := Word(BootSector[$13]) + (Word(BootSector[$14]) shl 8);
-  if FTotalSectors = 0 then
-    FTotalSectors := AImageFile.Size div FBytesPerSector;
-  FSectorsPerFAT := Word(BootSector[$16]) + (Word(BootSector[$17]) shl 8);
-  if FSectorsPerFAT = 0 then FSectorsPerFAT := 5;
+  // Shared, sanitising BPB parser and layout calculation (unit_fat12)
+  Fat12ParseBpb(@BootSector[0], FAT12_BOOT_SECTOR_SIZE, AImageFile.Size, Bpb);
+  Fat12ComputeLayout(Bpb, AImageFile.Size, Layout);
 
-  FSingleFATSize := FSectorsPerFAT * FBytesPerSector;
-  FFatTableStart := FReservedSectors * FBytesPerSector;
-  FRootDirStart := (FReservedSectors + (FNumberOfFATs * FSectorsPerFAT)) * FBytesPerSector;
-  FRootDirSectors := ((FRootEntries * 32) + (FBytesPerSector - 1)) div FBytesPerSector;
-  FDataAreaStart := FRootDirStart + (FRootDirSectors * FBytesPerSector);
-  FBytesPerCluster := FSectorsPerCluster * FBytesPerSector;
+  FBytesPerSector := Bpb.BytesPerSector;
+  FSectorsPerCluster := Bpb.SectorsPerCluster;
+  FReservedSectors := Bpb.ReservedSectors;
+  FNumberOfFATs := Bpb.NumberOfFATs;
+  FRootEntries := Bpb.RootEntries;
+  FTotalSectors := Bpb.TotalSectors;
+  FSectorsPerFAT := Bpb.SectorsPerFAT;
 
-  DataSectors := FTotalSectors - (FReservedSectors + (FNumberOfFATs * FSectorsPerFAT) + FRootDirSectors);
-  if (DataSectors > 0) and (FSectorsPerCluster > 0) then
-    FTotalClusters := DataSectors div FSectorsPerCluster
-  else
-    FTotalClusters := 0;
-
-  if (FBytesPerCluster > 0) and (AImageFile.Size > FDataAreaStart) then
-  begin
-    MaxClustersInFile := (AImageFile.Size - FDataAreaStart) div FBytesPerCluster;
-    if (MaxClustersInFile > 0) and (MaxClustersInFile < FTotalClusters) then
-      FTotalClusters := MaxClustersInFile;
-  end;
-
-  if FSingleFATSize > 3 then
-  begin
-    MaxClustersInFAT := (FSingleFATSize * 2 div 3) - 2;
-    if (MaxClustersInFAT > 0) and (MaxClustersInFAT < FTotalClusters) then
-      FTotalClusters := MaxClustersInFAT;
-  end;
+  FSingleFATSize := Layout.SingleFATSize;
+  FFatTableStart := Layout.FatTableStart;
+  FRootDirStart := Layout.RootDirStart;
+  FRootDirSectors := Layout.RootDirSectors;
+  FDataAreaStart := Layout.DataAreaStart;
+  FBytesPerCluster := Layout.BytesPerCluster;
+  FTotalClusters := Layout.TotalClusters;
 end;
 
 function TFormClusterMap.ReadFAT12Entry(const AImageFile: TFileStream; Cluster: Word): Word;
-var
-  fatPos: Int64;
-  b1, b2: Byte;
-  val: Word;
 begin
-  fatPos := FFatTableStart + (Int64(Cluster) * 3) div 2;
-  AImageFile.Position := fatPos;
-  AImageFile.Read(b1, 1);
-  AImageFile.Read(b2, 1);
-  val := Word(b1) or (Word(b2) shl 8);
-  if (Cluster and 1) = 0 then
-    Result := val and $0FFF
-  else
-    Result := (val shr 4) and $0FFF;
+  Result := Word(Fat12ReadEntry(AImageFile, FFatTableStart, Cluster));
 end;
 
 procedure TFormClusterMap.WriteFAT12EntryAllCopies(const AImageFile: TFileStream; Cluster: Word; Value: Word);
-var
-  fatIdx: Integer;
-  posFAT, base: Int64;
-  b1, b2: Byte;
-  val: Word;
 begin
-  Value := Value and $0FFF;
-  for fatIdx := 0 to FNumberOfFATs - 1 do
-  begin
-    base := FFatTableStart + fatIdx * FSingleFATSize;
-    posFAT := base + (Int64(Cluster) * 3) div 2;
-    AImageFile.Position := posFAT;
-    AImageFile.Read(b1, 1);
-    AImageFile.Read(b2, 1);
-    val := Word(b1) or (Word(b2) shl 8);
-    if (Cluster and 1) = 0 then
-      val := (val and $F000) or (Value and $0FFF)
-    else
-      val := (val and $000F) or ((Value and $0FFF) shl 4);
-    b1 := Byte(val and $FF);
-    b2 := Byte((val shr 8) and $FF);
-    AImageFile.Position := posFAT;
-    AImageFile.Write(b1, 1);
-    AImageFile.Write(b2, 1);
-  end;
+  Fat12WriteEntryAllCopies(AImageFile, FFatTableStart, FSingleFATSize,
+    FNumberOfFATs, Cluster, Value);
 end;
 
 procedure TFormClusterMap.ScanDirectoryForClusterOwners(const AImageFile: TFileStream; DirCluster: Int64; const CurrentPath: string);

@@ -253,7 +253,6 @@ var
   TrackLenBE: Word;
   I, RunLen: Integer;
   CurByte: Byte;
-  BytesRead: Integer;
 begin
   Result := False;
   if not FileExists(ASTFileName) then Exit;
@@ -286,7 +285,7 @@ begin
         for Side := 0 to ASides - 1 do
         begin
           FillChar(RawTrack[0], TrackSize, 0);
-          BytesRead := InFS.Read(RawTrack[0], TrackSize);
+          InFS.Read(RawTrack[0], TrackSize);
 
           // Compress RawTrack using MSA RLE
           CompLen := 0;

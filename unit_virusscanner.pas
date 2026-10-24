@@ -6,7 +6,7 @@ interface
 
 uses
   Classes, SysUtils, FileUtil, Forms, Controls, Graphics, Dialogs, ComCtrls,
-  StdCtrls, ExtCtrls, Math;
+  StdCtrls, ExtCtrls, Math, unit_fat12;
 
 type
   TVirusTargetType = (vtBootSector, vtFile, vtProtector, vtCustomBoot, vtNone);
@@ -210,19 +210,8 @@ begin
 end;
 
 function CalculateBootChecksum(const Sector: PByte; Size: Integer = 512): Word;
-var
-  Sum: LongWord;
-  I: Integer;
-  Val: Word;
 begin
-  Sum := 0;
-  if (Sector = nil) or (Size < 512) then Exit(0);
-  for I := 0 to 255 do
-  begin
-    Val := (Word(Sector[I * 2]) shl 8) or Word(Sector[I * 2 + 1]);
-    Sum := (Sum + Val) and $FFFF;
-  end;
-  Result := Word(Sum);
+  Result := AtariBootChecksum(Sector, Size);
 end;
 
 function HasFloppyWriteRoutine(const TraitsOrDescription: string): Boolean;
@@ -1568,14 +1557,13 @@ end;
 
 function ReadFAT12Entry(const FATBuf: PByte; FATSize: Integer; Cluster: Word): Word;
 var
-  Off: Integer;
+  Val: Integer;
 begin
-  Off := (Cluster * 3) div 2;
-  if (FATBuf = nil) or (Off + 1 >= FATSize) then Exit($FFF);
-  if (Cluster and 1) = 0 then
-    Result := (Word(FATBuf[Off]) or (Word(FATBuf[Off + 1] and $0F) shl 8))
+  Val := Fat12GetEntry(FATBuf, FATSize, Cluster);
+  if Val < 0 then
+    Result := $FFF
   else
-    Result := ((Word(FATBuf[Off]) shr 4) or (Word(FATBuf[Off + 1]) shl 4));
+    Result := Word(Val);
 end;
 
 function IsValidDOSChar(C: Byte): Boolean; inline;
@@ -1613,6 +1601,8 @@ var
   BootThreat, FileThreat: TVirusScanResult;
   GlobalVisitedDirs: array of Word;
   FAborted: Boolean;
+  Bpb: TFatBpb;
+  Layout: TFatLayout;
 
   procedure AddThreat(const AThreat: TVirusScanResult);
   var
@@ -1855,24 +1845,21 @@ begin
     end;
 
     // 2. Parse BPB Geometry
-    BytesPerSec := Word(BootSec[$0B]) or (Word(BootSec[$0C]) shl 8);
-    if BytesPerSec = 0 then BytesPerSec := 512;
-    SecPerClust := BootSec[$0D];
-    if SecPerClust = 0 then SecPerClust := 2;
-    ResSec := Word(BootSec[$0E]) or (Word(BootSec[$0F]) shl 8);
-    if ResSec = 0 then ResSec := 1;
-    NumFATs := BootSec[$10];
-    if NumFATs = 0 then NumFATs := 2;
-    RootEntries := Word(BootSec[$11]) or (Word(BootSec[$12]) shl 8);
-    if RootEntries = 0 then RootEntries := 112;
-    SecPerFAT := Word(BootSec[$16]) or (Word(BootSec[$17]) shl 8);
-    if SecPerFAT = 0 then SecPerFAT := 5;
+    Fat12ParseBpb(@BootSec[0], 512, FS.Size, Bpb);
+    Fat12ComputeLayout(Bpb, FS.Size, Layout);
 
-    FatStart := Int64(ResSec) * BytesPerSec;
-    RootDirStart := FatStart + Int64(NumFATs) * SecPerFAT * BytesPerSec;
-    RootDirSectors := (Int64(RootEntries) * 32 + (BytesPerSec - 1)) div BytesPerSec;
-    DataStart := RootDirStart + RootDirSectors * BytesPerSec;
-    ClusterBytes := Int64(SecPerClust) * BytesPerSec;
+    BytesPerSec := Bpb.BytesPerSector;
+    SecPerClust := Bpb.SectorsPerCluster;
+    ResSec := Bpb.ReservedSectors;
+    NumFATs := Bpb.NumberOfFATs;
+    RootEntries := Bpb.RootEntries;
+    SecPerFAT := Bpb.SectorsPerFAT;
+
+    FatStart := Layout.FatTableStart;
+    RootDirStart := Layout.RootDirStart;
+    RootDirSectors := Layout.RootDirSectors;
+    DataStart := Layout.DataAreaStart;
+    ClusterBytes := Layout.BytesPerCluster;
 
     // Validate geometry sanity
     if (ClusterBytes <= 0) or (DataStart >= FS.Size) or (FatStart >= FS.Size) then
@@ -1881,7 +1868,7 @@ begin
       Exit;
     end;
 
-    MaxCluster := 2 + (FS.Size - DataStart) div ClusterBytes;
+    MaxCluster := 2 + Layout.TotalClusters;
     if MaxCluster > 4085 then MaxCluster := 4085;
 
     // Read First FAT Table into memory
@@ -1967,6 +1954,8 @@ var
   TotalClusters, C, S, SEntryOff: Integer;
   ClustPos: Int64;
   SubClust: Word;
+  Bpb: TFatBpb;
+  Layout: TFatLayout;
 begin
   Result := False;
   if not FileExists(AImagePath) then Exit;
@@ -1978,24 +1967,21 @@ begin
     FS.Position := 0;
     FS.ReadBuffer(BootSec[0], 512);
 
-    BytesPerSec := Word(BootSec[$0B]) or (Word(BootSec[$0C]) shl 8);
-    if BytesPerSec = 0 then BytesPerSec := 512;
-    SecPerClust := BootSec[$0D];
-    if SecPerClust = 0 then SecPerClust := 2;
-    ResSec := Word(BootSec[$0E]) or (Word(BootSec[$0F]) shl 8);
-    if ResSec = 0 then ResSec := 1;
-    NumFATs := BootSec[$10];
-    if NumFATs = 0 then NumFATs := 2;
-    RootEntries := Word(BootSec[$11]) or (Word(BootSec[$12]) shl 8);
-    if RootEntries = 0 then RootEntries := 112;
-    SecPerFAT := Word(BootSec[$16]) or (Word(BootSec[$17]) shl 8);
-    if SecPerFAT = 0 then SecPerFAT := 5;
+    Fat12ParseBpb(@BootSec[0], 512, FS.Size, Bpb);
+    Fat12ComputeLayout(Bpb, FS.Size, Layout);
 
-    FatStart := Int64(ResSec) * BytesPerSec;
-    RootDirStart := FatStart + Int64(NumFATs) * SecPerFAT * BytesPerSec;
-    RootDirSectors := (Int64(RootEntries) * 32 + (BytesPerSec - 1)) div BytesPerSec;
-    DataStart := RootDirStart + RootDirSectors * BytesPerSec;
-    ClusterBytes := Int64(SecPerClust) * BytesPerSec;
+    BytesPerSec := Bpb.BytesPerSector;
+    SecPerClust := Bpb.SectorsPerCluster;
+    ResSec := Bpb.ReservedSectors;
+    NumFATs := Bpb.NumberOfFATs;
+    RootEntries := Bpb.RootEntries;
+    SecPerFAT := Bpb.SectorsPerFAT;
+
+    FatStart := Layout.FatTableStart;
+    RootDirStart := Layout.RootDirStart;
+    RootDirSectors := Layout.RootDirSectors;
+    DataStart := Layout.DataAreaStart;
+    ClusterBytes := Layout.BytesPerCluster;
 
     // Load FAT
     SetLength(FATBuffer, SecPerFAT * BytesPerSec);
