@@ -36,6 +36,9 @@ function DecompressPompey(const InBuf: PByte; InSize: Integer; out OutBuf: TByte
 function DecompressSentry(const InBuf: PByte; InSize: Integer; out OutBuf: TBytes): Boolean;
 function Decompress4PAK(const InBuf: PByte; InSize: Integer; out OutBuf: TBytes): Boolean;
 function DecompressHappy(const InBuf: PByte; InSize: Integer; out OutBuf: TBytes): Boolean;
+function DecompressPFX(const InBuf: PByte; InSize: Integer; out OutBuf: TBytes): Boolean;
+function DecompressPowerPacker(const InBuf: PByte; InSize: Integer; out OutBuf: TBytes): Boolean;
+function DecompressCrunchMania(const InBuf: PByte; InSize: Integer; out OutBuf: TBytes): Boolean;
 function DecompressTiny(const InBuf: PByte; InSize: Integer; DefaultRes: Integer; out OutPalette: TBytes; out OutVRAM: TBytes; out OutRes: Integer): Boolean;
 function DecompressStad(const InBuf: PByte; InSize: Integer; out OutScreen: TBytes): Boolean;
 function DecompressStosSquash(const InBuf: PByte; InSize: Integer; out OutBuf: TBytes): Boolean;
@@ -58,6 +61,19 @@ begin
             (LongWord(P[Offset + 1]) shl 16) or
             (LongWord(P[Offset + 2]) shl 8) or
             LongWord(P[Offset + 3]);
+end;
+
+function ReadLE16(const P: PByte; Offset: Integer): Word; inline;
+begin
+  Result := Word(P[Offset]) or (Word(P[Offset + 1]) shl 8);
+end;
+
+function ReadLE32(const P: PByte; Offset: Integer): LongWord; inline;
+begin
+  Result := LongWord(P[Offset]) or
+            (LongWord(P[Offset + 1]) shl 8) or
+            (LongWord(P[Offset + 2]) shl 16) or
+            (LongWord(P[Offset + 3]) shl 24);
 end;
 
 function CheckLong(const P: PByte; Size: Integer; Offset: Integer; Val: LongWord): Boolean; inline;
@@ -139,6 +155,7 @@ var
   AsciiContext, TailAscii: string;
   Idx: Integer;
   ULen, PLen, AbsEnd, AbsLitOff, LitLen, AbsLitStart: LongWord;
+  TextLen: LongWord;
   DummyOut: TBytes;
 begin
   Result := 'None';
@@ -340,10 +357,26 @@ begin
     Exit('PA Packer Executable');
 
   // 21. PFX Packer
+  if CheckWord(Buffer, Size, 0, $601A) and (Size >= 28) then
+  begin
+    TextLen := ReadBE32(Buffer, 2);
+    if (TextLen > 0) and (28 + TextLen + 6 <= LongWord(Size)) then
+    begin
+      if CheckString(Buffer, Size, 28 + TextLen + 2, '-lz5') then
+      begin
+        if TextLen = 392 then Exit('PFX Packer v1.13 Executable')
+        else if TextLen = 534 then Exit('PFX Packer v1.13/v1.6 Executable')
+        else if TextLen = 556 then Exit('PFX Packer v1.8/v2.1 Executable')
+        else if TextLen = 1022 then Exit('PFX Packer v2.1 (Anti-Virus) Executable')
+        else Exit('PFX Packer Executable');
+      end;
+    end;
+  end;
   if CheckString(Buffer, Size, 422, '-lz5') then Exit('PFX Packer v1.13 Executable');
   if CheckString(Buffer, Size, 564, '-lz5') then Exit('PFX Packer v1.13/v1.6 Executable');
   if CheckString(Buffer, Size, 586, '-lz5') then Exit('PFX Packer v1.8/v2.1 Executable');
   if CheckString(Buffer, Size, 1052, '-lz5') then Exit('PFX Packer v2.1 (Anti-Virus) Executable');
+  if CheckString(Buffer, Size, 2, '-lz5') then Exit('PFX / -lz5- Packed Data');
 
   // 22. Pompey Packer
   if CheckLastLongString(Buffer, Size, 'POPI') or CheckLastLongString(Buffer, Size, 'PUFF') then
@@ -369,8 +402,44 @@ begin
   // 23. Power Packer
   if CheckString(Buffer, Size, 0, 'PP20') then
     Exit('Power Packer v2.0 Raw Data');
+  if CheckString(Buffer, Size, 0, 'PX20') then
+    Exit('Power Packer v2.0 (Encrypted) Raw Data');
+  if (Size >= 32) and CheckWord(Buffer, Size, 0, $601A) then
+  begin
+    TextLen := ReadBE32(Buffer, 2);
+    if (TextLen > 0) and (28 + TextLen + 16 <= LongWord(Size)) then
+    begin
+      if CheckString(Buffer, Size, 28 + TextLen, 'PP20') then
+        Exit('Power Packer v2.0 Executable');
+    end;
+  end;
 
-  // 24. QPak Packer
+  // 24. Crunch-Mania (Thomas Schwarz / The Lost Boys)
+  if CheckString(Buffer, Size, 0, 'CrM!') or CheckString(Buffer, Size, 0, 'DCS!') then
+    Exit('Crunch-Mania Standard Raw Data');
+  if CheckString(Buffer, Size, 0, 'Crm!') then
+    Exit('Crunch-Mania Standard (Sampled) Raw Data');
+  if CheckString(Buffer, Size, 0, 'CrM2') or CheckString(Buffer, Size, 0, 'Iron') or CheckString(Buffer, Size, 0, 'MSS!') then
+    Exit('Crunch-Mania LZH Raw Data');
+  if CheckString(Buffer, Size, 0, 'Crm2') or CheckString(Buffer, Size, 0, 'mss!') then
+    Exit('Crunch-Mania LZH (Sampled) Raw Data');
+  if (Size >= 32) and CheckWord(Buffer, Size, 0, $601A) then
+  begin
+    TextLen := ReadBE32(Buffer, 2);
+    if (TextLen > 0) and (28 + TextLen + 20 <= LongWord(Size)) then
+    begin
+      if CheckString(Buffer, Size, 28 + TextLen, 'CrM!') or CheckString(Buffer, Size, 28 + TextLen, 'DCS!') then
+        Exit('Crunch-Mania Standard Executable')
+      else if CheckString(Buffer, Size, 28 + TextLen, 'Crm!') then
+        Exit('Crunch-Mania Standard (Sampled) Executable')
+      else if CheckString(Buffer, Size, 28 + TextLen, 'CrM2') or CheckString(Buffer, Size, 28 + TextLen, 'Iron') or CheckString(Buffer, Size, 28 + TextLen, 'MSS!') then
+        Exit('Crunch-Mania LZH Executable')
+      else if CheckString(Buffer, Size, 28 + TextLen, 'Crm2') or CheckString(Buffer, Size, 28 + TextLen, 'mss!') then
+        Exit('Crunch-Mania LZH (Sampled) Executable');
+    end;
+  end;
+
+  // 25. QPak Packer
   if CheckString(Buffer, Size, 4, '2-JM') then Exit('QPak Packer v2 Raw Data');
   if CheckString(Buffer, Size, 52, '2-JM') then Exit('QPak Packer v2 Executable');
 
@@ -419,7 +488,7 @@ begin
     Exit('STAD Monochrome Picture');
 
   // 34. STOS Squashed Data / Picture
-  if (Size >= 16) and (ReadBE32(Buffer, Size - 4) > 0) and (ReadBE32(Buffer, Size - 4) <= 2097152) then
+  if (Size >= 24) and (ReadBE32(Buffer, Size - 4) > LongWord(Size)) and (ReadBE32(Buffer, Size - 4) <= 2097152) then
   begin
     if DecompressStosSquash(Buffer, Size, DummyOut) then
     begin
@@ -477,6 +546,7 @@ begin
     Exit('Automation Compacter');
   if (Pos('POMPEY PIRATES', AsciiContext) > 0) then Exit('Pompey Pirates Packer');
   if (Pos('JEK PACKER', AsciiContext) > 0) or (Pos('JEK!', AsciiContext) > 0) then Exit('JEK Packer / Byte Killer');
+  if (Pos('-lz5', AsciiContext) > 0) or (Pos('PFX', AsciiContext) > 0) then Exit('PFX Packer Executable');
 
   // Tail-end scanning fallback
   if Size > 1024 then
@@ -540,6 +610,9 @@ begin
      (Pos('SENTRY', P) > 0) or
      (Pos('4PAK', P) > 0) or
      (Pos('HAPPY', P) > 0) or
+     (Pos('PFX', P) > 0) or (Pos('-LZ5', P) > 0) or
+     (Pos('POWER PACKER', P) > 0) or (Pos('POWERPACKER', P) > 0) or (Pos('PP20', P) > 0) or
+     (Pos('CRUNCH-MANIA', P) > 0) or (Pos('CRUNCHMANIA', P) > 0) or (Pos('CRM', P) > 0) or
      (Pos('STOS', P) > 0) or (Pos('STAD', P) > 0) or (Pos('TINY', P) > 0) or (Pos('SQUASH', P) > 0) or
      (Pos('COMPACTOR', P) > 0) then
     Result := True;
@@ -4537,6 +4610,668 @@ begin
 end;
 
 // -----------------------------------------------------------------------------
+// PFX / PFXPAK Decompressor (-lz5-)
+// -----------------------------------------------------------------------------
+function DecompressPFX(const InBuf: PByte; InSize: Integer; out OutBuf: TBytes): Boolean;
+const
+  RING_PREFILL = 4078;
+var
+  DataStart, HeaderSize: Integer;
+  PackedSize, OutputSize: LongWord;
+  BitstreamStart, BitstreamLen: Integer;
+  Bitstream: PByte;
+  WorkBuf: TBytes;
+  OutLen, OutAlloc: Integer;
+  D4, D5, D7: Integer;
+  D6, Bit: Integer;
+  Src: Integer;
+  B0, B1, B: Byte;
+  MatchOffset, Delta, MatchLen: Integer;
+  PosIdx, K: Integer;
+  TextLen: LongWord;
+  I: Integer;
+begin
+  Result := False;
+  SetLength(OutBuf, 0);
+  if (InBuf = nil) or (InSize < 32) then Exit;
+
+  DataStart := -1;
+
+  // 1. Check if standard TOS executable with PFX stub
+  if (InSize >= 28) and (ReadBE16(InBuf, 0) = $601A) then
+  begin
+    TextLen := ReadBE32(InBuf, 2);
+    if (TextLen > 0) and (28 + TextLen + 16 <= LongWord(InSize)) then
+    begin
+      if CheckString(InBuf, InSize, 28 + TextLen + 2, '-lz5') then
+        DataStart := 28 + TextLen;
+    end;
+  end;
+
+  // 2. Check if raw -lz5- block at start of buffer
+  if (DataStart = -1) and CheckString(InBuf, InSize, 2, '-lz5') then
+    DataStart := 0;
+
+  // 3. Scan first 4096 bytes for '-lz5'
+  if DataStart = -1 then
+  begin
+    for I := 0 to Min(InSize - 16, 4096) do
+    begin
+      if (InBuf[I + 2] = Ord('-')) and (InBuf[I + 3] = Ord('l')) and
+         (InBuf[I + 4] = Ord('z')) and (InBuf[I + 5] = Ord('5')) then
+      begin
+        DataStart := I;
+        Break;
+      end;
+    end;
+  end;
+
+  if (DataStart < 0) or (DataStart + 22 > InSize) then Exit(False);
+
+  HeaderSize := InBuf[DataStart];
+  if HeaderSize < 20 then Exit(False);
+
+  PackedSize := ReadLE32(InBuf, DataStart + 7);
+  OutputSize := ReadLE32(InBuf, DataStart + 11);
+
+  if (OutputSize = 0) or (OutputSize > 32 * 1024 * 1024) then Exit(False);
+
+  BitstreamStart := DataStart + HeaderSize + 2;
+  if BitstreamStart >= InSize then Exit(False);
+
+  Bitstream := InBuf + BitstreamStart;
+  BitstreamLen := InSize - BitstreamStart;
+  if (PackedSize > 0) and (LongWord(BitstreamLen) > PackedSize) then
+    BitstreamLen := Integer(PackedSize);
+
+  OutAlloc := RING_PREFILL + Integer(OutputSize) + 512;
+  SetLength(WorkBuf, OutAlloc);
+  FillChar(WorkBuf[0], RING_PREFILL, $20); // 4078 spaces for ring buffer prefill
+  OutLen := RING_PREFILL;
+
+  D5 := RING_PREFILL - 1; // 4077
+  D4 := Integer(OutputSize);
+  Src := 0;
+  D6 := 0;
+  D7 := -1;
+
+  try
+    while (D4 > 0) and (Src < BitstreamLen) do
+    begin
+      if D7 < 0 then
+      begin
+        D6 := Bitstream[Src];
+        Inc(Src);
+        D7 := 7;
+      end;
+
+      Bit := D6 and 1;
+      D6 := D6 shr 1;
+      Dec(D7);
+
+      if Bit <> 0 then
+      begin
+        // Literal byte
+        if Src >= BitstreamLen then Break;
+        B := Bitstream[Src];
+        Inc(Src);
+        WorkBuf[OutLen] := B;
+        Inc(OutLen);
+        Inc(D5);
+        Dec(D4);
+      end
+      else
+      begin
+        // Back reference
+        if Src + 1 >= BitstreamLen then Break;
+        B0 := Bitstream[Src];
+        B1 := Bitstream[Src + 1];
+        Inc(Src, 2);
+
+        MatchOffset := ((Integer(B1) and $F0) shl 4) or Integer(B0);
+        Delta := (D5 - MatchOffset) and $0FFF;
+        PosIdx := OutLen - Delta - 1;
+
+        MatchLen := (Integer(B1) and $0F) + 3;
+        for K := 0 to MatchLen - 1 do
+        begin
+          if D4 <= 0 then Break;
+          if (PosIdx >= 0) and (PosIdx < OutLen) then
+            B := WorkBuf[PosIdx]
+          else
+            B := $20;
+          WorkBuf[OutLen] := B;
+          Inc(OutLen);
+          Inc(PosIdx);
+          Inc(D5);
+          Dec(D4);
+        end;
+      end;
+    end;
+
+    if D4 <> 0 then Exit(False);
+
+    SetLength(OutBuf, OutputSize);
+    Move(WorkBuf[RING_PREFILL], OutBuf[0], OutputSize);
+    Result := True;
+  except
+    Result := False;
+    SetLength(OutBuf, 0);
+  end;
+end;
+
+// -----------------------------------------------------------------------------
+// PowerPacker v2.0 (PP20) Decompressor
+// -----------------------------------------------------------------------------
+function DecompressPowerPacker(const InBuf: PByte; InSize: Integer; out OutBuf: TBytes): Boolean;
+var
+  DataStart, PPSize: Integer;
+  P: PByte;
+  Eff: array[0..3] of Byte;
+  OutLen, OutPos: Integer;
+  SkipBits: Byte;
+  BitstreamPos: Integer;
+  BitBuf: LongWord;
+  BitBufCount: Integer;
+  Tail: LongWord;
+  N, X, K: LongWord;
+  MatchCode, OffBits, MatchLen, Offset: LongWord;
+  SrcIdx, I: Integer;
+  TextLen: LongWord;
+
+  function ReadBits(Count: Integer): LongWord;
+  var
+    V: LongWord;
+    Step: Integer;
+  begin
+    V := 0;
+    for Step := 1 to Count do
+    begin
+      if BitBufCount = 0 then
+      begin
+        Dec(BitstreamPos, 4);
+        if BitstreamPos < 8 then Exit(0);
+        BitBuf := ReadBE32(P, BitstreamPos);
+        BitBufCount := 32;
+      end;
+      V := (V shl 1) or (BitBuf and 1);
+      BitBuf := BitBuf shr 1;
+      Dec(BitBufCount);
+    end;
+    Result := V;
+  end;
+
+begin
+  Result := False;
+  SetLength(OutBuf, 0);
+  if (InBuf = nil) or (InSize < 16) then Exit;
+
+  DataStart := -1;
+  if (InSize >= 28) and (ReadBE16(InBuf, 0) = $601A) then
+  begin
+    TextLen := ReadBE32(InBuf, 2);
+    if (TextLen > 0) and (28 + TextLen + 16 <= LongWord(InSize)) then
+    begin
+      if CheckString(InBuf, InSize, 28 + TextLen, 'PP20') then
+        DataStart := 28 + TextLen;
+    end;
+  end;
+
+  if (DataStart = -1) and CheckString(InBuf, InSize, 0, 'PP20') then
+    DataStart := 0;
+
+  if DataStart = -1 then
+  begin
+    for I := 0 to Min(InSize - 16, 4096) do
+    begin
+      if (InBuf[I] = Ord('P')) and (InBuf[I + 1] = Ord('P')) and
+         (InBuf[I + 2] = Ord('2')) and (InBuf[I + 3] = Ord('0')) then
+      begin
+        DataStart := I;
+        Break;
+      end;
+    end;
+  end;
+
+  if (DataStart < 0) then Exit(False);
+
+  P := InBuf + DataStart;
+  PPSize := InSize - DataStart;
+  if (PPSize < 16) or ((PPSize and 3) <> 0) then Exit(False);
+
+  Eff[0] := P[4];
+  Eff[1] := P[5];
+  Eff[2] := P[6];
+  Eff[3] := P[7];
+
+  Tail := ReadBE32(P, PPSize - 4);
+  OutLen := Integer(Tail shr 8);
+  SkipBits := Byte(Tail and $FF);
+
+  if (OutLen <= 0) or (OutLen > 32 * 1024 * 1024) or (SkipBits > 32) then Exit(False);
+
+  SetLength(OutBuf, OutLen);
+  OutPos := OutLen;
+  BitstreamPos := PPSize - 4;
+  BitBuf := 0;
+  BitBufCount := 0;
+
+  try
+    ReadBits(SkipBits);
+
+    while OutPos > 0 do
+    begin
+      if ReadBits(1) = 0 then
+      begin
+        N := 1;
+        repeat
+          X := ReadBits(2);
+          Inc(N, X);
+        until X <> 3;
+
+        for K := 1 to N do
+        begin
+          if OutPos <= 0 then Exit(False);
+          Dec(OutPos);
+          OutBuf[OutPos] := Byte(ReadBits(8));
+        end;
+        if OutPos = 0 then Break;
+      end;
+
+      MatchCode := ReadBits(2);
+      OffBits := Eff[MatchCode];
+      if MatchCode = 3 then
+      begin
+        if ReadBits(1) = 0 then
+          OffBits := 7;
+        Offset := ReadBits(OffBits);
+        MatchLen := 5;
+        repeat
+          X := ReadBits(3);
+          Inc(MatchLen, X);
+        until X <> 7;
+      end
+      else
+      begin
+        Offset := ReadBits(OffBits);
+        MatchLen := MatchCode + 2;
+      end;
+
+      for K := 1 to MatchLen do
+      begin
+        if OutPos <= 0 then Exit(False);
+        SrcIdx := OutPos - 1 + Integer(Offset) + 1;
+        if (SrcIdx < 0) or (SrcIdx >= OutLen) then Exit(False);
+        Dec(OutPos);
+        OutBuf[OutPos] := OutBuf[SrcIdx];
+      end;
+    end;
+
+    Result := (OutPos = 0);
+    if not Result then SetLength(OutBuf, 0);
+  except
+    Result := False;
+    SetLength(OutBuf, 0);
+  end;
+end;
+
+// -----------------------------------------------------------------------------
+// Crunch-Mania (Thomas Schwarz / The Lost Boys) Decompressor
+// Supports Standard (CrM!, DCS!), Standard Sampled (Crm!),
+// LZH (CrM2, Fears, BiFi 2, Iron, MSS!), and LZH Sampled (Crm2, mss!).
+// -----------------------------------------------------------------------------
+type
+  TCRMHuffNode = record
+    Left: SmallInt;
+    Right: SmallInt;
+    Value: SmallInt;
+  end;
+  TCRMHuffTree = array[0..2047] of TCRMHuffNode;
+
+function IsCRMHeader(const P: PByte; Size: Integer): Boolean;
+var
+  Hdr: LongWord;
+begin
+  Result := False;
+  if (P = nil) or (Size < 20) then Exit;
+  Hdr := ReadBE32(P, 0);
+  if (Hdr = $43724D21) or // 'CrM!'
+     (Hdr = $43724D32) or // 'CrM2'
+     (Hdr = $43726D21) or // 'Crm!'
+     (Hdr = $43726D32) or // 'Crm2'
+     (Hdr = $18051973) or // Fears
+     (Hdr = $4344B3B9) or // CD\xb3\xb9 BiFi 2
+     (Hdr = $44435321) or // 'DCS!'
+     (Hdr = $49726F6E) or // 'Iron'
+     (Hdr = $4D535321) or // 'MSS!'
+     (Hdr = $6D737321)    // 'mss!'
+  then
+    Result := True;
+end;
+
+function DecompressCrunchMania(const InBuf: PByte; InSize: Integer; out OutBuf: TBytes): Boolean;
+const
+  CRM_LEN_BITS: array[0..3] of Byte = (1, 2, 4, 8);
+  CRM_LEN_OFFSETS: array[0..3] of Word = (0, 2, 6, 22);
+  CRM_DIST_BITS: array[0..2] of Byte = (5, 9, 14);
+  CRM_DIST_OFFSETS: array[0..2] of Word = (0, 32, 544);
+var
+  DataStart, CRMSize: Integer;
+  P: PByte;
+  Hdr: LongWord;
+  RawSize, PackedSize: LongWord;
+  IsSampled, IsLZH: Boolean;
+  BufOffset: Integer;
+  OriginalBits: LongWord;
+  OriginalShift: Word;
+  BufBitsLen: Integer;
+  BufBitsContent: LongWord;
+  BitPos: Integer;
+  Accumulator: QWord;
+  BitsLeft: Integer;
+  OutPos: Integer;
+  LIdx, DIdx: Integer;
+  Count, Dist, N: LongWord;
+  K, I: Integer;
+  SrcIdx: Integer;
+  Ctr: Byte;
+  LenTree, DistTree: TCRMHuffTree;
+  Items, Val: Integer;
+  DistBits, MatchLen: Integer;
+  TextLen: LongWord;
+
+  function ReadBits(CountBits: Integer): LongWord;
+  var
+    B: Byte;
+  begin
+    while BitsLeft < CountBits do
+    begin
+      if BitPos < 14 then
+        B := 0
+      else
+      begin
+        B := P[BitPos];
+        Dec(BitPos);
+      end;
+      Accumulator := Accumulator or (QWord(B) shl BitsLeft);
+      Inc(BitsLeft, 8);
+    end;
+    Result := LongWord(Accumulator and ((QWord(1) shl CountBits) - 1));
+    Accumulator := Accumulator shr CountBits;
+    Dec(BitsLeft, CountBits);
+  end;
+
+  function ReadBit: LongWord; inline;
+  begin
+    Result := ReadBits(1);
+  end;
+
+  function ReadHuffmanTable(out Tree: TCRMHuffTree; CodeLength: Integer): Boolean;
+  var
+    MaxDepth, TreeCount, Depth: Integer;
+    LevelCounts: array[0..15] of Integer;
+    Code, Canonical, BitIdx, B, NodeIdx: Integer;
+    Value: LongWord;
+    StepI: Integer;
+  begin
+    Tree[0].Left := 0;
+    Tree[0].Right := 0;
+    Tree[0].Value := -1;
+    TreeCount := 1;
+
+    MaxDepth := ReadBits(4);
+    if MaxDepth = 0 then Exit(False);
+
+    for StepI := 0 to MaxDepth - 1 do
+    begin
+      if StepI + 1 < CodeLength then
+        LevelCounts[StepI] := ReadBits(StepI + 1)
+      else
+        LevelCounts[StepI] := ReadBits(CodeLength);
+    end;
+
+    Code := 0;
+    for Depth := 1 to MaxDepth do
+    begin
+      for StepI := 1 to LevelCounts[Depth - 1] do
+      begin
+        Value := ReadBits(CodeLength);
+        Canonical := Code shr (MaxDepth - Depth);
+
+        NodeIdx := 0;
+        for BitIdx := Depth - 1 downto 0 do
+        begin
+          B := (Canonical shr BitIdx) and 1;
+          if B = 0 then
+          begin
+            if Tree[NodeIdx].Left = 0 then
+            begin
+              if TreeCount >= 2048 then Exit(False);
+              Tree[TreeCount].Left := 0;
+              Tree[TreeCount].Right := 0;
+              Tree[TreeCount].Value := -1;
+              Tree[NodeIdx].Left := TreeCount;
+              Inc(TreeCount);
+            end;
+            NodeIdx := Tree[NodeIdx].Left;
+          end
+          else
+          begin
+            if Tree[NodeIdx].Right = 0 then
+            begin
+              if TreeCount >= 2048 then Exit(False);
+              Tree[TreeCount].Left := 0;
+              Tree[TreeCount].Right := 0;
+              Tree[TreeCount].Value := -1;
+              Tree[NodeIdx].Right := TreeCount;
+              Inc(TreeCount);
+            end;
+            NodeIdx := Tree[NodeIdx].Right;
+          end;
+        end;
+        Tree[NodeIdx].Value := Value;
+
+        Inc(Code, 1 shl (MaxDepth - Depth));
+      end;
+    end;
+    Result := True;
+  end;
+
+  function DecodeHuffman(const Tree: TCRMHuffTree): Integer;
+  var
+    NodeIdx: Integer;
+  begin
+    NodeIdx := 0;
+    while Tree[NodeIdx].Value < 0 do
+    begin
+      if ReadBit = 0 then
+        NodeIdx := Tree[NodeIdx].Left
+      else
+        NodeIdx := Tree[NodeIdx].Right;
+      if (NodeIdx <= 0) or (NodeIdx >= 2048) then Exit(-1);
+    end;
+    Result := Tree[NodeIdx].Value;
+  end;
+
+begin
+  Result := False;
+  SetLength(OutBuf, 0);
+
+  if (InBuf = nil) or (InSize < 20) then Exit(False);
+
+  DataStart := -1;
+  if (InSize >= 28) and (ReadBE16(InBuf, 0) = $601A) then
+  begin
+    TextLen := ReadBE32(InBuf, 2);
+    if (TextLen > 0) and (28 + TextLen + 20 <= LongWord(InSize)) then
+    begin
+      if IsCRMHeader(InBuf + 28 + TextLen, InSize - (28 + TextLen)) then
+        DataStart := 28 + TextLen;
+    end;
+  end;
+
+  if (DataStart = -1) and IsCRMHeader(InBuf, InSize) then
+    DataStart := 0;
+
+  if DataStart = -1 then
+  begin
+    for I := 0 to Min(InSize - 20, 4096) do
+    begin
+      if IsCRMHeader(InBuf + I, InSize - I) then
+      begin
+        DataStart := I;
+        Break;
+      end;
+    end;
+  end;
+
+  if DataStart < 0 then Exit(False);
+
+  P := InBuf + DataStart;
+  CRMSize := InSize - DataStart;
+
+  Hdr := ReadBE32(P, 0);
+  IsSampled := (P[1] = Ord('m')) or (Hdr = $6D737321);
+  IsLZH := (P[3] = Ord('2')) or (Hdr = $18051973) or (Hdr = $4344B3B9) or
+           (Hdr = $49726F6E) or (Hdr = $4D535321) or (Hdr = $6D737321);
+
+  RawSize := ReadBE32(P, 6);
+  PackedSize := ReadBE32(P, 10);
+
+  if (RawSize = 0) or (RawSize > 32 * 1024 * 1024) or
+     (PackedSize < 6) or (PackedSize + 14 > LongWord(CRMSize)) then Exit(False);
+
+  BufOffset := 14 + Integer(PackedSize) - 6;
+  OriginalBits := ReadBE32(P, BufOffset);
+  OriginalShift := ReadBE16(P, BufOffset + 4);
+  if OriginalShift > 16 then Exit(False);
+
+  BufBitsLen := OriginalShift + 16;
+  BufBitsContent := OriginalBits shr (16 - OriginalShift);
+
+  BitPos := BufOffset - 1;
+  Accumulator := BufBitsContent;
+  BitsLeft := BufBitsLen;
+
+  SetLength(OutBuf, RawSize);
+  OutPos := RawSize;
+
+  try
+    if not IsLZH then
+    begin
+      while OutPos > 0 do
+      begin
+        if ReadBit = 1 then
+        begin
+          Dec(OutPos);
+          OutBuf[OutPos] := Byte(ReadBits(8));
+        end
+        else
+        begin
+          if ReadBit = 0 then LIdx := 0
+          else if ReadBit = 0 then LIdx := 1
+          else if ReadBit = 0 then LIdx := 2
+          else LIdx := 3;
+
+          Count := ReadBits(CRM_LEN_BITS[LIdx]) + CRM_LEN_OFFSETS[LIdx] + 2;
+          if Count = 23 then
+          begin
+            if ReadBit = 1 then
+              N := ReadBits(5) + 15
+            else
+              N := ReadBits(14) + 15;
+
+            for K := 1 to N do
+            begin
+              if OutPos <= 0 then Exit(False);
+              Dec(OutPos);
+              OutBuf[OutPos] := Byte(ReadBits(8));
+            end;
+          end
+          else
+          begin
+            if Count > 23 then Dec(Count);
+
+            if ReadBit = 0 then DIdx := 1
+            else if ReadBit = 0 then DIdx := 0
+            else DIdx := 2;
+
+            Dist := ReadBits(CRM_DIST_BITS[DIdx]) + CRM_DIST_OFFSETS[DIdx];
+            for K := 1 to Count do
+            begin
+              if OutPos <= 0 then Exit(False);
+              Dec(OutPos);
+              SrcIdx := OutPos + Dist;
+              if (SrcIdx < 0) or (SrcIdx >= Integer(RawSize)) then Exit(False);
+              OutBuf[OutPos] := OutBuf[SrcIdx];
+            end;
+          end;
+        end;
+      end;
+    end
+    else
+    begin
+      repeat
+        if not ReadHuffmanTable(LenTree, 9) then Exit(False);
+        if not ReadHuffmanTable(DistTree, 4) then Exit(False);
+        Items := ReadBits(16) + 1;
+        for I := 1 to Items do
+        begin
+          Val := DecodeHuffman(LenTree);
+          if Val < 0 then Exit(False);
+          if (Val and $100) <> 0 then
+          begin
+            if OutPos <= 0 then Exit(False);
+            Dec(OutPos);
+            OutBuf[OutPos] := Byte(Val and $FF);
+          end
+          else
+          begin
+            MatchLen := Val + 3;
+            DistBits := DecodeHuffman(DistTree);
+            if DistBits < 0 then Exit(False);
+            if DistBits = 0 then
+              Dist := ReadBits(1) + 1
+            else
+              Dist := (ReadBits(DistBits) or (LongWord(1) shl DistBits)) + 1;
+
+            for K := 1 to MatchLen do
+            begin
+              if OutPos <= 0 then Exit(False);
+              Dec(OutPos);
+              SrcIdx := OutPos + Dist;
+              if (SrcIdx < 0) or (SrcIdx >= Integer(RawSize)) then Exit(False);
+              OutBuf[OutPos] := OutBuf[SrcIdx];
+            end;
+          end;
+        end;
+      until ReadBit = 0;
+    end;
+
+    if OutPos <> 0 then
+    begin
+      SetLength(OutBuf, 0);
+      Exit(False);
+    end;
+
+    if IsSampled then
+    begin
+      Ctr := 0;
+      for I := 0 to Integer(RawSize) - 1 do
+      begin
+        Ctr := Byte(Ctr + OutBuf[I]);
+        OutBuf[I] := Ctr;
+      end;
+    end;
+
+    Result := True;
+  except
+    Result := False;
+    SetLength(OutBuf, 0);
+  end;
+end;
+
+// -----------------------------------------------------------------------------
 // STOS Squasher Decompressor (unsquash)
 // -----------------------------------------------------------------------------
 function DecompressStosSquash(const InBuf: PByte; InSize: Integer; out OutBuf: TBytes): Boolean;
@@ -4598,8 +5333,9 @@ begin
           Dist := GetBits(8);
           for I := 1 to 2 do
           begin
+            if OutPtr <= 0 then Exit(False);
             Dec(OutPtr);
-            if (OutPtr + Dist >= Integer(UncompressedSize)) then Exit(False);
+            if (OutPtr + Dist < 0) or (OutPtr + Dist >= Integer(UncompressedSize)) then Exit(False);
             OutBuf[OutPtr] := OutBuf[OutPtr + Dist];
           end;
         end
@@ -4609,6 +5345,7 @@ begin
           for I := 0 to Count do
           begin
             Val := GetBits(8);
+            if OutPtr <= 0 then Exit(False);
             Dec(OutPtr);
             OutBuf[OutPtr] := Byte(Val);
           end;
@@ -4624,8 +5361,9 @@ begin
           Dist := GetBits(NBits);
           for I := 0 to Count do
           begin
+            if OutPtr <= 0 then Exit(False);
             Dec(OutPtr);
-            if (OutPtr + Dist >= Integer(UncompressedSize)) then Exit(False);
+            if (OutPtr + Dist < 0) or (OutPtr + Dist >= Integer(UncompressedSize)) then Exit(False);
             OutBuf[OutPtr] := OutBuf[OutPtr + Dist];
           end;
         end
@@ -4635,8 +5373,9 @@ begin
           Dist := GetBits(12);
           for I := 0 to Count do
           begin
+            if OutPtr <= 0 then Exit(False);
             Dec(OutPtr);
-            if (OutPtr + Dist >= Integer(UncompressedSize)) then Exit(False);
+            if (OutPtr + Dist < 0) or (OutPtr + Dist >= Integer(UncompressedSize)) then Exit(False);
             OutBuf[OutPtr] := OutBuf[OutPtr + Dist];
           end;
         end
@@ -4646,6 +5385,7 @@ begin
           for I := 0 to Count do
           begin
             Val := GetBits(8);
+            if OutPtr <= 0 then Exit(False);
             Dec(OutPtr);
             OutBuf[OutPtr] := Byte(Val);
           end;
@@ -5129,6 +5869,28 @@ begin
     if DecompressHappy(InBuf, InSize, OutBuf) then Exit(True);
   end;
 
+  // 14. PFX Packer
+  if (Pos('PFX', UpperCase(DetectedPacker)) > 0) or (Pos('-LZ5', UpperCase(DetectedPacker)) > 0) then
+  begin
+    if DecompressPFX(InBuf, InSize, OutBuf) then Exit(True);
+  end;
+
+  // 15. Power Packer (PP20)
+  if (Pos('POWER PACKER', UpperCase(DetectedPacker)) > 0) or
+     (Pos('POWERPACKER', UpperCase(DetectedPacker)) > 0) or
+     (Pos('PP20', UpperCase(DetectedPacker)) > 0) then
+  begin
+    if DecompressPowerPacker(InBuf, InSize, OutBuf) then Exit(True);
+  end;
+
+  // 16. Crunch-Mania (Thomas Schwarz / The Lost Boys)
+  if (Pos('CRUNCH-MANIA', UpperCase(DetectedPacker)) > 0) or
+     (Pos('CRUNCHMANIA', UpperCase(DetectedPacker)) > 0) or
+     (Pos('CRM', UpperCase(DetectedPacker)) > 0) then
+  begin
+    if DecompressCrunchMania(InBuf, InSize, OutBuf) then Exit(True);
+  end;
+
   // 12. STOS Squasher / Picture Compactor
   if (Pos('STOS', UpperCase(DetectedPacker)) > 0) or (Pos('SQUASH', UpperCase(DetectedPacker)) > 0) or (Pos('COMPACTOR', UpperCase(DetectedPacker)) > 0) then
   begin
@@ -5245,6 +6007,24 @@ begin
   if DecompressRNC(InBuf, InSize, OutBuf) then
   begin
     DetectedPacker := 'Rob Northen Compression (Auto-detected)';
+    Exit(True);
+  end;
+
+  if DecompressPFX(InBuf, InSize, OutBuf) then
+  begin
+    DetectedPacker := 'PFX Packer (Auto-detected)';
+    Exit(True);
+  end;
+
+  if DecompressPowerPacker(InBuf, InSize, OutBuf) then
+  begin
+    DetectedPacker := 'Power Packer v2.0 (Auto-detected)';
+    Exit(True);
+  end;
+
+  if DecompressCrunchMania(InBuf, InSize, OutBuf) then
+  begin
+    DetectedPacker := 'Crunch-Mania (Auto-detected)';
     Exit(True);
   end;
 

@@ -8,7 +8,8 @@ uses
   LCLType, ExtCtrls, ComCtrls, StrUtils, Math, DateUtils, LazFileUtils,
   FileUtil, Menus, zipper, unit_clustermap, unit_msa, unit_fileviewer, unit_dragout,
   unit_depacker, unit_virusscanner, unit_newimage, unit_archivevault,
-  unit_dim, unit_search, unit_floppywriter, unit_fat12;
+  unit_dim, unit_search, unit_floppywriter, unit_fat12,
+  unit_catalog, unit_batchengine, unit_batchconverter;
 
 type
   { TDiskItemInfo represents a single file or directory in the Atari disk image }
@@ -89,6 +90,7 @@ type
     MenuItemExtractFile: TMenuItem;
     MenuItemExtractDepacked: TMenuItem;
     MenuItemExtractAll: TMenuItem;
+    MenuItemExportCatalog: TMenuItem;
     MenuItemSep2: TMenuItem;
     MenuItemConvertMSA: TMenuItem;
     MenuItemConvertDIM: TMenuItem;
@@ -131,6 +133,8 @@ type
     MenuItemMakePCBoot: TMenuItem;
     MenuItemSepTools3: TMenuItem;
     MenuItemFloppyWriter: TMenuItem;
+    MenuItemSepTools4: TMenuItem;
+    MenuItemBatchConverter: TMenuItem;
     MenuItemHelp: TMenuItem;
     MenuItemAbout: TMenuItem;
     PopupMenuFiles: TPopupMenu;
@@ -206,6 +210,8 @@ type
     procedure MenuItemAttrArchiveClick(Sender: TObject);
     procedure MenuItemAttrPropertiesClick(Sender: TObject);
     procedure MenuItemMakePCBootClick(Sender: TObject);
+    procedure MenuItemExportCatalogClick(Sender: TObject);
+    procedure MenuItemBatchConverterClick(Sender: TObject);
 
   public
     procedure SetButtonToolbarVisible(AVisible: Boolean);
@@ -4963,6 +4969,96 @@ begin
       DeleteDirectory(TempStagingDir, False);
     end;
   end;
+end;
+
+{------------------------------------------------------------------
+  Procedure: MenuItemExportCatalogClick
+  Purpose:  Exports a comprehensive disk catalog report (HTML, CSV,
+            JSON, or TXT) for the currently loaded Atari ST disk image.
+ ------------------------------------------------------------------}
+procedure TForm1.MenuItemExportCatalogClick(Sender: TObject);
+var
+  DefName, OutFile: string;
+  CatalogStream: TFileStream;
+  Catalog: TDiskCatalog;
+  Success: Boolean;
+begin
+  if (FImagePath = '') or not FileExists(FImagePath) then
+  begin
+    ShowMessage('Please open a disk image first.');
+    Exit;
+  end;
+
+  if FOriginalZipPath <> '' then
+    DefName := ChangeFileExt(ExtractFileName(FTempZipExtractedPath), '') + '_catalog.html'
+  else if FIsMSAImage and (FOriginalMSAPath <> '') then
+    DefName := ChangeFileExt(ExtractFileName(FOriginalMSAPath), '') + '_catalog.html'
+  else
+    DefName := ChangeFileExt(ExtractFileName(FImagePath), '') + '_catalog.html';
+
+  SaveDialog.Title := 'Export Disk Catalog Report';
+  SaveDialog.Filter := 'Interactive HTML Report (*.html)|*.html|CSV Spreadsheet (*.csv)|*.csv|JSON Data (*.json)|*.json|Plain Text Table (*.txt)|*.txt|All Files (*.*)|*.*';
+  SaveDialog.FileName := DefName;
+  if not SaveDialog.Execute then Exit;
+
+  OutFile := SaveDialog.FileName;
+  if OutFile = '' then Exit;
+
+  CatalogStream := TFileStream.Create(FImagePath, fmOpenRead or fmShareDenyNone);
+  try
+    Catalog := Default(TDiskCatalog);
+    Success := BuildDiskCatalog(CatalogStream, FImagePath, FVolumeLabel, FDiskSerial,
+                                FSectorsPerTrack, FSides, FTracks, Catalog, False);
+    if Success then
+      Success := ExportCatalogToFile(Catalog, OutFile);
+  finally
+    CatalogStream.Free;
+  end;
+
+  if Success then
+  begin
+    ShowMessage(Format('Disk catalog exported successfully!' + sLineBreak + sLineBreak +
+      '• Output file: %s' + sLineBreak +
+      '• Total files: %d (%d compressed)' + sLineBreak +
+      '• Total directories: %d' + sLineBreak +
+      '• Total payload: %d bytes (%s)',
+      [OutFile, Catalog.TotalFiles, Catalog.TotalPackedFiles, Catalog.TotalDirs,
+       Catalog.TotalFileBytes, FormatBytes(Catalog.TotalFileBytes)]));
+  end
+  else
+    ShowMessage('Error: Failed to generate or export disk catalog report.');
+end;
+
+{------------------------------------------------------------------
+  Procedure: MenuItemBatchConverterClick
+  Purpose:  Opens the Batch Disk Image Converter & Extractor dialog.
+ ------------------------------------------------------------------}
+procedure TForm1.MenuItemBatchConverterClick(Sender: TObject);
+var
+  SL: TStringList;
+begin
+  if FormBatchConverter = nil then
+    Application.CreateForm(TFormBatchConverter, FormBatchConverter);
+
+  // If a disk image is currently open in the main viewer, queue it up automatically
+  if (FImagePath <> '') and FileExists(FImagePath) then
+  begin
+    SL := TStringList.Create;
+    try
+      if (FOriginalZipPath <> '') and FileExists(FOriginalZipPath) then
+        SL.Add(FOriginalZipPath)
+      else if FIsMSAImage and (FOriginalMSAPath <> '') and FileExists(FOriginalMSAPath) then
+        SL.Add(FOriginalMSAPath)
+      else
+        SL.Add(FImagePath);
+
+      FormBatchConverter.AddFiles(SL);
+    finally
+      SL.Free;
+    end;
+  end;
+
+  FormBatchConverter.ShowModal;
 end;
 
 {------------------------------------------------------------------

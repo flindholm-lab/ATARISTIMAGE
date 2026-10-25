@@ -238,6 +238,29 @@
         <IsPartOfProject Value="True"/>
         <HasResources Value="True"/>
       </Unit>
+      <Unit>
+        <Filename Value="unit_catalog.pas"/>
+        <IsPartOfProject Value="True"/>
+        <UnitName Value="unit_catalog"/>
+      </Unit>
+      <Unit>
+        <Filename Value="unit_batchengine.pas"/>
+        <IsPartOfProject Value="True"/>
+        <UnitName Value="unit_batchengine"/>
+      </Unit>
+      <Unit>
+        <Filename Value="unit_batchconverter.pas"/>
+        <IsPartOfProject Value="True"/>
+        <ComponentName Value="FormBatchConverter"/>
+        <HasResources Value="True"/>
+        <ResourceBaseClass Value="Form"/>
+        <UnitName Value="unit_batchconverter"/>
+      </Unit>
+      <Unit>
+        <Filename Value="unit_batchconverter.lfm"/>
+        <IsPartOfProject Value="True"/>
+        <HasResources Value="True"/>
+      </Unit>
     </Units>
   </ProjectOptions>
   <CompilerOptions>

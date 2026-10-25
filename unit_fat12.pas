@@ -17,7 +17,7 @@ unit unit_fat12;
 interface
 
 uses
-  Classes, SysUtils;
+  Classes, SysUtils, Math;
 
 const
   FAT12_SECTOR_BYTES  = 512;   // Atari ST / PC floppy sector size
@@ -28,6 +28,12 @@ const
   FAT12_ENTRY_EOC     = $FFF;
   FAT12_MAX_CLUSTERS  = 4084;  // Max data clusters of a FAT12 volume
   ATARI_BOOT_EXEC_SUM = $1234; // Word-sum that makes TOS execute a boot sector
+  FAT12_ATTR_READONLY = $01;
+  FAT12_ATTR_HIDDEN   = $02;
+  FAT12_ATTR_SYSTEM   = $04;
+  FAT12_ATTR_VOLUME   = $08;
+  FAT12_ATTR_DIR      = $10;
+  FAT12_ATTR_ARCHIVE  = $20;
 
 type
   { Sanitised BIOS Parameter Block.  Out-of-range values are replaced with
@@ -60,9 +66,38 @@ type
     TotalClusters: Integer;
   end;
 
+  { Detailed information for a file or directory entry found in a FAT12 volume }
+  TFat12EntryInfo = record
+    FileName: string;
+    DirPath: string;
+    FullPath: string;
+    FileSize: Int64;
+    StartCluster: Word;
+    ClusterCount: Integer;
+    DateTime: TDateTime;
+    DateTimeStr: string;
+    Attr: Byte;
+    AttrStr: string;
+    IsDir: Boolean;
+    IsDeleted: Boolean;
+  end;
+  TFat12EntryArray = array of TFat12EntryInfo;
+
 { Little-endian readers.  Reading outside Len returns 0. }
 function ReadLE16(const P: PByte; Len, Offset: Integer): Word;
 function ReadLE32(const P: PByte; Len, Offset: Integer): LongWord;
+
+{ Standard IEEE 802.3 32-bit CRC }
+function CalculateCRC32(const Data: PByte; Length: Integer): LongWord;
+
+{ Formats 8.3 filename from a 32-byte FAT12 directory entry }
+function Fat12FormatFileName(const DirEntry: PByte): string;
+
+{ Formats attribute byte to human-readable string (e.g. "[DIR]", "[R.H.A]") }
+function Fat12FormatAttrString(Attr: Byte): string;
+
+{ Converts FAT date and time words to TDateTime (safe against invalid values) }
+function Fat12ParseDateTime(FatDate, FatTime: Word): TDateTime;
 
 { 16-bit big-endian word sum of a 512-byte boot sector, modulo $10000.
   A result of ATARI_BOOT_EXEC_SUM marks the sector as executable. }
@@ -98,6 +133,14 @@ procedure Fat12SetEntry(Fat: PByte; FatLen, Cluster, Value: Integer);
 function Fat12ReadEntry(Stream: TStream; FatStart: Int64; Cluster: Integer): Integer;
 procedure Fat12WriteEntryAllCopies(Stream: TStream; FatStart, SingleFATSize: Int64;
   NumFATs, Cluster, Value: Integer);
+
+{ Recursively scans all directory entries from a FAT12 image stream }
+function Fat12ScanAllEntries(Stream: TStream; const Bpb: TFatBpb;
+  const Layout: TFatLayout; IncludeDeleted: Boolean = False): TFat12EntryArray;
+
+{ Reads the complete byte content of a file from its cluster chain }
+function Fat12ReadFileData(Stream: TStream; const Layout: TFatLayout;
+  StartCluster: Word; FileSize: Int64): TBytes;
 
 implementation
 
@@ -334,48 +377,443 @@ end;
 
 function Fat12ReadEntry(Stream: TStream; FatStart: Int64; Cluster: Integer): Integer;
 var
+  SavedPos: Int64;
   B: array[0..1] of Byte;
   V: Word;
 begin
   Result := FAT12_ENTRY_EOC;
   if (Stream = nil) or (Cluster < 0) then Exit;
-  B[0] := 0;
-  B[1] := 0;
-  Stream.Position := FatStart + (Int64(Cluster) * 3) div 2;
-  if Stream.Read(B[0], 2) <> 2 then Exit;
-  V := Word(B[0]) or (Word(B[1]) shl 8);
-  if (Cluster and 1) = 0 then
-    Result := V and $0FFF
-  else
-    Result := V shr 4;
+  SavedPos := Stream.Position;
+  try
+    B[0] := 0;
+    B[1] := 0;
+    Stream.Position := FatStart + (Int64(Cluster) * 3) div 2;
+    if Stream.Read(B[0], 2) <> 2 then Exit;
+    V := Word(B[0]) or (Word(B[1]) shl 8);
+    if (Cluster and 1) = 0 then
+      Result := V and $0FFF
+    else
+      Result := V shr 4;
+  finally
+    Stream.Position := SavedPos;
+  end;
 end;
 
 procedure Fat12WriteEntryAllCopies(Stream: TStream; FatStart, SingleFATSize: Int64;
   NumFATs, Cluster, Value: Integer);
 var
+  SavedPos: Int64;
   I: Integer;
   Pos: Int64;
   B: array[0..1] of Byte;
   V: Word;
 begin
   if (Stream = nil) or (Cluster < 0) then Exit;
-  Value := Value and $0FFF;
-  for I := 0 to NumFATs - 1 do
+  SavedPos := Stream.Position;
+  try
+    Value := Value and $0FFF;
+    for I := 0 to NumFATs - 1 do
+    begin
+      Pos := FatStart + Int64(I) * SingleFATSize + (Int64(Cluster) * 3) div 2;
+      B[0] := 0;
+      B[1] := 0;
+      Stream.Position := Pos;
+      if Stream.Read(B[0], 2) <> 2 then Continue; // FAT copy lies outside the image
+      V := Word(B[0]) or (Word(B[1]) shl 8);
+      if (Cluster and 1) = 0 then
+        V := (V and $F000) or Word(Value)
+      else
+        V := (V and $000F) or Word(Value shl 4);
+      B[0] := Byte(V and $FF);
+      B[1] := Byte(V shr 8);
+      Stream.Position := Pos;
+      Stream.WriteBuffer(B[0], 2);
+    end;
+  finally
+    Stream.Position := SavedPos;
+  end;
+end;
+
+var
+  CRC32Table: array[0..255] of LongWord;
+  CRC32TableInit: Boolean = False;
+
+procedure InitCRC32Table;
+var
+  C: LongWord;
+  I, J: Integer;
+begin
+  for I := 0 to 255 do
   begin
-    Pos := FatStart + Int64(I) * SingleFATSize + (Int64(Cluster) * 3) div 2;
-    B[0] := 0;
-    B[1] := 0;
-    Stream.Position := Pos;
-    if Stream.Read(B[0], 2) <> 2 then Continue; // FAT copy lies outside the image
-    V := Word(B[0]) or (Word(B[1]) shl 8);
-    if (Cluster and 1) = 0 then
-      V := (V and $F000) or Word(Value)
+    C := LongWord(I);
+    for J := 1 to 8 do
+    begin
+      if (C and 1) <> 0 then
+        C := (C shr 1) xor $EDB88320
+      else
+        C := C shr 1;
+    end;
+    CRC32Table[I] := C;
+  end;
+  CRC32TableInit := True;
+end;
+
+function CalculateCRC32(const Data: PByte; Length: Integer): LongWord;
+var
+  CRC: LongWord;
+  I: Integer;
+begin
+  if not CRC32TableInit then InitCRC32Table;
+  CRC := $FFFFFFFF;
+  if (Data <> nil) and (Length > 0) then
+  begin
+    for I := 0 to Length - 1 do
+      CRC := (CRC shr 8) xor CRC32Table[(CRC and $FF) xor Data[I]];
+  end;
+  Result := CRC xor $FFFFFFFF;
+end;
+
+function Fat12FormatFileName(const DirEntry: PByte): string;
+var
+  BaseName, Ext: string;
+  I: Integer;
+  B: Byte;
+begin
+  Result := '';
+  if DirEntry = nil then Exit;
+
+  BaseName := '';
+  for I := 0 to 7 do
+  begin
+    B := DirEntry[I];
+    if (I = 0) and (B = $E5) then
+      BaseName := BaseName + '_'
+    else if (I = 0) and (B = $05) then
+      BaseName := BaseName + Chr($E5)
+    else if B > 32 then
+      BaseName := BaseName + Chr(B);
+  end;
+  BaseName := TrimRight(BaseName);
+
+  Ext := '';
+  for I := 8 to 10 do
+  begin
+    B := DirEntry[I];
+    if B > 32 then
+      Ext := Ext + Chr(B);
+  end;
+  Ext := TrimRight(Ext);
+
+  if Ext <> '' then
+    Result := BaseName + '.' + Ext
+  else
+    Result := BaseName;
+end;
+
+function Fat12FormatAttrString(Attr: Byte): string;
+begin
+  if (Attr and FAT12_ATTR_DIR) <> 0 then
+    Exit('[DIR]');
+  Result := '[';
+  if (Attr and FAT12_ATTR_READONLY) <> 0 then Result := Result + 'R' else Result := Result + '.';
+  if (Attr and FAT12_ATTR_HIDDEN) <> 0 then Result := Result + 'H' else Result := Result + '.';
+  if (Attr and FAT12_ATTR_SYSTEM) <> 0 then Result := Result + 'S' else Result := Result + '.';
+  if (Attr and FAT12_ATTR_ARCHIVE) <> 0 then Result := Result + 'A' else Result := Result + '.';
+  Result := Result + ']';
+end;
+
+function Fat12ParseDateTime(FatDate, FatTime: Word): TDateTime;
+var
+  Y, M, D, H, Min, Sec: Word;
+  TimeVal: TDateTime;
+begin
+  Y := (FatDate shr 9) + 1980;
+  M := (FatDate shr 5) and $0F;
+  D := FatDate and $1F;
+  H := (FatTime shr 11) and $1F;
+  Min := (FatTime shr 5) and $3F;
+  Sec := (FatTime and $1F) * 2;
+
+  if not TryEncodeDate(Y, M, D, Result) then
+    Result := 0;
+  if (Result > 0) and TryEncodeTime(H, Min, Sec, 0, TimeVal) then
+    Result := Result + TimeVal;
+end;
+
+function Fat12ReadFileData(Stream: TStream; const Layout: TFatLayout; StartCluster: Word; FileSize: Int64): TBytes;
+var
+  CurrCluster, NextCluster: Integer;
+  BytesToRead, BytesRemaining: Int64;
+  Offset: Int64;
+  PosOut: Int64;
+  LoopGuard: Integer;
+  ClusterBytes: Int64;
+begin
+  SetLength(Result, 0);
+  if (Stream = nil) or (FileSize <= 0) or (StartCluster < 2) then Exit;
+  if FileSize > 32 * 1024 * 1024 then Exit; // Safety cap
+
+  SetLength(Result, FileSize);
+  BytesRemaining := FileSize;
+  CurrCluster := StartCluster;
+  PosOut := 0;
+  LoopGuard := 0;
+  ClusterBytes := Layout.BytesPerCluster;
+  if ClusterBytes <= 0 then Exit;
+
+  while (BytesRemaining > 0) and (CurrCluster >= 2) and (CurrCluster < FAT12_ENTRY_EOC_MIN) do
+  begin
+    Inc(LoopGuard);
+    if LoopGuard > 4096 then Break;
+
+    Offset := Fat12ClusterOffset(Layout, CurrCluster);
+    if (Offset < Layout.DataAreaStart) or (Offset >= Stream.Size) then Break;
+
+    BytesToRead := Min(BytesRemaining, ClusterBytes);
+    Stream.Position := Offset;
+    if Stream.Read(Result[PosOut], BytesToRead) <> BytesToRead then Break;
+
+    Inc(PosOut, BytesToRead);
+    Dec(BytesRemaining, BytesToRead);
+
+    NextCluster := Fat12ReadEntry(Stream, Layout.FatTableStart, CurrCluster);
+    if (NextCluster = CurrCluster) or (NextCluster < 2) then Break;
+    CurrCluster := NextCluster;
+  end;
+
+  if PosOut < FileSize then
+    SetLength(Result, PosOut);
+end;
+
+function Fat12ScanAllEntries(Stream: TStream; const Bpb: TFatBpb;
+  const Layout: TFatLayout; IncludeDeleted: Boolean = False): TFat12EntryArray;
+type
+  TDirQueueItem = record
+    Cluster: Word;
+    DirPath: string;
+  end;
+var
+  Queue: array of TDirQueueItem;
+  QueueHead, QueueTail: Integer;
+  Visited: array of Word;
+  VisitedCount: Integer;
+
+  function IsVisited(C: Word): Boolean;
+  var
+    I: Integer;
+  begin
+    for I := 0 to VisitedCount - 1 do
+      if Visited[I] = C then Exit(True);
+    Result := False;
+  end;
+
+  procedure MarkVisited(C: Word);
+  begin
+    SetLength(Visited, VisitedCount + 1);
+    Visited[VisitedCount] := C;
+    Inc(VisitedCount);
+  end;
+
+  procedure Enqueue(ACluster: Word; const ADirPath: string);
+  begin
+    SetLength(Queue, QueueTail + 1);
+    Queue[QueueTail].Cluster := ACluster;
+    Queue[QueueTail].DirPath := ADirPath;
+    Inc(QueueTail);
+  end;
+
+  function CountClusters(AStartClust: Word): Integer;
+  var
+    C, NextC, Guard: Integer;
+  begin
+    Result := 0;
+    C := AStartClust;
+    Guard := 0;
+    while (C >= 2) and (C < FAT12_ENTRY_EOC_MIN) do
+    begin
+      Inc(Result);
+      Inc(Guard);
+      if Guard > 4096 then Break;
+      NextC := Fat12ReadEntry(Stream, Layout.FatTableStart, C);
+      if (NextC < 2) or (NextC = C) then Break;
+      C := NextC;
+    end;
+  end;
+
+var
+  Item: TDirQueueItem;
+  DirEntry: array[0..31] of Byte;
+  EntryName: string;
+  FileSize: Int64;
+  StartClust: Word;
+  Attr: Byte;
+  DateWord, TimeWord: Word;
+  EntryDate: TDateTime;
+  IsDir, IsDel: Boolean;
+  Offset: Int64;
+  CurrCluster, NextCluster, LoopGuard: Integer;
+  MaxEntries, EntryIdx: Integer;
+  Count: Integer;
+begin
+  SetLength(Result, 0);
+  Count := 0;
+  if (Stream = nil) or (Layout.BytesPerCluster <= 0) then Exit;
+
+  QueueHead := 0;
+  QueueTail := 0;
+  VisitedCount := 0;
+  SetLength(Queue, 0);
+  SetLength(Visited, 0);
+
+  // Enqueue root directory (Cluster 0)
+  Enqueue(0, '');
+
+  while QueueHead < QueueTail do
+  begin
+    Item := Queue[QueueHead];
+    Inc(QueueHead);
+
+    if Item.Cluster = 0 then
+    begin
+      // 1. Scan Root Directory
+      Offset := Layout.RootDirStart;
+      if Offset + Int64(Bpb.RootEntries) * 32 > Stream.Size then
+        MaxEntries := Max(0, Integer((Stream.Size - Offset) div 32))
+      else
+        MaxEntries := Bpb.RootEntries;
+
+      for EntryIdx := 0 to MaxEntries - 1 do
+      begin
+        Stream.Position := Offset + Int64(EntryIdx) * 32;
+        if Stream.Read(DirEntry[0], 32) <> 32 then Break;
+        if DirEntry[0] = 0 then Break; // End of root directory
+
+        IsDel := (DirEntry[0] = $E5);
+        if IsDel and not IncludeDeleted then Continue;
+
+        Attr := DirEntry[11];
+        if (Attr and FAT12_ATTR_VOLUME) <> 0 then Continue; // Skip Volume label
+
+        EntryName := Fat12FormatFileName(@DirEntry[0]);
+        if (EntryName = '') or (EntryName = '.') or (EntryName = '..') then Continue;
+
+        IsDir := (Attr and FAT12_ATTR_DIR) <> 0;
+        StartClust := ReadLE16(@DirEntry[0], 32, 26);
+        FileSize := ReadLE32(@DirEntry[0], 32, 28);
+        DateWord := ReadLE16(@DirEntry[0], 32, 24);
+        TimeWord := ReadLE16(@DirEntry[0], 32, 22);
+        EntryDate := Fat12ParseDateTime(DateWord, TimeWord);
+
+        SetLength(Result, Count + 1);
+        Result[Count].FileName := EntryName;
+        Result[Count].DirPath := Item.DirPath;
+        if Item.DirPath <> '' then
+          Result[Count].FullPath := Item.DirPath + EntryName
+        else
+          Result[Count].FullPath := EntryName;
+        Result[Count].FileSize := FileSize;
+        Result[Count].StartCluster := StartClust;
+        Result[Count].DateTime := EntryDate;
+        if EntryDate > 0 then
+          Result[Count].DateTimeStr := FormatDateTime('yyyy-mm-dd hh:nn:ss', EntryDate)
+        else
+          Result[Count].DateTimeStr := '----';
+        Result[Count].Attr := Attr;
+        Result[Count].AttrStr := Fat12FormatAttrString(Attr);
+        Result[Count].IsDir := IsDir;
+        Result[Count].IsDeleted := IsDel;
+        if IsDir then
+          Result[Count].ClusterCount := 1
+        else
+          Result[Count].ClusterCount := CountClusters(StartClust);
+        Inc(Count);
+
+        if IsDir and (StartClust >= 2) and (StartClust < FAT12_ENTRY_EOC_MIN) and not IsVisited(StartClust) then
+        begin
+          MarkVisited(StartClust);
+          if Item.DirPath <> '' then
+            Enqueue(StartClust, Item.DirPath + EntryName + '\')
+          else
+            Enqueue(StartClust, EntryName + '\');
+        end;
+      end;
+    end
     else
-      V := (V and $000F) or Word(Value shl 4);
-    B[0] := Byte(V and $FF);
-    B[1] := Byte(V shr 8);
-    Stream.Position := Pos;
-    Stream.WriteBuffer(B[0], 2);
+    begin
+      // 2. Scan Subdirectory cluster chain
+      CurrCluster := Item.Cluster;
+      LoopGuard := 0;
+      MaxEntries := Integer(Layout.BytesPerCluster div 32);
+
+      while (CurrCluster >= 2) and (CurrCluster < FAT12_ENTRY_EOC_MIN) do
+      begin
+        Inc(LoopGuard);
+        if LoopGuard > 4096 then Break;
+
+        Offset := Fat12ClusterOffset(Layout, CurrCluster);
+        if (Offset < Layout.DataAreaStart) or (Offset + Layout.BytesPerCluster > Stream.Size) then Break;
+
+        for EntryIdx := 0 to MaxEntries - 1 do
+        begin
+          Stream.Position := Offset + Int64(EntryIdx) * 32;
+          if Stream.Read(DirEntry[0], 32) <> 32 then Break;
+          if DirEntry[0] = 0 then Break; // End of this directory
+
+          IsDel := (DirEntry[0] = $E5);
+          if IsDel and not IncludeDeleted then Continue;
+
+          Attr := DirEntry[11];
+          if (Attr and FAT12_ATTR_VOLUME) <> 0 then Continue;
+
+          EntryName := Fat12FormatFileName(@DirEntry[0]);
+          if (EntryName = '') or (EntryName = '.') or (EntryName = '..') then Continue;
+
+          IsDir := (Attr and FAT12_ATTR_DIR) <> 0;
+          StartClust := ReadLE16(@DirEntry[0], 32, 26);
+          FileSize := ReadLE32(@DirEntry[0], 32, 28);
+          DateWord := ReadLE16(@DirEntry[0], 32, 24);
+          TimeWord := ReadLE16(@DirEntry[0], 32, 22);
+          EntryDate := Fat12ParseDateTime(DateWord, TimeWord);
+
+          SetLength(Result, Count + 1);
+          Result[Count].FileName := EntryName;
+          Result[Count].DirPath := Item.DirPath;
+          if Item.DirPath <> '' then
+            Result[Count].FullPath := Item.DirPath + EntryName
+          else
+            Result[Count].FullPath := EntryName;
+          Result[Count].FileSize := FileSize;
+          Result[Count].StartCluster := StartClust;
+          Result[Count].DateTime := EntryDate;
+          if EntryDate > 0 then
+            Result[Count].DateTimeStr := FormatDateTime('yyyy-mm-dd hh:nn:ss', EntryDate)
+          else
+            Result[Count].DateTimeStr := '----';
+          Result[Count].Attr := Attr;
+          Result[Count].AttrStr := Fat12FormatAttrString(Attr);
+          Result[Count].IsDir := IsDir;
+          Result[Count].IsDeleted := IsDel;
+          if IsDir then
+            Result[Count].ClusterCount := 1
+          else
+            Result[Count].ClusterCount := CountClusters(StartClust);
+          Inc(Count);
+
+          if IsDir and (StartClust >= 2) and (StartClust < FAT12_ENTRY_EOC_MIN) and not IsVisited(StartClust) then
+          begin
+            MarkVisited(StartClust);
+            if Item.DirPath <> '' then
+              Enqueue(StartClust, Item.DirPath + EntryName + '\')
+            else
+              Enqueue(StartClust, EntryName + '\');
+          end;
+        end;
+
+        NextCluster := Fat12ReadEntry(Stream, Layout.FatTableStart, CurrCluster);
+        if (NextCluster < 2) or (NextCluster = CurrCluster) then Break;
+        CurrCluster := NextCluster;
+      end;
+    end;
   end;
 end;
 

@@ -908,6 +908,10 @@ object Form1: TForm1
         Caption = 'Export &All Files...'
         OnClick = ButtonExtractAllClick
       end
+      object MenuItemExportCatalog: TMenuItem
+        Caption = 'Export Disk &Catalog...'
+        OnClick = MenuItemExportCatalogClick
+      end
       object MenuItemSep2: TMenuItem
         Caption = '-'
       end
@@ -1070,6 +1074,14 @@ object Form1: TForm1
         Caption = '&Floppy Disk Writer / Reader (720K / 1.44M)...'
         ShortCut = 118
         OnClick = MenuItemWriteFloppyClick
+      end
+      object MenuItemSepTools4: TMenuItem
+        Caption = '-'
+      end
+      object MenuItemBatchConverter: TMenuItem
+        Caption = '&Batch Disk Image Converter...'
+        ShortCut = 119
+        OnClick = MenuItemBatchConverterClick
       end
     end
     object MenuItemHelp: TMenuItem
