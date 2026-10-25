@@ -89,6 +89,8 @@ To recover a deleted file:
 4. The tool validates cluster availability in the FAT table, re-links the cluster chain, restores the directory entry, and refreshes the display.
 
 ### Physical Floppy Writing (720 KB & 1.44 MB)
+<img width="717" height="592" alt="image" src="https://github.com/user-attachments/assets/ec4cbb07-e392-41ab-bed9-7d6a281f364b" />
+
 STIMAGE includes a built-in low-level track-by-track physical floppy disk writer accessible via **Tools -> Write Disk Image to Floppy...** (or the **Floppy** toolbar button):
 - Supports standard internal PC floppy controllers (`\\.\A:`) and external USB floppy drives.
 - Automatically handles standard Atari ST / PC formats (720 KB Double-Density and 1.44 MB High-Density).
@@ -118,6 +120,8 @@ STIMAGE can generate and export comprehensive disk catalog reports from any load
   - **Formatted Text (`.txt`)**: Clean ASCII report with formatted tables and summary statistics.
 
 ### Batch Disk Image Converter & Extractor
+<img width="865" height="675" alt="image" src="https://github.com/user-attachments/assets/a63e29e3-6a00-4f3a-8a43-b8e0219d52f3" />
+
 Accessible via **Tools -> Batch Disk Image Converter...** (or shortcut **F8**), this tool enables automated bulk conversion and extraction across entire floppy image collections:
 - **Multiple Input Sources**:
   - Select individual files (`.st`, `.msa`, `.dim`) or `.zip` archives containing disk images.
@@ -131,10 +135,3 @@ Accessible via **Tools -> Batch Disk Image Converter...** (or shortcut **F8**), 
   - Check **"Automatically depack compressed files on extraction"** (disabled by default) to decompress packed Atari ST files on the fly during extraction using STIMAGE's built-in 35+ packer decompressor engine.
 - **Control & Logging**:
   - Live progress bar, real-time log window, pause/cancellation support, and overwrite existing file safeguards.
-
----
-
-### How the Toolchain Works
-- **Wine Lazarus (`lazbuild.exe`)**: Builds the project using Free Pascal 3.2.2 with native Win32 and Win64 LCL bindings.
-- **GVFS / SMB Compatibility Layer**: Because GVFS SMB mounts don't support POSIX file locking required by Wine's intermediate compiler passes (e.g. `.res` resource writing), `build.sh` stages Pascal sources to a local temporary workspace (`/tmp/stimage_build_$USER`), maps it as Wine drive `T:`, compiles in ~1.5s, and syncs `stimage.exe`, `stimage_win32.exe`, and `stimage_win64.exe` directly back to the project root.
-
