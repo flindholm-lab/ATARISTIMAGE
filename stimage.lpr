@@ -13,7 +13,8 @@ uses
   Forms, unit1, unit_clustermap, unit_msa, unit_fileviewer, unit_depacker,
   unit_ataripic, unit_virusscanner, unit_newimage, unit_archivevault,
   unit_dim, unit_search, unit_atariaudio, unit_floppywriter,
-  unit_fat12, unit_catalog, unit_batchengine, unit_batchconverter
+  unit_fat12, unit_catalog, unit_batchengine, unit_batchconverter,
+  unit_virusreport
   { you can add units after this };
 
 {$R *.res}

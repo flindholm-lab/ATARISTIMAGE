@@ -256,6 +256,7 @@ type
     FSectorsPerTrack: Word;           // Sectors per track (e.g. 9, 10, 11, 18)
     FSides: Word;                     // Number of sides (1 or 2)
     FTracks: Word;                    // Number of tracks (e.g. 80)
+    FIsExecutableBootSector: Boolean; // True if sector 0 has valid $1234 Atari boot checksum
     FIsMSAImage: Boolean;             // True if currently loaded from/saving to MSA
     FOriginalMSAPath: string;         // Original host path of the MSA file
     FIsDIMImage: Boolean;             // True if currently loaded from/saving to FastCopy DIM
@@ -644,6 +645,7 @@ begin
   FTracks := 80;
   FIsDIMImage := False;
   FOriginalDIMPath := '';
+  FIsExecutableBootSector := False;
   FIsModified := False;
   Self.Caption := 'Atari .ST Image File Manager';
   ProgressBarFreeSpace.Position := 0;
@@ -3508,6 +3510,7 @@ begin
 
   // Atari ST 24-bit disk serial number at offset $08..$0A of boot sector
   FDiskSerial := Bpb.DiskSerial;
+  FIsExecutableBootSector := (AtariBootChecksum(@BootSector[0], FAT12_BOOT_SECTOR_SIZE) = ATARI_BOOT_EXEC_SUM);
 
   // Read and validate disk geometry
   if not (FSides in [1, 2]) then
@@ -3591,7 +3594,7 @@ begin
     RootDirSectors := ((Int64(FRootEntries) * FAT12_DIR_ENTRY_SIZE) + (FBytesPerSector - 1)) div FBytesPerSector;
   end;
 
-  FBytesPerCluster := FSectorsPerCluster * FBytesPerSector;
+  FBytesPerCluster := Word(EnsureRange(Int64(FSectorsPerCluster) * FBytesPerSector, 512, 65535));
 
   // Calculate total data clusters dynamically from filesystem layout, then cap by
   // image size, FAT capacity and the FAT12 architectural limit (shared logic)
@@ -3933,7 +3936,7 @@ begin
     if ADataAreaStart > ARootDirStart then
     begin
       RootDirSectors := (ADataAreaStart - ARootDirStart) div 512;
-      ARootDirEntries := RootDirSectors * 16;
+      ARootDirEntries := Word(EnsureRange(RootDirSectors * 16, 16, 4096));
     end;
   end;
 end;
@@ -4276,15 +4279,8 @@ begin
     end
     else if Pos('unrecognized', LowerCase(VirusThreatName)) > 0 then
     begin
-      if MessageDlg('Atari ST Anti-Virus Guard',
-        Format('CAUTION: Potential virus threat detected in Boot Sector: %s!' + sLineBreak + sLineBreak +
-               'This is often a legitimate custom loader for Atari games and demos.' + sLineBreak +
-               'Would you like to open the Anti-Virus Scanner now to inspect the disk?',
-               [VirusThreatName]),
-        mtWarning, [mbYes, mbNo], 0) = mrYes then
-      begin
-        FormVirusScanner.OpenForDisk(FImagePath, True);
-      end;
+      if (StatusBar1 <> nil) and (StatusBar1.Panels.Count >= 4) then
+        StatusBar1.Panels[3].Text := 'ℹ️ Atari Custom Executable Boot Sector (Game/Demo Loader)';
     end
     else
     begin
@@ -5370,6 +5366,7 @@ begin
       RootDirStart := Layout.RootDirStart;
       DataAreaStart := Layout.DataAreaStart;
       BytesPerClust := Integer(Layout.BytesPerCluster);
+      if BytesPerClust <= 0 then BytesPerClust := 1024;
 
       DirQueue := TList.Create;
       VisitedClusters := TList.Create;
@@ -5465,7 +5462,7 @@ begin
             end;
 
             // Follow FAT chain for this subdirectory in source image
-            CurrClust := GetNextCluster(FS, CurrClust);
+            CurrClust := Fat12ReadEntry(FS, Layout.FatTableStart, Integer(CurrClust));
           end;
         end;
 
@@ -7583,7 +7580,20 @@ var
 begin
   if StatusBar1 = nil then Exit;
 
-  // 1. Format / Geometry Panel
+  // 1. File / Directory Counts & Selection Details
+  FileCount := 0;
+  DirCount := 0;
+  for I := 0 to High(FDiskItems) do
+  begin
+    if (FDiskItems[I].CleanName = '..') or (FDiskItems[I].DisplayName = '..') then
+      Continue;
+    if FDiskItems[I].IsDir then
+      Inc(DirCount)
+    else
+      Inc(FileCount);
+  end;
+
+  // 2. Format / Geometry Panel
   if FInArchiveMode then
     FormatStr := 'Archive: ' + UpperCase(ExtractFileExt(FArchiveSourceFileName)) + ' (' + ExtractFileName(FArchiveSourceFileName) + ')'
   else if FImagePath <> '' then
@@ -7608,6 +7618,9 @@ begin
     else
       FormatStr := FormatStr + 'Atari Custom Format (' + IntToStr(FTotalClusters) + ' clusters)';
 
+    if (FTotalClusters < 700) and FIsExecutableBootSector and (FileCount = 0) then
+      FormatStr := FormatStr + ' • [Custom Track Loader Demo Disk]';
+
     if (FTotalClusters >= 1500) or (FileSize(FImagePath) > 737280) then
     begin
       if AnalyzeDiskImageFor720KB(FImagePath, FitFiles, FitDirs, FitBytes, FitClusters, FitReason) then
@@ -7616,19 +7629,6 @@ begin
   end
   else
     FormatStr := 'No Disk Image Loaded';
-
-  // 2. File / Directory Counts & Selection Details
-  FileCount := 0;
-  DirCount := 0;
-  for I := 0 to High(FDiskItems) do
-  begin
-    if (FDiskItems[I].CleanName = '..') or (FDiskItems[I].DisplayName = '..') then
-      Continue;
-    if FDiskItems[I].IsDir then
-      Inc(DirCount)
-    else
-      Inc(FileCount);
-  end;
 
   if (ListViewFiles <> nil) and (ListViewFiles.Selected <> nil) then
   begin
@@ -7641,7 +7641,12 @@ begin
   else
   begin
     if (FileCount = 0) and (DirCount = 0) then
-      FileStr := 'Empty directory'
+    begin
+      if FIsExecutableBootSector then
+        FileStr := '0 files (Non-DOS Custom Track Loader • Executable Boot Sector)'
+      else
+        FileStr := 'Empty directory (0 files)';
+    end
     else
       FileStr := Format('%d file(s), %d folder(s)', [FileCount, DirCount]);
   end;

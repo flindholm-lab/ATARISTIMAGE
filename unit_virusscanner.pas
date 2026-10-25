@@ -6,39 +6,24 @@ interface
 
 uses
   Classes, SysUtils, FileUtil, Forms, Controls, Graphics, Dialogs, ComCtrls,
-  StdCtrls, ExtCtrls, Math, unit_fat12;
+  StdCtrls, ExtCtrls, Math, LCLIntf, unit_fat12, unit_virusreport;
 
 type
-  TVirusTargetType = (vtBootSector, vtFile, vtProtector, vtCustomBoot, vtNone);
+  TVirusTargetType = unit_virusreport.TVirusTargetType;
+  TVirusScanResult = unit_virusreport.TVirusScanResult;
+  TVirusScanResultArray = unit_virusreport.TVirusScanResultArray;
+  TDiskScanSummary = unit_virusreport.TDiskScanSummary;
+  TVirusReportItem = unit_virusreport.TVirusReportItem;
+  TVirusReport = unit_virusreport.TVirusReport;
 
-  TVirusScanResult = record
-    VirusFound: Boolean;
-    TargetType: TVirusTargetType;
-    Name: string;
-    Description: string;
-    Target: string;       // e.g. "Boot Sector (Sector 0)" or "File: \AUTO\MEDWAY.PRG"
-    SourceFile: string;   // Scanned file name / archive member
-    ActualImagePath: string; // Full path on disk (if standalone)
-    ZipArchivePath: string;  // Non-empty if inside zip
-    ZipEntryName: string;    // Entry path inside zip
-    Offset: Integer;      // Byte offset within sector or file
-    CanDisinfect: Boolean;
-    Cluster: Word;        // If file, starting cluster
-    FileSize: Int64;
-    Disinfected: Boolean;
-  end;
+const
+  vtBootSector = unit_virusreport.vtBootSector;
+  vtFile = unit_virusreport.vtFile;
+  vtProtector = unit_virusreport.vtProtector;
+  vtCustomBoot = unit_virusreport.vtCustomBoot;
+  vtNone = unit_virusreport.vtNone;
 
-  TVirusScanResultArray = array of TVirusScanResult;
-
-  TDiskScanSummary = record
-    DiskImagePath: string;
-    TotalFilesScanned: Integer;
-    TotalFoldersScanned: Integer;
-    BootChecksum: Word;
-    BootIsExecutable: Boolean;
-    Threats: TVirusScanResultArray;
-  end;
-
+type
   TScanProgressEvent = procedure(const CurrentItem: string; Percent: Integer; var Abort: Boolean) of object;
 
   { TFormVirusScanner }
@@ -58,6 +43,7 @@ type
     ButtonDisinfectBoot: TButton;
     ButtonDisinfectAll: TButton;
     ButtonInspectHex: TButton;
+    ButtonExportReport: TButton;
     ButtonClose: TButton;
 
     procedure FormCreate(Sender: TObject);
@@ -68,17 +54,21 @@ type
     procedure ButtonDisinfectBootClick(Sender: TObject);
     procedure ButtonDisinfectAllClick(Sender: TObject);
     procedure ButtonInspectHexClick(Sender: TObject);
+    procedure ButtonExportReportClick(Sender: TObject);
     procedure ButtonCloseClick(Sender: TObject);
     procedure ListViewThreatsCustomDrawItem(Sender: TCustomListView; Item: TListItem; State: TCustomDrawState; var DefaultDraw: Boolean);
     procedure ListViewThreatsCustomDrawSubItem(Sender: TCustomListView; Item: TListItem; SubItem: Integer; State: TCustomDrawState; var DefaultDraw: Boolean);
     procedure ListViewThreatsSelectItem(Sender: TObject; Item: TListItem; Selected: Boolean);
   private
     FCurrentDiskPath: string;
+    FScannedFolderPath: string;
     FSummary: TDiskScanSummary;
     FCancelScan: Boolean;
     FFolderScanMode: Boolean;
     FCurrentFileIndex: Integer;
     FTotalFilesToScan: Integer;
+    FTotalImagesProcessed: Integer;
+    procedure PromptExportReport(AutoPrompt: Boolean = False);
     procedure UpdateLayout;
     procedure UpdateUI;
     procedure OnScanProgress(const CurrentItem: string; Percent: Integer; var Abort: Boolean);
@@ -467,9 +457,9 @@ var
   I, K, TargetOff: Integer;
   IsDummy: Boolean;
   ViralTraits: string;
-  Sigs: array[0..44] of TMaskedSig;
+  Sigs: array[0..46] of TMaskedSig;
   SafeSigs: array[0..5] of TMaskedSig;
-  GenericSigs: array[0..0] of TMaskedSig;
+  GenericSigs: array[0..3] of TMaskedSig;
 begin
   Result := False;
   Threat.VirusFound := False;
@@ -640,19 +630,19 @@ begin
   Sigs[17].FixedOffset := -1;
   Sigs[17].RequiredString := '';
 
-  // 19. Ghost Boot Virus (Mouse)
-  Sigs[18].Name := 'Ghost Boot Virus (Mouse)';
-  Sigs[18].Description := 'Mouse/Ghost variant targeting memory bounds, intercepts timers, flashes borders.';
-  Sigs[18].Bytes := [$48, $E7, $FF, $FE, $41, $FA, $00, $00, $20, $3C];
-  Sigs[18].Mask := 'xxxxxx??xx';
+  // 19. Ghost Boot Virus (Mouse / Tripwire Payload)
+  Sigs[18].Name := 'Ghost Boot Virus (Mouse / Tripwire)';
+  Sigs[18].Description := 'Replicating Ghost virus variant: increments floppy infection counter at $02EA, trips on every 5th floppy, and inverts mouse coordinates via XBIOS Kbdvbase and $02E6.';
+  Sigs[18].Bytes := [$06, $B8, $00, $00, $00, $01, $02, $EA, $0C, $B8, $00, $00, $00, $05, $02, $EA];
+  Sigs[18].Mask := 'xxxxxxxxxx????xx';
   Sigs[18].FixedOffset := -1;
   Sigs[18].RequiredString := '';
 
-  // 20. Ghost Boot Virus (GFA / Mouse)
-  Sigs[19].Name := 'Ghost Boot Virus (GFA / Mouse)';
-  Sigs[19].Description := 'Prevalent memory-resident boot block infector GFA variant intercepting disk vectors.';
-  Sigs[19].Bytes := [$26, $3C, $00, $00, $00, $D6, $43, $F8, $01, $40];
-  Sigs[19].Mask := 'xxxxxxxxxx';
+  // 20. Ghost Boot Virus (Standard / Reset-Resident)
+  Sigs[19].Name := 'Ghost Boot Virus (Standard)';
+  Sigs[19].Description := 'Classic Ghost boot virus infector: hooks reset vector ($42A) and hdv_bpb ($472), hides 32KB below phystop, and replicates across floppy drives.';
+  Sigs[19].Bytes := [$43, $F8, $01, $40, $45, $FA, $FF, $F4, $24, $12, $B4, $91];
+  Sigs[19].Mask := 'xxxxxxxxxxxx';
   Sigs[19].FixedOffset := -1;
   Sigs[19].RequiredString := '';
 
@@ -855,6 +845,22 @@ begin
   Sigs[44].Mask := 'xxxxxxxx';
   Sigs[44].FixedOffset := -1;
   Sigs[44].RequiredString := 'ZOCH';
+
+  // 46. Ghost Boot Virus (Synthetic / Test Variant)
+  Sigs[45].Name := 'Ghost Boot Virus (Synthetic / Variant)';
+  Sigs[45].Description := 'Variant or test vector of Ghost virus matching register dump relocator with $203C.';
+  Sigs[45].Bytes := [$48, $E7, $FF, $FE, $41, $FA, $00, $00, $20, $3C];
+  Sigs[45].Mask := 'xxxxxx??xx';
+  Sigs[45].FixedOffset := -1;
+  Sigs[45].RequiredString := '';
+
+  // 47. Ghost Boot Virus (GFA / Chained Vector Variant)
+  Sigs[46].Name := 'Ghost Boot Virus (GFA / Chained Vector)';
+  Sigs[46].Description := 'Ghost boot infector variant with uninitialized buffer word before entry stub.';
+  Sigs[46].Bytes := [$26, $3C, $00, $00, $00, $D6, $43, $F8, $01, $40];
+  Sigs[46].Mask := 'xxxxxxxxxx';
+  Sigs[46].FixedOffset := -1;
+  Sigs[46].RequiredString := '';
 
   // -------------------------------------------------------------------------
   // TIER 1.5: Known Boot Sector Protectors and Vaccines
@@ -1377,12 +1383,33 @@ begin
   // -------------------------------------------------------------------------
   // TIER 3: Generic Family Signatures
   // -------------------------------------------------------------------------
-  GenericSigs[0].Name := 'Ghost / MAD Virus Family (Generic)';
-  GenericSigs[0].Description := 'Mutated or obfuscated variant of the Ghost/MAD family using recognizable relocator stub.';
+  GenericSigs[0].Name := 'MAD Virus Family (Generic)';
+  GenericSigs[0].Description := 'Mutated or obfuscated variant of the MAD virus family using recognizable relocator stub.';
   GenericSigs[0].Bytes := [$48, $E7, $FF, $FE, $41, $FA];
   GenericSigs[0].Mask := 'xxxxxx';
   GenericSigs[0].FixedOffset := -1;
   GenericSigs[0].RequiredString := '';
+
+  GenericSigs[1].Name := 'Ghost Boot Virus Family (Generic Reset Vector & Memory Hide)';
+  GenericSigs[1].Description := 'Ghost virus variant setting $31415926 resvalid and installing reset hooks below phystop ($42E).';
+  GenericSigs[1].Bytes := [$20, $3C, $31, $41, $59, $26, $42, $81, $B0, $B8, $04, $26];
+  GenericSigs[1].Mask := 'xxxxxxxxxxxx';
+  GenericSigs[1].FixedOffset := -1;
+  GenericSigs[1].RequiredString := '';
+
+  GenericSigs[2].Name := 'Ghost Boot Virus Family (Generic Mouse Intercept)';
+  GenericSigs[2].Description := 'Variant of the Ghost virus family executing mouse inversion routine via low-RAM toggle at $02E6.';
+  GenericSigs[2].Bytes := [$0A, $38, $00, $01, $02, $E6, $4C, $DF, $7F, $FE];
+  GenericSigs[2].Mask := 'xxxxxxxxxx';
+  GenericSigs[2].FixedOffset := -1;
+  GenericSigs[2].RequiredString := '';
+
+  GenericSigs[3].Name := 'Ghost Boot Virus Family (Generic Disk BPB Hook)';
+  GenericSigs[3].Description := 'Ghost virus variant redirecting system BPB vector ($0472 hdv_bpb) to resident virus handler.';
+  GenericSigs[3].Bytes := [$20, $38, $04, $72, $41, $F8, $02, $E2, $20, $80];
+  GenericSigs[3].Mask := 'xxxxxxxxxx';
+  GenericSigs[3].FixedOffset := -1;
+  GenericSigs[3].RequiredString := '';
 
   for I := 0 to High(GenericSigs) do
   begin
@@ -1406,12 +1433,23 @@ begin
     begin
       Threat.VirusFound := True;
       Threat.TargetType := vtBootSector;
-      if HasFloppyWriteRoutine(ViralTraits) then
-        Threat.Name := 'Suspicious Boot Sector (Floppy Write Routine / Infector)'
+      // Check if behavioral traits match Ghost virus infection profile
+      if (Pos('$31415926', ViralTraits) > 0) and (Pos('hdv_bpb', ViralTraits) > 0) and
+         (Pos('phystop', ViralTraits) > 0) and HasFloppyWriteRoutine(ViralTraits) then
+      begin
+        Threat.Name := 'Suspicious Boot Sector (Ghost Virus Heuristic Profile / Replicating Infector)';
+        Threat.Description := 'Behavioral heuristic detection: Executable boot sector matches Ghost virus infection profile (' +
+                              ViralTraits + '). Survives warm reset, hides below phystop, and replicates via Flopwr.';
+      end
       else
-        Threat.Name := 'Suspicious Boot Sector (Vector Hijack / Non-Replicating)';
-      Threat.Description := 'Behavioral heuristic detection: Executable boot sector contains active viral routines (' +
-                            ViralTraits + '). Matches resident boot virus behavior profile.';
+      begin
+        if HasFloppyWriteRoutine(ViralTraits) then
+          Threat.Name := 'Suspicious Boot Sector (Floppy Write Routine / Infector)'
+        else
+          Threat.Name := 'Suspicious Boot Sector (Vector Hijack / Non-Replicating)';
+        Threat.Description := 'Behavioral heuristic detection: Executable boot sector contains active viral routines (' +
+                              ViralTraits + '). Matches resident boot virus behavior profile.';
+      end;
       Threat.Offset := 0;
       Exit(True);
     end
@@ -2204,10 +2242,13 @@ end;
 procedure TFormVirusScanner.FormCreate(Sender: TObject);
 begin
   FCurrentDiskPath := '';
+  FScannedFolderPath := '';
   FFolderScanMode := False;
   FCancelScan := False;
+  FTotalImagesProcessed := 0;
   ProgressBarScan.Position := 0;
   ButtonCancelScan.Enabled := False;
+  ButtonExportReport.Enabled := False;
   UpdateLayout;
 end;
 
@@ -2378,6 +2419,8 @@ begin
     ButtonDisinfectAll.Enabled := HasAnyThreat;
   end;
   ButtonInspectHex.Enabled := (ListViewThreats.Selected <> nil);
+  ButtonExportReport.Enabled := (Length(FSummary.Threats) > 0) or (FSummary.TotalFilesScanned > 0) or
+                                (FSummary.BootChecksum <> 0) or (FCurrentDiskPath <> '');
 end;
 
 procedure TFormVirusScanner.OnScanProgress(const CurrentItem: string; Percent: Integer; var Abort: Boolean);
@@ -2540,9 +2583,12 @@ begin
       FSummary.Threats[I].SourceFile := ExtractFileName(FCurrentDiskPath);
       FSummary.Threats[I].ActualImagePath := FCurrentDiskPath;
     end;
+    FTotalImagesProcessed := 1;
     PopulateThreatsList;
     ProgressBarScan.Position := 100;
     UpdateUI;
+    if not FCancelScan then
+      PromptExportReport(True);
   finally
     ButtonScan.Enabled := True;
     ButtonScanFolder.Enabled := True;
@@ -2576,6 +2622,7 @@ begin
   if (ChosenDir = '') or not DirectoryExists(ChosenDir) then Exit;
 
   FFolderScanMode := True;
+  FScannedFolderPath := ChosenDir;
   FCancelScan := False;
   ButtonScan.Enabled := False;
   ButtonScanFolder.Enabled := False;
@@ -2876,6 +2923,11 @@ begin
             [TotalImagesProcessed, TotalFilesInsideImages]);
       end;
     end;
+
+    FTotalImagesProcessed := TotalImagesProcessed;
+    UpdateUI;
+    if not FCancelScan and (TotalImagesProcessed > 0) then
+      PromptExportReport(True);
   finally
     FileList.Free;
     ButtonScan.Enabled := (FCurrentDiskPath <> '') and FileExists(FCurrentDiskPath);
@@ -3215,6 +3267,91 @@ begin
         SysUtils.DeleteFile(TempST);
       RemoveDir(TempDir);
     end;
+  end;
+end;
+
+procedure TFormVirusScanner.ButtonExportReportClick(Sender: TObject);
+begin
+  PromptExportReport(False);
+end;
+
+procedure TFormVirusScanner.PromptExportReport(AutoPrompt: Boolean);
+var
+  SaveDlg: TSaveDialog;
+  Report: TVirusReport;
+  PromptMsg, TargetPath, DefaultName: string;
+begin
+  if FFolderScanMode then
+  begin
+    if FScannedFolderPath <> '' then
+      TargetPath := FScannedFolderPath
+    else
+      TargetPath := LabelDiskPath.Caption;
+  end
+  else
+    TargetPath := FCurrentDiskPath;
+
+  if (TargetPath = '') and (Length(FSummary.Threats) = 0) and (FSummary.TotalFilesScanned = 0) then
+  begin
+    ShowMessage('No scan results available to export.');
+    Exit;
+  end;
+
+  Report := BuildVirusReport(FSummary, TargetPath, FFolderScanMode, CheckBoxBootOnly.Checked, FTotalImagesProcessed);
+
+  if AutoPrompt then
+  begin
+    if FFolderScanMode then
+      PromptMsg := Format('Directory scan complete across %d disk image(s).' + sLineBreak +
+        'Overall Verdict: %s' + sLineBreak +
+        'Threats: %d | Suspicious: %d | Protectors: %d' + sLineBreak + sLineBreak +
+        'Would you like to export / view the Virus Scanner Report?',
+        [FTotalImagesProcessed, Report.OverallVerdict, Report.ThreatCount, Report.PotentialCount, Report.ProtectorCount])
+    else
+      PromptMsg := Format('Scan complete for: %s' + sLineBreak +
+        'Overall Verdict: %s' + sLineBreak +
+        'Threats: %d | Suspicious: %d | Protectors: %d' + sLineBreak + sLineBreak +
+        'Would you like to export / view the Virus Scanner Report?',
+        [ExtractFileName(FCurrentDiskPath), Report.OverallVerdict, Report.ThreatCount, Report.PotentialCount, Report.ProtectorCount]);
+
+    if MessageDlg('Virus Scan Finished', PromptMsg, mtInformation, [mbYes, mbNo], 0) <> mrYes then
+      Exit;
+  end;
+
+  SaveDlg := TSaveDialog.Create(nil);
+  try
+    SaveDlg.Title := 'Export Virus Scanner Report';
+    SaveDlg.Filter := 'HTML Report (*.html)|*.html|CSV Spreadsheet (*.csv)|*.csv|JSON Data (*.json)|*.json|Text Report (*.txt)|*.txt|All Files (*.*)|*.*';
+    SaveDlg.DefaultExt := 'html';
+
+    if FFolderScanMode then
+      DefaultName := 'virus_scan_report_' + FormatDateTime('yyyymmdd_hhnnss', Now) + '.html'
+    else
+    begin
+      if FCurrentDiskPath <> '' then
+        DefaultName := ChangeFileExt(ExtractFileName(FCurrentDiskPath), '') + '_virus_report.html'
+      else
+        DefaultName := 'disk_virus_report.html';
+    end;
+    SaveDlg.FileName := DefaultName;
+
+    if SaveDlg.Execute then
+    begin
+      if ExportVirusReportToFile(Report, SaveDlg.FileName) then
+      begin
+        if MessageDlg('Report Exported',
+          'Virus scan report successfully saved to:' + sLineBreak + SaveDlg.FileName + sLineBreak + sLineBreak +
+          'Would you like to open it now?',
+          mtConfirmation, [mbYes, mbNo], 0) = mrYes then
+        begin
+          OpenDocument(SaveDlg.FileName);
+        end;
+      end
+      else
+        ShowMessage('Failed to save virus scan report to:' + sLineBreak + SaveDlg.FileName);
+    end;
+  finally
+    SaveDlg.Free;
   end;
 end;
 

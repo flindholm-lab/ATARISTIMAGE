@@ -55,6 +55,17 @@ begin
   Result := (Word(P[Offset]) shl 8) or Word(P[Offset + 1]);
 end;
 
+function ReadSignedBE16(const P: PByte; Offset: Integer): Integer; inline;
+var
+  W: Word;
+begin
+  W := (Word(P[Offset]) shl 8) or Word(P[Offset + 1]);
+  if W >= $8000 then
+    Result := Integer(W) - $10000
+  else
+    Result := Integer(W);
+end;
+
 function ReadBE32(const P: PByte; Offset: Integer): LongWord; inline;
 begin
   Result := (LongWord(P[Offset]) shl 24) or
@@ -2112,53 +2123,54 @@ begin
   SetLength(OutBuf, 0);
   if (InBuf = nil) or (InSize < 12) then Exit;
 
-  DataStart := -1;
-  for I := 0 to Min(8192, InSize - 12) do
-  begin
-    if (I = 0) or
-       CheckString(InBuf, InSize, I, 'LSD!') or
-       CheckString(InBuf, InSize, I, 'LSD$') or
-       CheckString(InBuf, InSize, I, 'AUTM') or
-       CheckString(InBuf, InSize, I, 'AU5!') or
-       CheckString(InBuf, InSize, I, 'AU5C') or
-       CheckString(InBuf, InSize, I, 'LSDC') then
+  try
+    DataStart := -1;
+    for I := 0 to Min(8192, InSize - 12) do
     begin
-      D5 := ReadBE32(InBuf, I + 4);
-      D1 := ReadBE32(InBuf, I + 8);
-      if (D1 > 0) and (D5 >= D1) and (D5 < 32 * 1024 * 1024) then
+      if (I = 0) or
+         CheckString(InBuf, InSize, I, 'LSD!') or
+         CheckString(InBuf, InSize, I, 'LSD$') or
+         CheckString(InBuf, InSize, I, 'AUTM') or
+         CheckString(InBuf, InSize, I, 'AU5!') or
+         CheckString(InBuf, InSize, I, 'AU5C') or
+         CheckString(InBuf, InSize, I, 'LSDC') then
       begin
-        if (I + 8 + D1 <= InSize + 4) and (I + 8 + D1 >= InSize - 1024) then
+        D5 := ReadBE32(InBuf, I + 4);
+        D1 := ReadBE32(InBuf, I + 8);
+        if (D1 > 0) and (D5 >= D1) and (D5 < 32 * 1024 * 1024) then
         begin
-          DataStart := I;
-          Break;
+          if (I + 8 + D1 <= InSize + 4) and (I + 8 + D1 >= InSize - 1024) then
+          begin
+            DataStart := I;
+            Break;
+          end;
         end;
       end;
     end;
-  end;
 
-  if DataStart = -1 then Exit;
+    if DataStart = -1 then Exit;
 
-  D5 := ReadBE32(InBuf, DataStart + 4); // Unpacked size
-  if (D5 = 0) or (D5 > 32 * 1024 * 1024) then Exit;
+    D5 := ReadBE32(InBuf, DataStart + 4); // Unpacked size
+    if (D5 = 0) or (D5 > 32 * 1024 * 1024) then Exit;
 
-  SetLength(OutBuf, D5);
-  A1 := D5;
+    D1 := ReadBE32(InBuf, DataStart + 8);
+    if (D1 > LongWord(InSize)) or (D1 < 4) then Exit;
 
-  A0 := DataStart + 8 + Integer(ReadBE32(InBuf, DataStart + 8)) - 4;
-  Dec(A0, 2);
-  if (A0 < 0) or (A0 + 2 > InSize) then Exit;
+    SetLength(OutBuf, D5);
+    A1 := D5;
 
-  TestWord := SmallInt(ReadBE16(InBuf, A0));
-  if TestWord < 0 then Dec(A0, 1);
+    A0 := DataStart + 8 + Integer(D1) - 4;
+    Dec(A0, 2);
+    if (A0 < 0) or (A0 + 2 > InSize) then Exit;
 
-  Dec(A0);
-  if (A0 < 0) or (A0 >= InSize) then Exit;
-  BitBuf := InBuf[A0];
-  CarryBit := 0;
+    if (ReadBE16(InBuf, A0) and $8000) <> 0 then Dec(A0, 1);
 
-  EndA0 := DataStart + 12;
+    Dec(A0);
+    if (A0 < 0) or (A0 >= InSize) then Exit;
+    BitBuf := InBuf[A0];
+    CarryBit := 0;
 
-  try
+    EndA0 := DataStart + 12;
     while True do
     begin
       if GetBit <> 0 then
@@ -2199,6 +2211,7 @@ begin
       end;
 
       Inc(D2);
+      if (D2 < 0) or (D2 > High(RepeatBits)) then Exit(False);
       if RepeatBits[D2] <> 0 then
         D1 := GetBits(RepeatBits[D2], 0)
       else
@@ -2229,6 +2242,7 @@ begin
           if D3 < 0 then Break;
         end;
         Inc(D3);
+        if (D3 < 0) or (D3 > High(OffsetBits)) then Exit(False);
         OffsetVal := GetBits(OffsetBits[D3] + 1, 0) + OffsetAdj[D3];
       end;
 
@@ -2239,7 +2253,7 @@ begin
       begin
         Dec(A1);
         Dec(A2);
-        if (A1 < 0) or (A2 < 0) or (A2 >= Length(OutBuf)) then
+        if (A1 < 0) or (A1 >= Length(OutBuf)) or (A2 < 0) or (A2 >= Length(OutBuf)) then
         begin
           SetLength(OutBuf, 0);
           Exit(False);
@@ -4444,7 +4458,7 @@ begin
 
   if PStore >= 4 then
   begin
-    Disp := SmallInt(ReadBE16(InBuf, PStore - 2));
+    Disp := ReadSignedBE16(InBuf, PStore - 2);
     TargetPos := (PStore - 4) + 2 + Disp;
     if (TargetPos >= 4) and (TargetPos + 4 <= InSize) then
     begin
@@ -4478,7 +4492,7 @@ begin
 
   if PEsc >= 4 then
   begin
-    Disp := SmallInt(ReadBE16(InBuf, PEsc - 2));
+    Disp := ReadSignedBE16(InBuf, PEsc - 2);
     TargetEsc := (PEsc - 4) + 2 + Disp;
     if (TargetEsc >= 0) and (TargetEsc + 8 <= InSize) then
     begin
@@ -4504,7 +4518,7 @@ begin
 
   if PTree >= 4 then
   begin
-    Disp := SmallInt(ReadBE16(InBuf, PTree - 2));
+    Disp := ReadSignedBE16(InBuf, PTree - 2);
     TargetPos := (PTree - 4) + 2 + Disp;
     if (TargetPos >= 0) and (TargetPos < InSize) then
       TreeStart := TargetPos;

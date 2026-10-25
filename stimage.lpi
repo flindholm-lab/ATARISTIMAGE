@@ -261,6 +261,11 @@
         <IsPartOfProject Value="True"/>
         <HasResources Value="True"/>
       </Unit>
+      <Unit>
+        <Filename Value="unit_virusreport.pas"/>
+        <IsPartOfProject Value="True"/>
+        <UnitName Value="unit_virusreport"/>
+      </Unit>
     </Units>
   </ProjectOptions>
   <CompilerOptions>

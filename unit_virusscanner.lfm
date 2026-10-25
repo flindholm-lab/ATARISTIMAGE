@@ -7,7 +7,7 @@ object FormVirusScanner: TFormVirusScanner
   ClientHeight = 520
   ClientWidth = 940
   Constraints.MinHeight = 400
-  Constraints.MinWidth = 800
+  Constraints.MinWidth = 860
   Color = clBtnFace
   Font.Color = clWindowText
   Font.Height = -11
@@ -193,15 +193,25 @@ object FormVirusScanner: TFormVirusScanner
       TabOrder = 6
       OnClick = ButtonInspectHexClick
     end
-    object ButtonClose: TButton
-      Left = 841
+    object ButtonExportReport: TButton
+      Left = 702
       Height = 28
       Top = 36
-      Width = 85
+      Width = 125
+      Caption = '&Export Report...'
+      Enabled = False
+      TabOrder = 7
+      OnClick = ButtonExportReportClick
+    end
+    object ButtonClose: TButton
+      Left = 838
+      Height = 28
+      Top = 36
+      Width = 88
       Anchors = [akTop, akRight]
       Cancel = True
       Caption = '&Close'
-      TabOrder = 7
+      TabOrder = 8
       OnClick = ButtonCloseClick
     end
   end

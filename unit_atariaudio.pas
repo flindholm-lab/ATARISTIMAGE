@@ -176,6 +176,8 @@ begin
   if (InBuf = nil) or (InSize < 12) then Exit;
   Ext := UpperCase(ExtractFileExt(FileName));
 
+  try
+
   // -------------------------------------------------------------
   // 1. RIFF WAVE (.WAV)
   // -------------------------------------------------------------
@@ -359,7 +361,7 @@ begin
     Info.SampleRate := 50;
     Info.Subtunes := 1;
 
-    if CheckFourCC(InBuf, InSize, 0, 'YM5!') or CheckFourCC(InBuf, InSize, 0, 'YM6!') then
+    if (InSize >= 34) and (CheckFourCC(InBuf, InSize, 0, 'YM5!') or CheckFourCC(InBuf, InSize, 0, 'YM6!')) then
     begin
       NbFrames := ReadBE32(InBuf, 12);
       Digidrums := ReadBE16(InBuf, 20);
@@ -376,7 +378,7 @@ begin
       Info.Title := ReadNullString(InBuf, InSize, Pos);
       Info.Author := ReadNullString(InBuf, InSize, Pos);
       Info.Details := Format('Atari ST YM2149 (%d frames, Clock: %s MHz, Loop: %d)',
-        [NbFrames, FormatFloat('0.0', Double(MasterClock) / 1000000.0), LoopFrame]);
+        [Int64(NbFrames), FormatFloat('0.0', Double(MasterClock) / 1000000.0), Int64(LoopFrame)]);
     end
     else
     begin
@@ -457,6 +459,10 @@ begin
     Move(InBuf[0], Info.WaveformData[44], InSize);
     Info.CanPlay := True;
     Exit(True);
+  end;
+  except
+    on E: Exception do
+      Exit(False);
   end;
 end;
 

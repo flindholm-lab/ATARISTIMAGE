@@ -83,7 +83,7 @@ var
 implementation
 
 uses
-  unit_virusscanner;
+  unit_virusscanner, unit_virusreport;
 
 {$R *.lfm}
 
