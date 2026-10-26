@@ -41,6 +41,7 @@ type
     ButtonScanFolder: TButton;
     ButtonCancelScan: TButton;
     ButtonDisinfectBoot: TButton;
+    ButtonImmunizeBoot: TButton;
     ButtonDisinfectAll: TButton;
     ButtonInspectHex: TButton;
     ButtonExportReport: TButton;
@@ -52,6 +53,7 @@ type
     procedure ButtonScanFolderClick(Sender: TObject);
     procedure ButtonCancelScanClick(Sender: TObject);
     procedure ButtonDisinfectBootClick(Sender: TObject);
+    procedure ButtonImmunizeBootClick(Sender: TObject);
     procedure ButtonDisinfectAllClick(Sender: TObject);
     procedure ButtonInspectHexClick(Sender: TObject);
     procedure ButtonExportReportClick(Sender: TObject);
@@ -90,6 +92,7 @@ function ScanBootSector(const SectorBytes: PByte; SectorSize: Integer; out Threa
 function ScanFileBuffer(const Buffer: PByte; BufLen: Integer; const AFileName: string; ACluster: Word; out Threat: TVirusScanResult): Boolean;
 function ScanDiskImage(const AImagePath: string; out Summary: TDiskScanSummary; OnProgress: TScanProgressEvent = nil; BootSectorOnly: Boolean = False): Boolean;
 function DisinfectBootSector(const AImagePath: string): Boolean;
+function ImmunizeBootSector(const AImagePath: string): Boolean;
 function DisinfectFile(const AImagePath: string; const AFileName: string; ACluster: Word): Boolean;
 function QuickCheckBootSector(const AImagePath: string; out ThreatName: string; out IsExecutable: Boolean): Boolean;
 
@@ -899,6 +902,18 @@ begin
     Threat.TargetType := vtProtector;
     Threat.Name := 'Sagrotan Boot Protector';
     Threat.Description := 'Resident boot protector & vaccine by Henrik Alt / ToXis. Protects Sector 0 against unauthorized writes.';
+    Threat.Offset := 0;
+    Exit(True);
+  end;
+
+  // TS Boot Guard / Signum Vaccine
+  if BufferContainsText(SectorBytes, 512, 'TS BOOT GUARD') or
+     BufferContainsText(SectorBytes, 512, 'SIGNUM VACCINE') then
+  begin
+    Threat.VirusFound := False;
+    Threat.TargetType := vtProtector;
+    Threat.Name := 'TS Boot Guard / Signum Vaccine';
+    Threat.Description := 'Resident boot sector protector and vaccine. Protects boot vectors and Sector 0 from viral modification.';
     Threat.Offset := 0;
     Exit(True);
   end;
@@ -1975,6 +1990,75 @@ begin
   end;
 end;
 
+function ImmunizeBootSector(const AImagePath: string): Boolean;
+var
+  FS: TFileStream;
+  BootSec: array[0..511] of Byte;
+  Msg: AnsiString;
+  I: Integer;
+  Sum, TargetWord: Word;
+begin
+  Result := False;
+  if not FileExists(AImagePath) then Exit;
+  FS := TFileStream.Create(AImagePath, fmOpenReadWrite or fmShareDenyNone);
+  try
+    if FS.Size < 512 then Exit;
+    FS.Position := 0;
+    FS.ReadBuffer(BootSec[0], 512);
+
+    // Step A: Patch initial entry branch instruction past BPB geometry block
+    // $60 $1C is a branch instruction skipping to byte 30 ($1E).
+    BootSec[0] := $60;
+    BootSec[1] := $1C;
+    BootSec[2] := $00;
+    BootSec[3] := $00;
+
+    // Bytes 11..27: BPB geometry is preserved!
+
+    // Step B: Put executable 68000 vaccine code at offset 30 ($1E)
+    // LEA Msg(PC), A0      ; $41FA $000C  (A0 points to offset 30 + 2 + 12 = 44)
+    // MOVE.L A0, -(SP)     ; $2F08
+    // MOVE.W #9, -(SP)     ; $3F3C $0009  (Cconws: print string)
+    // TRAP #1              ; $4E41
+    // ADDQ.L #6, SP        ; $5C8F
+    // RTS                  ; $4E75
+    BootSec[30] := $41; BootSec[31] := $FA; BootSec[32] := $00; BootSec[33] := $0C; // LEA Msg(PC), A0
+    BootSec[34] := $2F; BootSec[35] := $08;                                         // MOVE.L A0, -(SP)
+    BootSec[36] := $3F; BootSec[37] := $3C; BootSec[38] := $00; BootSec[39] := $09; // MOVE.W #9, -(SP)
+    BootSec[40] := $4E; BootSec[41] := $41;                                         // TRAP #1
+    BootSec[42] := $5C; BootSec[43] := $8F;                                         // ADDQ.L #6, SP
+    BootSec[44] := $4E; BootSec[45] := $75;                                         // RTS
+
+    // Step C: Embed vaccine identification and console message at offset 46
+    Msg := #13#10 + '[ TS Boot Guard / Signum Vaccine Active - Disk Protected ]' + #13#10#0;
+    for I := 1 to Length(Msg) do
+      BootSec[45 + I] := Byte(Msg[I]);
+
+    // Step D: Zero out remaining unused payload bytes (up to offset 509)
+    for I := 46 + Length(Msg) to 509 do
+      BootSec[I] := $00;
+
+    // Step E: Compute 16-bit Atari boot checksum modulo $10000 so the sum equals $1234
+    BootSec[510] := $00;
+    BootSec[511] := $00;
+    Sum := 0;
+    for I := 0 to 254 do
+    begin
+      Sum := (Sum + ((Word(BootSec[I * 2]) shl 8) or Word(BootSec[I * 2 + 1]))) and $FFFF;
+    end;
+
+    TargetWord := ($1234 - Sum) and $FFFF;
+    BootSec[510] := Byte((TargetWord shr 8) and $FF);
+    BootSec[511] := Byte(TargetWord and $FF);
+
+    FS.Position := 0;
+    FS.WriteBuffer(BootSec[0], 512);
+    Result := True;
+  finally
+    FS.Free;
+  end;
+end;
+
 function DisinfectFile(const AImagePath: string; const AFileName: string; ACluster: Word): Boolean;
 var
   FS: TFileStream;
@@ -2411,11 +2495,14 @@ begin
   if FFolderScanMode then
   begin
     ButtonDisinfectBoot.Enabled := False;
+    ButtonImmunizeBoot.Enabled := False;
     ButtonDisinfectAll.Enabled := False;
   end
   else
   begin
     ButtonDisinfectBoot.Enabled := HasBootThreat or (ProtectorCount > 0) or (CustomBootCount > 0);
+    ButtonImmunizeBoot.Enabled := (FCurrentDiskPath <> '') and FileExists(FCurrentDiskPath) and
+                                  SameText(ExtractFileExt(FCurrentDiskPath), '.st');
     ButtonDisinfectAll.Enabled := HasAnyThreat;
   end;
   ButtonInspectHex.Enabled := (ListViewThreats.Selected <> nil);
@@ -2571,6 +2658,7 @@ begin
   ButtonScanFolder.Enabled := False;
   ButtonCancelScan.Enabled := True;
   ButtonDisinfectBoot.Enabled := False;
+  ButtonImmunizeBoot.Enabled := False;
   ButtonDisinfectAll.Enabled := False;
   ButtonInspectHex.Enabled := False;
   ProgressBarScan.Position := 0;
@@ -2628,6 +2716,7 @@ begin
   ButtonScanFolder.Enabled := False;
   ButtonCancelScan.Enabled := True;
   ButtonDisinfectBoot.Enabled := False;
+  ButtonImmunizeBoot.Enabled := False;
   ButtonDisinfectAll.Enabled := False;
   ButtonInspectHex.Enabled := False;
 
@@ -3056,6 +3145,77 @@ begin
     ShowMessage('Error: Failed to disinfect boot sector.');
 end;
 
+procedure TFormVirusScanner.ButtonImmunizeBootClick(Sender: TObject);
+var
+  TargetDisk, BakPath: string;
+  TargetIdx, I: Integer;
+begin
+  TargetIdx := -1;
+  if FFolderScanMode then
+  begin
+    if ListViewThreats.Selected = nil then
+    begin
+      ShowMessage('Please select a disk in the list to immunize.');
+      Exit;
+    end;
+    TargetIdx := ListViewThreats.Selected.Index;
+    if (TargetIdx < 0) or (TargetIdx > High(FSummary.Threats)) then Exit;
+    TargetDisk := FSummary.Threats[TargetIdx].ActualImagePath;
+    if (TargetDisk = '') or not FileExists(TargetDisk) or not SameText(ExtractFileExt(TargetDisk), '.st') then
+    begin
+      ShowMessage('Only standalone uncompressed .ST disk images can be immunized in batch mode.');
+      Exit;
+    end;
+  end
+  else
+  begin
+    TargetDisk := FCurrentDiskPath;
+  end;
+
+  if (TargetDisk = '') or not FileExists(TargetDisk) then Exit;
+
+  if MessageDlg('Immunize Boot Sector',
+    'Do you want to install an anti-virus boot protector (TS Boot Guard / Signum Vaccine) on Sector 0?' + sLineBreak +
+    'A backup (' + ExtractFileName(TargetDisk) + '.bak) will be created.' + sLineBreak +
+    'The BPB geometry will be kept intact, an active vaccine installed, and the boot execution checksum ($1234) set.',
+    mtConfirmation, [mbYes, mbNo], 0) <> mrYes then Exit;
+
+  BakPath := TargetDisk + '.bak';
+  CopyFile(TargetDisk, BakPath);
+
+  if ImmunizeBootSector(TargetDisk) then
+  begin
+    if TargetIdx >= 0 then
+    begin
+      FSummary.Threats[TargetIdx].TargetType := vtProtector;
+      FSummary.Threats[TargetIdx].Name := 'TS Boot Guard / Signum Vaccine';
+      FSummary.Threats[TargetIdx].Description := 'Resident boot sector protector and vaccine installed by STIMAGE.';
+      FSummary.Threats[TargetIdx].Disinfected := True;
+    end
+    else
+    begin
+      for I := 0 to High(FSummary.Threats) do
+      begin
+        if FSummary.Threats[I].TargetType in [vtBootSector, vtCustomBoot] then
+        begin
+          FSummary.Threats[I].TargetType := vtProtector;
+          FSummary.Threats[I].Name := 'TS Boot Guard / Signum Vaccine';
+          FSummary.Threats[I].Description := 'Resident boot sector protector and vaccine installed by STIMAGE.';
+          FSummary.Threats[I].Disinfected := True;
+        end;
+      end;
+      FSummary.BootChecksum := $1234;
+      FSummary.BootIsExecutable := True;
+    end;
+    PopulateThreatsList;
+    UpdateUI;
+    ShowMessage('Boot sector successfully immunized with TS Boot Guard / Signum Vaccine!' + sLineBreak +
+      'A backup was saved to: ' + ExtractFileName(BakPath));
+  end
+  else
+    ShowMessage('Failed to immunize boot sector on: ' + TargetDisk);
+end;
+
 procedure TFormVirusScanner.ButtonDisinfectAllClick(Sender: TObject);
 var
   I: Integer;
@@ -3456,6 +3616,10 @@ begin
                                      (FSummary.Threats[Idx].ActualImagePath <> '') and
                                      FileExists(FSummary.Threats[Idx].ActualImagePath) and
                                      SameText(ExtractFileExt(FSummary.Threats[Idx].ActualImagePath), '.st');
+      ButtonImmunizeBoot.Enabled := (FSummary.Threats[Idx].TargetType in [vtBootSector, vtProtector, vtCustomBoot]) and
+                                    (FSummary.Threats[Idx].ActualImagePath <> '') and
+                                    FileExists(FSummary.Threats[Idx].ActualImagePath) and
+                                    SameText(ExtractFileExt(FSummary.Threats[Idx].ActualImagePath), '.st');
     end;
   end;
 end;

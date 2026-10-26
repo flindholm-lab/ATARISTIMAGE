@@ -32,7 +32,7 @@ function IsDIMFile(const AFileName: string): Boolean;
 function GetDIMInfo(const ADIMFileName: string; out ASectorsPerTrack, ASides, AStartTrack, AEndTrack: Integer): Boolean;
 function UnpackDIMToStream(const ADIMFileName: string; AOutStream: TStream): Boolean;
 function UnpackDIMToST(const ADIMFileName, ASTFileName: string): Boolean;
-function PackSTToDIM(const ASTFileName, ADIMFileName: string; ASectorsPerTrack: Integer = 9; ASides: Integer = 2; ATracks: Integer = 80): Boolean;
+function PackSTToDIM(const ASTFileName, ADIMFileName: string; ASectorsPerTrack: Integer = 9; ASides: Integer = 2; ATracks: Integer = 80; ASparse: Boolean = False): Boolean;
 
 implementation
 
@@ -172,12 +172,30 @@ begin
   end;
 end;
 
+function IsSectorMarked(const Bitmap: TBytes; SecIdx: Integer; LsbFirst: Boolean): Boolean;
+var
+  ByteIdx, BitIdx: Integer;
+begin
+  ByteIdx := SecIdx div 8;
+  BitIdx := SecIdx mod 8;
+  if (ByteIdx < 0) or (ByteIdx >= Length(Bitmap)) then Exit(False);
+  if LsbFirst then
+    Result := (Bitmap[ByteIdx] and (1 shl BitIdx)) <> 0
+  else
+    Result := (Bitmap[ByteIdx] and ($80 shr BitIdx)) <> 0;
+end;
+
 function UnpackDIMToStream(const ADIMFileName: string; AOutStream: TStream): Boolean;
 var
   FS: TFileStream;
   Header: TDIMHeader;
   Buffer: array[0..65535] of Byte;
+  SectorBuf, ZeroSector: array[0..511] of Byte;
+  Bitmap: TBytes;
   BytesRead, TotalToCopy: Int64;
+  SidesCount, Spt, Tracks, TotalSectors, BitmapBytes: Integer;
+  SecIdx: Integer;
+  LsbFirst: Boolean;
 begin
   Result := False;
   if not FileExists(ADIMFileName) or (AOutStream = nil) then Exit;
@@ -188,9 +206,59 @@ begin
       if FS.Size < SizeOf(TDIMHeader) + 512 then Exit;
 
       FS.ReadBuffer(Header, SizeOf(Header));
-      // Raw sectors payload starts at offset 32 (SizeOf(TDIMHeader))
-      FS.Position := SizeOf(TDIMHeader);
 
+      // Handle Sparse DIM Images (SectorMode = 1: only used sectors stored with sector bitmap)
+      if Header.SectorMode = 1 then
+      begin
+        SidesCount := Header.Sides + 1;
+        if (SidesCount < 1) or (SidesCount > 2) then SidesCount := 2;
+        Spt := Header.SectorsPerTrack;
+        if (Spt < 8) or (Spt > 24) then Spt := 9;
+        Tracks := (Header.EndTrack - Header.StartTrack) + 1;
+        if (Tracks < 1) or (Tracks > 90) then Tracks := 80;
+        TotalSectors := Tracks * SidesCount * Spt;
+        BitmapBytes := (TotalSectors + 7) div 8;
+
+        if FS.Size >= SizeOf(TDIMHeader) + BitmapBytes then
+        begin
+          FS.Position := SizeOf(TDIMHeader);
+          SetLength(Bitmap, BitmapBytes);
+          FS.ReadBuffer(Bitmap[0], BitmapBytes);
+
+          // Sector 0 (boot sector) is always allocated. Detect whether bit ordering is LSB or MSB first:
+          if ((Bitmap[0] and $01) <> 0) and ((Bitmap[0] and $80) = 0) then
+            LsbFirst := True
+          else
+            LsbFirst := False;
+
+          FillChar(ZeroSector[0], SizeOf(ZeroSector), 0);
+          for SecIdx := 0 to TotalSectors - 1 do
+          begin
+            if IsSectorMarked(Bitmap, SecIdx, LsbFirst) then
+            begin
+              BytesRead := FS.Read(SectorBuf[0], 512);
+              if BytesRead = 512 then
+                AOutStream.WriteBuffer(SectorBuf[0], 512)
+              else
+              begin
+                if BytesRead > 0 then
+                  AOutStream.WriteBuffer(SectorBuf[0], BytesRead);
+                if BytesRead < 512 then
+                  AOutStream.WriteBuffer(ZeroSector[0], 512 - BytesRead);
+              end;
+            end
+            else
+            begin
+              AOutStream.WriteBuffer(ZeroSector[0], 512);
+            end;
+          end;
+          Result := True;
+          Exit;
+        end;
+      end;
+
+      // Standard Flat DIM Image (SectorMode = 0: all sectors present)
+      FS.Position := SizeOf(TDIMHeader);
       TotalToCopy := FS.Size - SizeOf(TDIMHeader);
       while TotalToCopy > 0 do
       begin
@@ -227,14 +295,17 @@ begin
   end;
 end;
 
-function PackSTToDIM(const ASTFileName, ADIMFileName: string; ASectorsPerTrack: Integer = 9; ASides: Integer = 2; ATracks: Integer = 80): Boolean;
+function PackSTToDIM(const ASTFileName, ADIMFileName: string; ASectorsPerTrack: Integer = 9; ASides: Integer = 2; ATracks: Integer = 80; ASparse: Boolean = False): Boolean;
 var
   InFS, OutFS: TFileStream;
   Header: TDIMHeader;
-  Sector0: array[0..511] of Byte;
+  Sector0, SectorBuf, ZeroSector: array[0..511] of Byte;
   Buffer: array[0..65535] of Byte;
-  BytesRead: Integer;
+  Bitmap: TBytes;
+  BytesRead, J, SecIdx, ByteIdx, BitIdx: Integer;
   SecPerTrackBPB, SidesBPB, TotalSecBPB: Word;
+  TotalSectors, BitmapBytes: Integer;
+  IsUsed: Boolean;
 begin
   Result := False;
   if not FileExists(ASTFileName) then Exit;
@@ -274,7 +345,7 @@ begin
       FillChar(Header, SizeOf(Header), 0);
       Header.ID := DIM_MAGIC; // 'BB'
       Header.AutoDetect := 1;  // Automatic configuration
-      Header.SectorMode := 0;  // All sectors included
+      Header.SectorMode := 0;  // All sectors included (updated below if ASparse)
       Header.Sides := Byte(Max(0, Min(1, ASides - 1)));
       Header.SectorsPerTrack := Byte(Max(8, Min(24, ASectorsPerTrack)));
       Header.StartTrack := 0;
@@ -286,6 +357,67 @@ begin
 
       // BPB in Atari/DOS boot sector is at offset $0B..$1C (18 bytes)
       Move(Sector0[$0B], Header.BPB[0], 18);
+
+      if ASparse then
+      begin
+        TotalSectors := ATracks * ASides * ASectorsPerTrack;
+        BitmapBytes := (TotalSectors + 7) div 8;
+        SetLength(Bitmap, BitmapBytes);
+        FillChar(Bitmap[0], BitmapBytes, 0);
+        Header.SectorMode := 1; // Sparse: used sectors only
+
+        // Pass 1: Build sector bitmap
+        InFS.Position := 0;
+        for SecIdx := 0 to TotalSectors - 1 do
+        begin
+          BytesRead := InFS.Read(SectorBuf[0], 512);
+          if BytesRead <= 0 then Break;
+          IsUsed := False;
+          for J := 0 to BytesRead - 1 do
+          begin
+            if SectorBuf[J] <> 0 then
+            begin
+              IsUsed := True;
+              Break;
+            end;
+          end;
+          if (SecIdx = 0) or IsUsed then
+          begin
+            ByteIdx := SecIdx div 8;
+            BitIdx := SecIdx mod 8;
+            Bitmap[ByteIdx] := Bitmap[ByteIdx] or Byte($80 shr BitIdx);
+          end;
+        end;
+
+        OutFS := TFileStream.Create(ADIMFileName, fmCreate);
+        try
+          OutFS.WriteBuffer(Header, SizeOf(Header));
+          OutFS.WriteBuffer(Bitmap[0], BitmapBytes);
+
+          // Pass 2: Write marked sectors
+          InFS.Position := 0;
+          for SecIdx := 0 to TotalSectors - 1 do
+          begin
+            BytesRead := InFS.Read(SectorBuf[0], 512);
+            if BytesRead <= 0 then Break;
+            ByteIdx := SecIdx div 8;
+            BitIdx := SecIdx mod 8;
+            if (Bitmap[ByteIdx] and ($80 shr BitIdx)) <> 0 then
+            begin
+              OutFS.WriteBuffer(SectorBuf[0], BytesRead);
+              if BytesRead < 512 then
+              begin
+                FillChar(ZeroSector[0], 512 - BytesRead, 0);
+                OutFS.WriteBuffer(ZeroSector[0], 512 - BytesRead);
+              end;
+            end;
+          end;
+          Result := True;
+        finally
+          OutFS.Free;
+        end;
+        Exit;
+      end;
 
       OutFS := TFileStream.Create(ADIMFileName, fmCreate);
       try

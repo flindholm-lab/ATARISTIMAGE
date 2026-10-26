@@ -6040,6 +6040,13 @@ begin
   try
     DetectedPacker := DetectPackerSignature(InBuf, InSize);
 
+    // If an unhandled or unsupported packer signature was detected, do not cascade into fallback decompressors
+    if (DetectedPacker <> 'None') and not IsPackerSupported(DetectedPacker) then
+    begin
+      SetLength(OutBuf, 0);
+      Exit(False);
+    end;
+
     // 1. Pack-Ice
   if Pos('Pack-Ice', DetectedPacker) > 0 then
   begin
@@ -6204,6 +6211,14 @@ begin
       Move(DummyVRAM[0], OutBuf[34], 32000);
       Exit(True);
     end;
+  end;
+
+  // If a specific packer signature was recognized but its specialized decompressor failed,
+  // do not cascade into unrelated fallback trial decrunchers to avoid false-positive corruption.
+  if DetectedPacker <> 'None' then
+  begin
+    SetLength(OutBuf, 0);
+    Exit(False);
   end;
 
   // Generic fallback tries if specific packer failed or was unknown

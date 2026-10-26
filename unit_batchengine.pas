@@ -356,6 +356,16 @@ begin
         FS.Free;
       end;
 
+      // Preserve authentic Atari ST file timestamp
+      if Entry.DateTime > 0 then
+      begin
+        try
+          FileSetDate(FullTargetFile, DateTimeToFileDate(Entry.DateTime));
+        except
+          // Ignore timestamp errors on host filesystems that do not support setting dates
+        end;
+      end;
+
       Inc(FilesExtracted);
       TotalBytes := TotalBytes + Length(RawBytes);
     except

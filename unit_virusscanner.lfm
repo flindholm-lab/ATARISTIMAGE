@@ -167,51 +167,61 @@ object FormVirusScanner: TFormVirusScanner
       Left = 312
       Height = 28
       Top = 36
-      Width = 145
-      Caption = 'Disinfect &Boot Sector'
+      Width = 110
+      Caption = 'Disinfect &Boot'
       Enabled = False
       TabOrder = 4
       OnClick = ButtonDisinfectBootClick
     end
-    object ButtonDisinfectAll: TButton
-      Left = 463
+    object ButtonImmunizeBoot: TButton
+      Left = 428
       Height = 28
       Top = 36
-      Width = 100
-      Caption = 'Disinfect &All'
+      Width = 110
+      Caption = '&Immunize Boot'
       Enabled = False
       TabOrder = 5
+      OnClick = ButtonImmunizeBootClick
+    end
+    object ButtonDisinfectAll: TButton
+      Left = 544
+      Height = 28
+      Top = 36
+      Width = 90
+      Caption = 'Disinfect &All'
+      Enabled = False
+      TabOrder = 6
       OnClick = ButtonDisinfectAllClick
     end
     object ButtonInspectHex: TButton
-      Left = 569
+      Left = 640
       Height = 28
       Top = 36
-      Width = 125
-      Caption = '&Inspect in Hex...'
+      Width = 95
+      Caption = '&Inspect Hex...'
       Enabled = False
-      TabOrder = 6
+      TabOrder = 7
       OnClick = ButtonInspectHexClick
     end
     object ButtonExportReport: TButton
-      Left = 702
+      Left = 741
       Height = 28
       Top = 36
-      Width = 125
+      Width = 105
       Caption = '&Export Report...'
       Enabled = False
-      TabOrder = 7
+      TabOrder = 8
       OnClick = ButtonExportReportClick
     end
     object ButtonClose: TButton
-      Left = 838
+      Left = 852
       Height = 28
       Top = 36
-      Width = 88
+      Width = 74
       Anchors = [akTop, akRight]
       Cancel = True
       Caption = '&Close'
-      TabOrder = 8
+      TabOrder = 9
       OnClick = ButtonCloseClick
     end
   end
