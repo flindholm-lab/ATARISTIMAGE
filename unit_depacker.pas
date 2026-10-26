@@ -265,8 +265,9 @@ begin
     Exit('Pack-Ice v2.3/v2.4 Raw Data');
   if CheckString(Buffer, Size, 0, 'TSM!') then
     Exit('Pack-Ice v2.4 (TSM!) Raw Data');
-  if CheckLong(Buffer, Size, 70, $610000A0) then
-    Exit('Pack-Ice v1.1 Executable Packer');
+  if (Size >= 70) and CheckWord(Buffer, Size, 0, $601A) and CheckWord(Buffer, Size, 60, $DBFC) and
+     ((FindEmbeddedSig(Buffer, Min(Size, 128), 'Pack-Fire') >= 0) or (FindEmbeddedSig(Buffer, Min(Size, 128), 'Axe/Delight') >= 0) or CheckLong(Buffer, Size, 70, $610000A0)) then
+    Exit('Pack-Fire (Axe/Delight) Executable');
   if CheckString(Buffer, Size, 452, 'Ice!') then
     Exit('Pack-Ice v2.2 Executable Packer');
   if CheckString(Buffer, Size, 448, 'ICE!') then
@@ -286,7 +287,7 @@ begin
   if CheckLong(Buffer, Size, 96, $610000B2) then
     Exit('Ivory Dragon Packer Executable');
 
-  // 13. FIRE Packer
+  // 13. FIRE Packer / Pack-Fire
   if (Size >= 40) and (FindEmbeddedSig(Buffer, Min(Size, 256), 'Pack-Fire') >= 0) then
     Exit('FIRE Packer v2.0 Executable');
   if CheckLastLongString(Buffer, Size, 'Fire') then
@@ -3462,6 +3463,242 @@ var
     end;
   end;
 
+  function DecompressPackFireAxe: Boolean;
+  var
+    ImmOffset, TrailerPos: LongWord;
+    A5, OutPos32: Integer;
+    BitBuf32, RawSize32: LongWord;
+    Bit, Bit2, BitSub, BitSub2: Byte;
+    LitCount32, D1: LongWord;
+    Mode32, SubMode32, Dist32, MatchLen32, Shift32: LongWord;
+    LastB: Byte;
+    K, VIdx: Integer;
+    const
+      VlcCmp: array[0..3] of Word = (3, 3, 7, $3FF);
+      VlcBits: array[0..3] of Byte = (2, 2, 3, 10);
+      VlcAdd: array[0..3] of Byte = (1, 4, 7, 14);
+
+    function GetBit32: Byte; inline;
+    var
+      W32: LongWord;
+    begin
+      Result := Byte((BitBuf32 shr 31) and 1);
+      BitBuf32 := (BitBuf32 shl 1) and $FFFFFFFF;
+      if BitBuf32 = 0 then
+      begin
+        if A5 < 4 then Exit(0);
+        Dec(A5, 4);
+        W32 := ReadBE32(InBuf, A5);
+        Result := Byte((W32 shr 31) and 1);
+        BitBuf32 := ((W32 shl 1) or 1) and $FFFFFFFF;
+      end;
+    end;
+
+    function ReadBits32(Count: Integer): LongWord;
+    var
+      J: Integer;
+    begin
+      Result := 0;
+      for J := 1 to Count do
+        Result := (Result shl 1) or LongWord(GetBit32);
+    end;
+
+    function ReadDistance32: LongWord;
+    var
+      Idx: LongWord;
+    begin
+      Idx := ReadBits32(2);
+      case Idx of
+        0: Result := ReadBits32(4);
+        1: Result := ReadBits32(8) + 16;
+        2: Result := ReadBits32(12) + 272;
+      else
+        Result := ReadBits32(16) + 4368;
+      end;
+    end;
+
+    function ReadOptDistance32(out ADist: LongWord): Boolean;
+    var
+      DVal: LongWord;
+    begin
+      DVal := ReadBits32(2);
+      if DVal = 0 then
+      begin
+        ADist := 0;
+        Exit(False);
+      end;
+      Dec(DVal);
+      case DVal of
+        0: ADist := ReadBits32(4);
+        1: ADist := ReadBits32(8) + 16;
+        2: ADist := ReadBits32(12) + 272;
+      else
+        ADist := ReadBits32(16) + 4368;
+      end;
+      Result := True;
+    end;
+
+    procedure CopyMatch32(ALen: Integer; ADist: LongWord);
+    var
+      Offset: LongWord;
+      J: Integer;
+    begin
+      Offset := ADist + LongWord(ALen);
+      for J := 1 to ALen do
+      begin
+        if (OutPos32 <= 0) or (OutPos32 + Integer(Offset) > Integer(RawSize32)) then
+          Exit;
+        Dec(OutPos32);
+        OutBuf[OutPos32] := OutBuf[OutPos32 + Offset];
+      end;
+    end;
+
+  begin
+    Result := False;
+    ImmOffset := ReadBE32(InBuf, 62);
+    TrailerPos := 28 + ImmOffset;
+    if (TrailerPos < 20) or (TrailerPos > LongWord(InSize)) then Exit(False);
+
+    A5 := Integer(TrailerPos);
+    if A5 < 8 then Exit(False);
+    Dec(A5, 4);
+    RawSize32 := ReadBE32(InBuf, A5);
+    Dec(A5, 4);
+    BitBuf32 := ReadBE32(InBuf, A5);
+
+    if (RawSize32 = 0) or (RawSize32 > 32 * 1024 * 1024) then Exit(False);
+
+    SetLength(OutBuf, RawSize32);
+    OutPos32 := Integer(RawSize32);
+
+    while OutPos32 > 0 do
+    begin
+      Bit := GetBit32;
+      if Bit = 1 then
+      begin
+        Bit2 := GetBit32;
+        if Bit2 = 0 then
+          LitCount32 := 1
+        else
+        begin
+          LitCount32 := 1;
+          for VIdx := 0 to 3 do
+          begin
+            D1 := ReadBits32(VlcBits[VIdx]);
+            if (D1 <> VlcCmp[VIdx]) or (VlcCmp[VIdx] = $3FF) then
+            begin
+              LitCount32 := D1 + VlcAdd[VIdx] + 1;
+              Break;
+            end;
+          end;
+        end;
+
+        for K := 1 to Integer(LitCount32) do
+        begin
+          if (A5 <= 0) or (OutPos32 <= 0) then Exit(False);
+          Dec(A5);
+          Dec(OutPos32);
+          OutBuf[OutPos32] := InBuf[A5];
+        end;
+      end;
+
+      if OutPos32 <= 0 then Break;
+
+      Mode32 := ReadBits32(2);
+      case Mode32 of
+        0:
+        begin
+          SubMode32 := ReadBits32(2);
+          if SubMode32 = 0 then
+          begin
+            Dist32 := ReadDistance32;
+            if Dist32 > 0 then
+            begin
+              if OutPos32 >= Integer(RawSize32) then Exit(False);
+              LastB := OutBuf[OutPos32];
+              for K := 0 to Integer(Dist32) do
+              begin
+                if OutPos32 <= 0 then Exit(False);
+                Dec(OutPos32);
+                OutBuf[OutPos32] := LastB;
+              end;
+            end;
+          end
+          else
+          begin
+            case SubMode32 of
+              1: MatchLen32 := ReadBits32(4) + 5;
+              2: MatchLen32 := ReadBits32(6) + 21;
+            else
+              MatchLen32 := ReadBits32(8) + 85;
+            end;
+            Dist32 := ReadDistance32;
+            CopyMatch32(MatchLen32, Dist32);
+          end;
+        end;
+
+        1:
+        begin
+          Dist32 := ReadBits32(8);
+          CopyMatch32(2, Dist32);
+        end;
+
+        2:
+        begin
+          if not ReadOptDistance32(Dist32) then
+          begin
+            if OutPos32 <= 0 then Exit(False);
+            Dec(OutPos32);
+            OutBuf[OutPos32] := 0;
+          end
+          else
+            CopyMatch32(3, Dist32);
+        end;
+
+        3:
+        begin
+          BitSub := GetBit32;
+          if BitSub = 0 then
+          begin
+            Shift32 := ReadBits32(3);
+            if OutPos32 <= 0 then Exit(False);
+            Dec(OutPos32);
+            OutBuf[OutPos32] := Byte(1 shl Shift32);
+          end
+          else
+          begin
+            BitSub2 := GetBit32;
+            if BitSub2 = 0 then
+            begin
+              if not ReadOptDistance32(Dist32) then
+              begin
+                if (OutPos32 <= 0) or (OutPos32 >= Integer(RawSize32)) then Exit(False);
+                LastB := OutBuf[OutPos32];
+                Dec(OutPos32);
+                OutBuf[OutPos32] := LastB;
+              end
+              else
+                CopyMatch32(4, Dist32);
+            end
+            else
+            begin
+              if not ReadOptDistance32(Dist32) then
+              begin
+                if OutPos32 <= 0 then Exit(False);
+                Dec(OutPos32);
+                OutBuf[OutPos32] := $FF;
+              end
+              else
+                CopyMatch32(5, Dist32);
+            end;
+          end;
+        end;
+      end;
+    end;
+
+    Result := (OutPos32 = 0);
+  end;
+
 var
   Bit1, Bit2, B1, B2: Byte;
   LitCount, Val: LongWord;
@@ -3476,6 +3713,15 @@ begin
   Result := False;
   SetLength(OutBuf, 0);
   if (InBuf = nil) or (InSize < 16) then Exit;
+
+  // 0. Check for Pack-Fire by Axe/Delight (trailer-based 32-bit executable)
+  if (InSize >= 70) and (InBuf[0] = $60) and (InBuf[1] = $1A) and
+     (CheckWord(InBuf, InSize, 60, $DBFC)) and
+     ((FindEmbeddedSig(InBuf, Min(InSize, 128), 'Pack-Fire') >= 0) or
+      (FindEmbeddedSig(InBuf, Min(InSize, 128), 'Axe/Delight') >= 0)) then
+  begin
+    if DecompressPackFireAxe then Exit(True);
+  end;
 
   HeaderFound := False;
   PayloadStart := 0;
