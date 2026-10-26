@@ -3931,7 +3931,10 @@ begin
     if (DataEnd <= LongWord(InSize)) and (DataEnd >= 12) and
        (CheckString(InBuf, InSize, DataEnd - 4, 'POPI') or CheckString(InBuf, InSize, DataEnd - 4, 'PUFF')) then
     begin
-      PayloadStart := 28 + Integer(TextLen);
+      if DataLen > 0 then
+        PayloadStart := 28 + Integer(TextLen)
+      else
+        PayloadStart := 28;
       PayloadEnd := Integer(DataEnd);
       if (InSize > $86) and (InBuf[$86] = $65) then
         BranchOnCarrySet := True;
