@@ -13,8 +13,11 @@ object FormFileViewer: TFormFileViewer
   Font.Height = -11
   Font.Name = 'Tahoma'
   Position = poScreenCenter
+  KeyPreview = True
   OnCreate = FormCreate
   OnDestroy = FormDestroy
+  OnKeyDown = FormKeyDown
+  OnResize = FormResize
   object PanelTop: TPanel
     Left = 0
     Height = 78
@@ -45,48 +48,48 @@ object FormFileViewer: TFormFileViewer
       ParentFont = False
     end
     object ButtonPlayAudio: TButton
-      Left = 148
+      Left = 94
       Height = 25
       Top = 8
       Width = 92
       Anchors = [akTop, akRight]
       Caption = '▶ Play Audio'
-      TabOrder = 7
+      TabOrder = 8
       Visible = False
       OnClick = ButtonPlayAudioClick
     end
     object ButtonHexMode: TButton
-      Left = 246
+      Left = 190
       Height = 25
       Top = 8
-      Width = 66
+      Width = 64
       Anchors = [akTop, akRight]
       Caption = 'Hex View'
       TabOrder = 0
       OnClick = ButtonHexModeClick
     end
     object ButtonTextMode: TButton
-      Left = 316
+      Left = 258
       Height = 25
       Top = 8
-      Width = 66
+      Width = 64
       Anchors = [akTop, akRight]
       Caption = 'Text View'
       TabOrder = 1
       OnClick = ButtonTextModeClick
     end
     object ButtonImageMode: TButton
-      Left = 386
+      Left = 326
       Height = 25
       Top = 8
-      Width = 82
+      Width = 80
       Anchors = [akTop, akRight]
       Caption = 'Picture View'
       TabOrder = 2
       OnClick = ButtonImageModeClick
     end
     object ButtonZoom: TButton
-      Left = 472
+      Left = 412
       Height = 25
       Top = 8
       Width = 68
@@ -97,53 +100,76 @@ object FormFileViewer: TFormFileViewer
       OnClick = ButtonZoomClick
     end
     object ButtonDepack: TButton
-      Left = 544
+      Left = 448
       Height = 25
       Top = 8
-      Width = 96
+      Width = 98
       Anchors = [akTop, akRight]
       Caption = 'View Depacked'
       TabOrder = 4
       OnClick = ButtonDepackClick
     end
-    object ButtonSaveCopy: TButton
-      Left = 644
-      Height = 25
-      Top = 8
-      Width = 80
-      Anchors = [akTop, akRight]
-      Caption = 'Save File...'
-      TabOrder = 5
-      OnClick = ButtonSaveCopyClick
-    end
     object ButtonSaveDepacked: TButton
-      Left = 728
+      Left = 550
       Height = 25
       Top = 8
       Width = 104
       Anchors = [akTop, akRight]
       Caption = 'Save Depacked...'
-      TabOrder = 6
+      TabOrder = 5
       OnClick = ButtonSaveDepackedClick
     end
+    object ButtonSaveCopy: TButton
+      Left = 658
+      Height = 25
+      Top = 8
+      Width = 82
+      Anchors = [akTop, akRight]
+      Caption = 'Save File...'
+      TabOrder = 6
+      OnClick = ButtonSaveCopyClick
+    end
+    object ButtonFind: TButton
+      Left = 744
+      Height = 25
+      Top = 8
+      Width = 84
+      Anchors = [akTop, akRight]
+      Caption = '🔍 Find...'
+      TabOrder = 7
+      OnClick = ButtonFindClick
+    end
+    object CheckBoxAtariFont: TCheckBox
+      Left = 600
+      Height = 22
+      Top = 44
+      Width = 120
+      Anchors = [akTop, akRight]
+      Caption = 'Atari ST Font'
+      Checked = True
+      State = cbChecked
+      TabOrder = 9
+      Visible = False
+      OnChange = CheckBoxAtariFontChange
+    end
     object CheckBoxWordWrap: TCheckBox
-      Left = 728
+      Left = 724
       Height = 22
       Top = 44
       Width = 104
       Anchors = [akTop, akRight]
       Caption = 'Word Wrap'
-      TabOrder = 8
+      TabOrder = 10
       Visible = False
       OnChange = CheckBoxWordWrapChange
     end
   end
   object MemoContent: TMemo
     Left = 8
-    Height = 472
+    Height = 440
     Top = 80
     Width = 824
-    Anchors = [akTop, akLeft, akRight, akBottom]
+    Anchors = [akTop, akLeft, akRight]
     Font.Color = clWindowText
     Font.Height = -12
     Font.Name = 'Courier New'
@@ -155,10 +181,10 @@ object FormFileViewer: TFormFileViewer
   end
   object ScrollBoxImage: TScrollBox
     Left = 8
-    Height = 472
+    Height = 440
     Top = 80
     Width = 824
-    Anchors = [akTop, akLeft, akRight, akBottom]
+    Anchors = [akTop, akLeft, akRight]
     Color = 2763306
     ParentColor = False
     TabOrder = 2
@@ -171,6 +197,86 @@ object FormFileViewer: TFormFileViewer
       Center = True
       Proportional = True
       Stretch = True
+    end
+  end
+  object PanelSearch: TPanel
+    Left = 0
+    Height = 36
+    Top = 524
+    Width = 840
+    Align = alBottom
+    BevelOuter = bvNone
+    ClientHeight = 36
+    ClientWidth = 840
+    TabOrder = 3
+    Visible = False
+    object LabelFindPrompt: TLabel
+      Left = 12
+      Height = 14
+      Top = 10
+      Width = 25
+      Caption = 'Find:'
+      ParentFont = False
+    end
+    object EditSearch: TEdit
+      Left = 42
+      Height = 23
+      Top = 6
+      Width = 180
+      TabOrder = 0
+      OnKeyDown = EditSearchKeyDown
+    end
+    object ButtonFindNext: TButton
+      Left = 228
+      Height = 24
+      Top = 6
+      Width = 72
+      Caption = 'Find Next'
+      TabOrder = 1
+      OnClick = ButtonFindNextClick
+    end
+    object ButtonFindPrev: TButton
+      Left = 304
+      Height = 24
+      Top = 6
+      Width = 72
+      Caption = 'Find Prev'
+      TabOrder = 2
+      OnClick = ButtonFindPrevClick
+    end
+    object CheckBoxMatchCase: TCheckBox
+      Left = 384
+      Height = 22
+      Top = 7
+      Width = 84
+      Caption = 'Match Case'
+      TabOrder = 3
+    end
+    object CheckBoxHexSearch: TCheckBox
+      Left = 476
+      Height = 22
+      Top = 7
+      Width = 80
+      Caption = 'Hex Bytes'
+      TabOrder = 4
+    end
+    object LabelSearchStatus: TLabel
+      Left = 566
+      Height = 14
+      Top = 10
+      Width = 230
+      Caption = ''
+      ParentFont = False
+    end
+    object ButtonCloseSearch: TButton
+      Left = 808
+      Height = 22
+      Top = 7
+      Width = 24
+      Anchors = [akTop, akRight]
+      Caption = '✕'
+      TabOrder = 5
+      OnClick = ButtonCloseSearchClick
     end
   end
   object SaveDialogExport: TSaveDialog

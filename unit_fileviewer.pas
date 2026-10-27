@@ -6,6 +6,7 @@ interface
 
 uses
   Classes, SysUtils, Forms, Controls, Graphics, Dialogs, StdCtrls, ExtCtrls, Math,
+  StrUtils, LCLType,
   unit_depacker, unit_ataripic, unit_atariaudio;
 
 type
@@ -22,15 +23,36 @@ type
     ButtonSaveCopy: TButton;
     ButtonSaveDepacked: TButton;
     ButtonPlayAudio: TButton;
+    ButtonFind: TButton;
+    CheckBoxAtariFont: TCheckBox;
     CheckBoxWordWrap: TCheckBox;
     MemoContent: TMemo;
     ScrollBoxImage: TScrollBox;
     ImagePicture: TImage;
     SaveDialogExport: TSaveDialog;
 
+    // Search Panel components
+    PanelSearch: TPanel;
+    LabelFindPrompt: TLabel;
+    EditSearch: TEdit;
+    ButtonFindNext: TButton;
+    ButtonFindPrev: TButton;
+    CheckBoxMatchCase: TCheckBox;
+    CheckBoxHexSearch: TCheckBox;
+    LabelSearchStatus: TLabel;
+    ButtonCloseSearch: TButton;
+
     procedure FormCreate(Sender: TObject);
     procedure FormDestroy(Sender: TObject);
+    procedure FormKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
+    procedure FormResize(Sender: TObject);
     procedure CheckBoxWordWrapChange(Sender: TObject);
+    procedure CheckBoxAtariFontChange(Sender: TObject);
+    procedure ButtonFindClick(Sender: TObject);
+    procedure ButtonCloseSearchClick(Sender: TObject);
+    procedure ButtonFindNextClick(Sender: TObject);
+    procedure ButtonFindPrevClick(Sender: TObject);
+    procedure EditSearchKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
     procedure ButtonHexModeClick(Sender: TObject);
     procedure ButtonTextModeClick(Sender: TObject);
     procedure ButtonImageModeClick(Sender: TObject);
@@ -50,6 +72,7 @@ type
     FFileName: string;
     FStartCluster: Word;
     FCurrentMode: Integer; // 0 = Hex, 1 = Text, 2 = Picture
+    FLastSearchOffset: Integer;
 
     FPictureBitmap: Graphics.TBitmap;
     FPictureFormatDesc: string;
@@ -63,6 +86,9 @@ type
     FHasAudio: Boolean;
     FIsAudioPlaying: Boolean;
 
+    procedure UpdateViewerLayout;
+    procedure PerformTextSearch(ForwardDir: Boolean);
+    procedure PerformHexSearch(ForwardDir: Boolean);
     procedure RenderHexView;
     procedure RenderTextView;
     procedure RenderImageView;
@@ -97,6 +123,446 @@ end;
 
 { TFormFileViewer }
 
+const
+  ATARI_ST_UTF8: array[0..255] of string = (
+    { 00 } ' ',
+    { 01 } '☺', '☻', '♥', '♦', '♣', '♠', '•', '◘', '    ', '',
+    { 0B } '♂', '♀', '', '♫', '☼',
+    { 10 } '►', '◄', '↕', '‼', '¶', '§', '▬', '↨', '↑', '↓', '→', '←', '∟', '↔', '▲', '▼',
+    { 20 } ' ', '!', '"', '#', '$', '%', '&', '''', '(', ')', '*', '+', ',', '-', '.', '/',
+    { 30 } '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', ':', ';', '<', '=', '>', '?',
+    { 40 } '@', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O',
+    { 50 } 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', '[', '\', ']', '^', '_',
+    { 60 } '`', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o',
+    { 70 } 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z', '{', '|', '}', '~', '⌂',
+    { 80 } 'Ç', 'ü', 'é', 'â', 'ä', 'à', 'å', 'ç', 'ê', 'ë', 'è', 'ï', 'î', 'ì', 'Ä', 'Å',
+    { 90 } 'É', 'æ', 'Æ', 'ô', 'ö', 'ò', 'û', 'ù', 'ÿ', 'Ö', 'Ü', '¢', '£', '¥', 'ß', 'ƒ',
+    { A0 } 'á', 'í', 'ó', 'ú', 'ñ', 'Ñ', 'ª', 'º', '¿', '⌐', '¬', '½', '¼', '¡', '«', '»',
+    { B0 } '░', '▒', '▓', '│', '┤', '╡', '╢', '╖', '╕', '╣', '║', '╗', '╝', '╜', '╛', '┐',
+    { C0 } '└', '┴', '┬', '├', '─', '┼', '╞', '╟', '╚', '╔', '╩', '╦', '╠', '═', '╬', '╧',
+    { D0 } '╨', '╤', '╥', '╙', '╘', '╒', '╓', '╫', '╪', '┘', '┌', '█', '▄', '▌', '▐', '▀',
+    { E0 } 'α', 'ß', 'Γ', 'π', 'Σ', 'σ', 'µ', 'τ', 'Φ', 'Θ', 'Ω', 'δ', '∞', '∅', '∈', '∩',
+    { F0 } '≡', '±', '≥', '≤', '⌠', '⌡', '÷', '≈', '°', '•', '·', '√', 'ⁿ', '²', '³', ' '
+  );
+
+function AtariSTByteToUTF8(B: Byte): string;
+begin
+  Result := ATARI_ST_UTF8[B];
+end;
+
+procedure TFormFileViewer.UpdateViewerLayout;
+var
+  BottomMargin: Integer;
+begin
+  if PanelSearch.Visible then
+    BottomMargin := PanelSearch.Height + 8
+  else
+    BottomMargin := 8;
+
+  MemoContent.Height := Max(50, ClientHeight - MemoContent.Top - BottomMargin);
+  ScrollBoxImage.Height := MemoContent.Height;
+end;
+
+procedure TFormFileViewer.FormResize(Sender: TObject);
+begin
+  UpdateViewerLayout;
+end;
+
+procedure TFormFileViewer.FormKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
+begin
+  if (Key = VK_F) and (ssCtrl in Shift) then
+  begin
+    Key := 0;
+    PanelSearch.Visible := True;
+    UpdateViewerLayout;
+    EditSearch.SetFocus;
+    EditSearch.SelectAll;
+    Exit;
+  end;
+
+  if Key = VK_F3 then
+  begin
+    Key := 0;
+    if ssShift in Shift then
+      ButtonFindPrevClick(nil)
+    else
+      ButtonFindNextClick(nil);
+    Exit;
+  end;
+
+  if (Key = VK_ESCAPE) and PanelSearch.Visible then
+  begin
+    Key := 0;
+    PanelSearch.Visible := False;
+    UpdateViewerLayout;
+    Exit;
+  end;
+end;
+
+procedure TFormFileViewer.ButtonFindClick(Sender: TObject);
+begin
+  PanelSearch.Visible := not PanelSearch.Visible;
+  UpdateViewerLayout;
+  if PanelSearch.Visible then
+  begin
+    EditSearch.SetFocus;
+    EditSearch.SelectAll;
+  end;
+end;
+
+procedure TFormFileViewer.ButtonCloseSearchClick(Sender: TObject);
+begin
+  PanelSearch.Visible := False;
+  UpdateViewerLayout;
+end;
+
+procedure TFormFileViewer.EditSearchKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
+begin
+  if Key = VK_RETURN then
+  begin
+    Key := 0;
+    if ssShift in Shift then
+      ButtonFindPrevClick(nil)
+    else
+      ButtonFindNextClick(nil);
+  end
+  else if Key = VK_ESCAPE then
+  begin
+    Key := 0;
+    PanelSearch.Visible := False;
+    UpdateViewerLayout;
+  end;
+end;
+
+procedure TFormFileViewer.PerformTextSearch(ForwardDir: Boolean);
+var
+  FullText, Pattern: string;
+  StartPos, FoundPos, SearchLen: Integer;
+  LineIdx, ColIdx, I: Integer;
+begin
+  Pattern := EditSearch.Text;
+  if Pattern = '' then Exit;
+
+  FullText := MemoContent.Text;
+  if Length(FullText) = 0 then
+  begin
+    LabelSearchStatus.Caption := 'File is empty.';
+    Exit;
+  end;
+
+  SearchLen := Length(Pattern);
+  if not CheckBoxMatchCase.Checked then
+  begin
+    FullText := UpperCase(FullText);
+    Pattern := UpperCase(Pattern);
+  end;
+
+  if ForwardDir then
+  begin
+    StartPos := MemoContent.SelStart + MemoContent.SelLength + 1;
+    if StartPos < 1 then StartPos := 1;
+    FoundPos := PosEx(Pattern, FullText, StartPos);
+
+    if (FoundPos = 0) and (StartPos > 1) then
+    begin
+      FoundPos := PosEx(Pattern, FullText, 1);
+      if FoundPos > 0 then
+        LabelSearchStatus.Caption := 'Wrapped to start of file'
+      else
+        LabelSearchStatus.Caption := 'Text not found.';
+    end;
+  end
+  else
+  begin
+    StartPos := MemoContent.SelStart;
+    if StartPos > Length(FullText) - SearchLen + 1 then
+      StartPos := Length(FullText) - SearchLen + 1;
+    FoundPos := 0;
+    for I := StartPos downto 1 do
+    begin
+      if Copy(FullText, I, SearchLen) = Pattern then
+      begin
+        FoundPos := I;
+        Break;
+      end;
+    end;
+
+    if (FoundPos = 0) and (StartPos < Length(FullText)) then
+    begin
+      for I := Length(FullText) - SearchLen + 1 downto StartPos + 1 do
+      begin
+        if Copy(FullText, I, SearchLen) = Pattern then
+        begin
+          FoundPos := I;
+          LabelSearchStatus.Caption := 'Wrapped to end of file';
+          Break;
+        end;
+      end;
+      if FoundPos = 0 then
+        LabelSearchStatus.Caption := 'Text not found.';
+    end;
+  end;
+
+  if FoundPos > 0 then
+  begin
+    MemoContent.SelStart := FoundPos - 1;
+    MemoContent.SelLength := SearchLen;
+    MemoContent.SetFocus;
+
+    LineIdx := 1;
+    ColIdx := 1;
+    for I := 1 to FoundPos - 1 do
+    begin
+      if FullText[I] = #10 then
+      begin
+        Inc(LineIdx);
+        ColIdx := 1;
+      end
+      else if FullText[I] <> #13 then
+        Inc(ColIdx);
+    end;
+
+    if Pos('Wrapped', LabelSearchStatus.Caption) = 0 then
+      LabelSearchStatus.Caption := Format('Match found at line %d, col %d', [LineIdx, ColIdx]);
+  end
+  else
+    LabelSearchStatus.Caption := 'Pattern not found.';
+end;
+
+procedure TFormFileViewer.PerformHexSearch(ForwardDir: Boolean);
+var
+  SearchPattern: TBytes;
+  PatternStr, CleanHex, OffPrefix, MemoTxt: string;
+  I, J, StartByte, FoundByte, DataLen, PatLen: Integer;
+  Matched: Boolean;
+  HexByteVal, FoundLineCharPos: Integer;
+begin
+  PatternStr := EditSearch.Text;
+  if Trim(PatternStr) = '' then Exit;
+
+  DataLen := Length(FData);
+  if DataLen = 0 then
+  begin
+    LabelSearchStatus.Caption := 'File is empty.';
+    Exit;
+  end;
+
+  if CheckBoxHexSearch.Checked then
+  begin
+    CleanHex := '';
+    for I := 1 to Length(PatternStr) do
+    begin
+      if PatternStr[I] in ['0'..'9', 'A'..'F', 'a'..'f'] then
+        CleanHex := CleanHex + PatternStr[I];
+    end;
+    if (Length(CleanHex) = 0) or ((Length(CleanHex) mod 2) <> 0) then
+    begin
+      LabelSearchStatus.Caption := 'Enter hex pairs (e.g. "60 1A").';
+      Exit;
+    end;
+    PatLen := Length(CleanHex) div 2;
+    SetLength(SearchPattern, PatLen);
+    for I := 0 to PatLen - 1 do
+    begin
+      HexByteVal := StrToIntDef('$' + Copy(CleanHex, I * 2 + 1, 2), -1);
+      if HexByteVal = -1 then
+      begin
+        LabelSearchStatus.Caption := 'Invalid hex characters.';
+        Exit;
+      end;
+      SearchPattern[I] := Byte(HexByteVal);
+    end;
+  end
+  else
+  begin
+    PatLen := Length(PatternStr);
+    SetLength(SearchPattern, PatLen);
+    for I := 0 to PatLen - 1 do
+      SearchPattern[I] := Byte(PatternStr[I + 1]);
+  end;
+
+  if PatLen > DataLen then
+  begin
+    LabelSearchStatus.Caption := 'Pattern longer than file data.';
+    Exit;
+  end;
+
+  FoundByte := -1;
+  if ForwardDir then
+  begin
+    StartByte := FLastSearchOffset + 1;
+    if (StartByte < 0) or (StartByte > DataLen - PatLen) then
+      StartByte := 0;
+
+    for I := StartByte to DataLen - PatLen do
+    begin
+      Matched := True;
+      for J := 0 to PatLen - 1 do
+      begin
+        if CheckBoxHexSearch.Checked or CheckBoxMatchCase.Checked then
+        begin
+          if FData[I + J] <> SearchPattern[J] then
+          begin
+            Matched := False;
+            Break;
+          end;
+        end
+        else
+        begin
+          if UpCase(Char(FData[I + J])) <> UpCase(Char(SearchPattern[J])) then
+          begin
+            Matched := False;
+            Break;
+          end;
+        end;
+      end;
+      if Matched then
+      begin
+        FoundByte := I;
+        Break;
+      end;
+    end;
+
+    if (FoundByte = -1) and (StartByte > 0) then
+    begin
+      for I := 0 to StartByte - 1 do
+      begin
+        Matched := True;
+        for J := 0 to PatLen - 1 do
+        begin
+          if CheckBoxHexSearch.Checked or CheckBoxMatchCase.Checked then
+          begin
+            if FData[I + J] <> SearchPattern[J] then
+            begin
+              Matched := False;
+              Break;
+            end;
+          end
+          else
+          begin
+            if UpCase(Char(FData[I + J])) <> UpCase(Char(SearchPattern[J])) then
+            begin
+              Matched := False;
+              Break;
+            end;
+          end;
+        end;
+        if Matched then
+        begin
+          FoundByte := I;
+          LabelSearchStatus.Caption := 'Wrapped to start of file';
+          Break;
+        end;
+      end;
+    end;
+  end
+  else
+  begin
+    StartByte := FLastSearchOffset - 1;
+    if StartByte > DataLen - PatLen then
+      StartByte := DataLen - PatLen;
+    if StartByte < 0 then
+      StartByte := DataLen - PatLen;
+
+    for I := StartByte downto 0 do
+    begin
+      Matched := True;
+      for J := 0 to PatLen - 1 do
+      begin
+        if CheckBoxHexSearch.Checked or CheckBoxMatchCase.Checked then
+        begin
+          if FData[I + J] <> SearchPattern[J] then
+          begin
+            Matched := False;
+            Break;
+          end;
+        end
+        else
+        begin
+          if UpCase(Char(FData[I + J])) <> UpCase(Char(SearchPattern[J])) then
+          begin
+            Matched := False;
+            Break;
+          end;
+        end;
+      end;
+      if Matched then
+      begin
+        FoundByte := I;
+        Break;
+      end;
+    end;
+
+    if (FoundByte = -1) and (StartByte < DataLen - PatLen) then
+    begin
+      for I := DataLen - PatLen downto StartByte + 1 do
+      begin
+        Matched := True;
+        for J := 0 to PatLen - 1 do
+        begin
+          if CheckBoxHexSearch.Checked or CheckBoxMatchCase.Checked then
+          begin
+            if FData[I + J] <> SearchPattern[J] then
+            begin
+              Matched := False;
+              Break;
+            end;
+          end
+          else
+          begin
+            if UpCase(Char(FData[I + J])) <> UpCase(Char(SearchPattern[J])) then
+            begin
+              Matched := False;
+              Break;
+            end;
+          end;
+        end;
+        if Matched then
+        begin
+          FoundByte := I;
+          LabelSearchStatus.Caption := 'Wrapped to end of file';
+          Break;
+        end;
+      end;
+    end;
+  end;
+
+  if FoundByte <> -1 then
+  begin
+    FLastSearchOffset := FoundByte;
+    if Pos('Wrapped', LabelSearchStatus.Caption) = 0 then
+      LabelSearchStatus.Caption := Format('Match found at byte offset $%X (%d)', [FoundByte, FoundByte]);
+
+    OffPrefix := IntToHex(FoundByte and not $0F, 8) + ':';
+    MemoTxt := MemoContent.Text;
+    FoundLineCharPos := Pos(OffPrefix, MemoTxt);
+    if FoundLineCharPos > 0 then
+    begin
+      MemoContent.SelStart := FoundLineCharPos - 1;
+      MemoContent.SelLength := 79;
+      MemoContent.SetFocus;
+    end;
+  end
+  else
+    LabelSearchStatus.Caption := 'Pattern not found.';
+end;
+
+procedure TFormFileViewer.ButtonFindNextClick(Sender: TObject);
+begin
+  if FCurrentMode = 0 then
+    PerformHexSearch(True)
+  else if FCurrentMode = 1 then
+    PerformTextSearch(True);
+end;
+
+procedure TFormFileViewer.ButtonFindPrevClick(Sender: TObject);
+begin
+  if FCurrentMode = 0 then
+    PerformHexSearch(False)
+  else if FCurrentMode = 1 then
+    PerformTextSearch(False);
+end;
+
 procedure TFormFileViewer.FormCreate(Sender: TObject);
 begin
   FCurrentMode := 0; // Default to Hex View
@@ -108,8 +574,13 @@ begin
   FZoomMode := 0; // Default to 2x zoom
   FHasAudio := False;
   FIsAudioPlaying := False;
+  FLastSearchOffset := -1;
   CheckBoxWordWrap.Visible := False;
   CheckBoxWordWrap.Checked := False;
+  CheckBoxAtariFont.Visible := False;
+  CheckBoxAtariFont.Checked := True;
+  PanelSearch.Visible := False;
+  KeyPreview := True;
 end;
 
 procedure TFormFileViewer.FormDestroy(Sender: TObject);
@@ -134,15 +605,26 @@ begin
   end;
 end;
 
+procedure TFormFileViewer.CheckBoxAtariFontChange(Sender: TObject);
+begin
+  if FCurrentMode = 1 then
+    RenderTextView;
+end;
+
 procedure TFormFileViewer.ButtonHexModeClick(Sender: TObject);
 begin
   FCurrentMode := 0;
   ScrollBoxImage.Visible := False;
   ButtonZoom.Visible := False;
   CheckBoxWordWrap.Visible := False;
+  CheckBoxAtariFont.Visible := False;
+  ButtonFind.Visible := True;
+  CheckBoxHexSearch.Visible := True;
+  CheckBoxHexSearch.Enabled := True;
   MemoContent.Visible := True;
   MemoContent.WordWrap := False;
   MemoContent.ScrollBars := ssBoth;
+  UpdateViewerLayout;
   RenderHexView;
 end;
 
@@ -153,11 +635,16 @@ begin
   ButtonZoom.Visible := False;
   MemoContent.Visible := True;
   CheckBoxWordWrap.Visible := True;
+  CheckBoxAtariFont.Visible := True;
+  ButtonFind.Visible := True;
+  CheckBoxHexSearch.Visible := False;
+  CheckBoxHexSearch.Checked := False;
   MemoContent.WordWrap := CheckBoxWordWrap.Checked;
   if CheckBoxWordWrap.Checked then
     MemoContent.ScrollBars := ssVertical
   else
     MemoContent.ScrollBars := ssBoth;
+  UpdateViewerLayout;
   RenderTextView;
 end;
 
@@ -167,8 +654,12 @@ begin
   FCurrentMode := 2;
   MemoContent.Visible := False;
   CheckBoxWordWrap.Visible := False;
+  CheckBoxAtariFont.Visible := False;
+  ButtonFind.Visible := False;
+  PanelSearch.Visible := False;
   ScrollBoxImage.Visible := True;
   ButtonZoom.Visible := True;
+  UpdateViewerLayout;
   RenderImageView;
 end;
 
@@ -834,9 +1325,13 @@ begin
         begin
           LineStr := LineStr + '    ';
         end
+        else if CheckBoxAtariFont.Checked then
+        begin
+          LineStr := LineStr + AtariSTByteToUTF8(B);
+        end
         else if (B >= 128) then
         begin
-          // Basic Atari ST / Latin-1 mapping
+          // Basic Latin-1 mapping
           LineStr := LineStr + Char(B);
         end
         else
@@ -927,6 +1422,10 @@ begin
   begin
     FCurrentMode := 2; // Picture View
     CheckBoxWordWrap.Visible := False;
+    CheckBoxAtariFont.Visible := False;
+    ButtonFind.Visible := False;
+    PanelSearch.Visible := False;
+    UpdateViewerLayout;
     RenderImageView;
   end
   else
@@ -935,9 +1434,14 @@ begin
     ScrollBoxImage.Visible := False;
     ButtonZoom.Visible := False;
     CheckBoxWordWrap.Visible := False;
+    CheckBoxAtariFont.Visible := False;
+    ButtonFind.Visible := True;
+    CheckBoxHexSearch.Visible := True;
+    CheckBoxHexSearch.Enabled := True;
     MemoContent.Visible := True;
     MemoContent.WordWrap := False;
     MemoContent.ScrollBars := ssBoth;
+    UpdateViewerLayout;
     RenderHexView;
   end;
 end;

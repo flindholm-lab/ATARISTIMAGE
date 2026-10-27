@@ -229,6 +229,7 @@ type
     // Lists for tracking files, directories, and pending operations
     FFilePaths: TStringList;          // Files to be added to the image (host paths)
     FFileDestDirs: TStringList;       // Target directory inside the image for each file in FFilePaths
+    FFileTargetNames: TStringList;    // Target unique 8.3 filename for each file in FFilePaths
     FFilesToDelete: TStringList;      // Files marked for deletion
     FDisplayItems: TStringList;       // Items displayed in the current directory
     FNewDirectories: TStringList;     // Directories to be created
@@ -301,7 +302,7 @@ type
       // Finds a free directory entry for a new file or directory
     function FindFreeClusters(const AImageFile: TFileStream; const ACount: Int64): TStringList;
       // Finds free clusters for file allocation
-    procedure WriteFileToImage(const AImageFile: TFileStream; const AFileName: string; const ASourceFile: TFileStream; const ADestPath: string);
+    procedure WriteFileToImage(const AImageFile: TFileStream; const AFileName: string; const ASourceFile: TFileStream; const ADestPath: string; const ATargetName: string = '');
       // Writes a file to the image
     procedure GetFATDetails(const AImageFile: TFileStream);
       // Reads and parses the FAT12 boot sector and calculates layout
@@ -335,6 +336,8 @@ type
       // Recursively scans host directory and stages all files/subdirs
     function SanitizeDOSName(const AName: string; IsDir: Boolean): string;
       // Sanitizes a name to conform to Atari TOS FAT12 8.3 constraints
+    function GenerateUniqueDOSName(const AName: string; IsDir: Boolean; const ADestDir: string): string;
+      // Generates a collision-free 8.3 DOS name with numeric tail (~1..~99)
     function IsDirectChild(const AParentPath, AFullPath: string; out AChildName: string): Boolean;
       // Checks if AFullPath is a direct child of AParentPath
     procedure CreateBlankDiskImage(const ATargetFile: string; ASides, ASectorsPerTrack, ATracks, ARootEntries, ASectorsPerCluster: Integer);
@@ -632,6 +635,7 @@ begin
   CloseArchiveMode;
   FFilePaths.Clear;
   FFileDestDirs.Clear;
+  FFileTargetNames.Clear;
   FNewDirectories.Clear;
   FFilesToDelete.Clear;
   FDirsToDelete.Clear;
@@ -728,6 +732,133 @@ begin
 end;
 
 {------------------------------------------------------------------
+  Function: GenerateUniqueDOSName
+  Purpose:  Generates a collision-free 8.3 DOS name by applying standard
+            numeric tail generation (~1..~99) if the sanitized name
+            already exists on disk or among staged items.
+ ------------------------------------------------------------------}
+function TForm1.GenerateUniqueDOSName(const AName: string; IsDir: Boolean; const ADestDir: string): string;
+var
+  CleanBase, Ext, Candidate, Suffix: string;
+  DotPos, N, MaxBaseLen: Integer;
+
+  function NameExistsInDest(const CheckName: string): Boolean;
+  var
+    J: Integer;
+    CheckFull, StagedFull, StagedTarget: string;
+    DirCluster: Int64;
+    TempFs: TFileStream;
+  begin
+    Result := False;
+    CheckFull := GetFullItemPath(ADestDir, CheckName);
+
+    // 1. Check against already staged files
+    for J := 0 to FFilePaths.Count - 1 do
+    begin
+      if (J < FFileDestDirs.Count) and SameText(FFileDestDirs[J], ADestDir) then
+      begin
+        if (J < FFileTargetNames.Count) and (FFileTargetNames[J] <> '') then
+          StagedTarget := FFileTargetNames[J]
+        else
+          StagedTarget := ExtractFileName(FFilePaths[J]);
+
+        if SameText(StagedTarget, CheckName) or SameText(SanitizeDOSName(StagedTarget, False), CheckName) then
+          Exit(True);
+      end;
+    end;
+
+    // 2. Check against already staged new directories
+    for J := 0 to FNewDirectories.Count - 1 do
+    begin
+      StagedFull := FNewDirectories[J];
+      if StagedFull.EndsWith('\') then
+        StagedFull := Copy(StagedFull, 1, Length(StagedFull) - 1);
+      if SameText(StagedFull, CheckFull) or SameText(ExtractFileName(StagedFull), CheckName) then
+        Exit(True);
+    end;
+
+    // 3. Check against current directory display items if matching FCurrentPath
+    if SameText(ADestDir, FCurrentPath) then
+    begin
+      for J := 0 to High(FDiskItemsRaw) do
+      begin
+        if not FDiskItemsRaw[J].IsDeleted and SameText(FDiskItemsRaw[J].CleanName, CheckName) then
+          Exit(True);
+      end;
+    end
+    else if (FImagePath <> '') and FileExists(FImagePath) then
+    begin
+      // 4. Check on disk in arbitrary target directory
+      try
+        TempFs := TFileStream.Create(FImagePath, fmOpenRead or fmShareDenyNone);
+        try
+          DirCluster := FindDirectoryInPath(TempFs, ADestDir);
+          if DirCluster <> -1 then
+          begin
+            if FindFileInDirectory(TempFs, DirCluster, CheckName) <> -1 then
+              Exit(True);
+          end;
+        finally
+          TempFs.Free;
+        end;
+      except
+        // Ignore probing file access errors
+      end;
+    end;
+  end;
+
+begin
+  // First obtain basic sanitized 8.3 name
+  Candidate := SanitizeDOSName(AName, IsDir);
+  if not NameExistsInDest(Candidate) then
+  begin
+    Result := Candidate;
+    Exit;
+  end;
+
+  // Split into base and extension for numeric tail generation
+  if IsDir then
+  begin
+    CleanBase := Candidate;
+    Ext := '';
+  end
+  else
+  begin
+    DotPos := LastDelimiter('.', Candidate);
+    if DotPos > 0 then
+    begin
+      CleanBase := Copy(Candidate, 1, DotPos - 1);
+      Ext := Copy(Candidate, DotPos + 1, Length(Candidate));
+    end
+    else
+    begin
+      CleanBase := Candidate;
+      Ext := '';
+    end;
+  end;
+
+  // Generate ~1, ~2, ... ~99
+  for N := 1 to 99 do
+  begin
+    Suffix := '~' + IntToStr(N);
+    MaxBaseLen := 8 - Length(Suffix);
+    if MaxBaseLen < 1 then MaxBaseLen := 1;
+    if Ext <> '' then
+      Candidate := Copy(CleanBase, 1, Min(Length(CleanBase), MaxBaseLen)) + Suffix + '.' + Ext
+    else
+      Candidate := Copy(CleanBase, 1, Min(Length(CleanBase), MaxBaseLen)) + Suffix;
+
+    if not NameExistsInDest(Candidate) then
+    begin
+      Result := Candidate;
+      Exit;
+    end;
+  end;
+
+  Result := Candidate;
+end;
+
+{------------------------------------------------------------------
   Function: IsDirectChild
   Purpose:  Checks if AFullPath is an immediate child of AParentPath
  ------------------------------------------------------------------}
@@ -790,7 +921,7 @@ begin
 
         if (SearchRec.Attr and faDirectory) <> 0 then
         begin
-          DosName := SanitizeDOSName(SearchRec.Name, True);
+          DosName := GenerateUniqueDOSName(SearchRec.Name, True, ATargetRelPath);
           SubTargetRelPath := ATargetRelPath + DosName + '\';
           ScanDirectoryRecursive(HostItemPath, SubTargetRelPath);
         end
@@ -798,6 +929,7 @@ begin
         begin
           FFilePaths.Add(HostItemPath);
           FFileDestDirs.Add(ATargetRelPath);
+          FFileTargetNames.Add(GenerateUniqueDOSName(SearchRec.Name, False, ATargetRelPath));
         end;
       until FindNext(SearchRec) <> 0;
     finally
@@ -824,13 +956,14 @@ begin
     begin
       if DirectoryExists(OpenDialog.Files[I]) then
       begin
-        TargetName := SanitizeDOSName(ExtractFileName(ExcludeTrailingPathDelimiter(OpenDialog.Files[I])), True);
+        TargetName := GenerateUniqueDOSName(ExtractFileName(ExcludeTrailingPathDelimiter(OpenDialog.Files[I])), True, FCurrentPath);
         ScanDirectoryRecursive(OpenDialog.Files[I], FCurrentPath + TargetName + '\');
       end
       else
       begin
         FFilePaths.Add(OpenDialog.Files[I]);
         FFileDestDirs.Add(FCurrentPath);
+        FFileTargetNames.Add(GenerateUniqueDOSName(ExtractFileName(OpenDialog.Files[I]), False, FCurrentPath));
       end;
     end;
     UpdateFileListDisplay;
@@ -852,7 +985,7 @@ begin
     SelectedDir := ExcludeTrailingPathDelimiter(SelectDirectoryDialog.FileName);
     if (SelectedDir <> '') and DirectoryExists(SelectedDir) then
     begin
-      TargetName := SanitizeDOSName(ExtractFileName(SelectedDir), True);
+      TargetName := GenerateUniqueDOSName(ExtractFileName(SelectedDir), True, FCurrentPath);
       ScanDirectoryRecursive(SelectedDir, FCurrentPath + TargetName + '\');
       UpdateFileListDisplay;
     end;
@@ -870,7 +1003,7 @@ var
 begin
   DirName := InputBox('Create Directory', 'Enter directory name (max 8 chars):', '');
   if DirName = '' then Exit;
-  DirName := SanitizeDOSName(DirName, True);
+  DirName := GenerateUniqueDOSName(DirName, True, FCurrentPath);
   TargetRelPath := FCurrentPath + DirName + '\';
   if FNewDirectories.IndexOf(TargetRelPath) = -1 then
     FNewDirectories.Add(TargetRelPath);
@@ -1258,8 +1391,9 @@ begin
     Index := -1;
     for I := 0 to FFilePaths.Count - 1 do
     begin
-      if SameText(ExtractFileName(FFilePaths[I]), FileName) and
-         (I < FFileDestDirs.Count) and SameText(FFileDestDirs[I], FCurrentPath) then
+      if (I < FFileDestDirs.Count) and SameText(FFileDestDirs[I], FCurrentPath) and
+         (((I < FFileTargetNames.Count) and SameText(FFileTargetNames[I], FileName)) or
+          SameText(ExtractFileName(FFilePaths[I]), FileName)) then
       begin
         Index := I;
         Break;
@@ -1270,6 +1404,8 @@ begin
       FFilePaths.Delete(Index);
       if Index < FFileDestDirs.Count then
         FFileDestDirs.Delete(Index);
+      if Index < FFileTargetNames.Count then
+        FFileTargetNames.Delete(Index);
     end;
     UpdateFileListDisplay;
     Exit;
@@ -1460,7 +1596,7 @@ var
   DirEntryPos, DirCluster: Int64;
   I, J: Integer;
   OriginalSize: Int64;
-  TempStr, FileDestDir: string;
+  TempStr, FileDestDir, TargetName: string;
   TargetFile, FileDir, DelName, TargetDir, ParentDir, TempOutFile, BakFileName: string;
   HasBackup: Boolean;
 begin
@@ -1570,15 +1706,21 @@ begin
         else
           FileDestDir := FCurrentPath;
 
+        if (I < FFileTargetNames.Count) and (FFileTargetNames[I] <> '') then
+          TargetName := FFileTargetNames[I]
+        else
+          TargetName := ExtractFileName(FFilePaths[I]);
+
         SourceFile := TFileStream.Create(FFilePaths[I], fmOpenRead or fmShareDenyNone);
         try
-          WriteFileToImage(TempImageFile, ExtractFileName(FFilePaths[I]), SourceFile, FileDestDir);
+          WriteFileToImage(TempImageFile, ExtractFileName(FFilePaths[I]), SourceFile, FileDestDir, TargetName);
         finally
           SourceFile.Free;
         end;
       end;
       FFilePaths.Clear;
       FFileDestDirs.Clear;
+      FFileTargetNames.Clear;
 
       // Write / update Atari ST volume label in root directory
       if FVolumeLabel <> '' then
@@ -1668,6 +1810,7 @@ begin
     FNewDirectories.Clear;
     FFilePaths.Clear;
     FFileDestDirs.Clear;
+    FFileTargetNames.Clear;
     FDirsToDelete.Clear;
     FFilesToDelete.Clear;
 
@@ -2098,6 +2241,7 @@ begin
   {$ENDIF}
   FFilePaths := TStringList.Create;
   FFileDestDirs := TStringList.Create;
+  FFileTargetNames := TStringList.Create;
   FFilesToDelete := TStringList.Create;
   FDisplayItems := TStringList.Create;
   FNewDirectories := TStringList.Create;
@@ -2183,6 +2327,7 @@ begin
   end;
   FreeAndNil(FFilePaths);
   FreeAndNil(FFileDestDirs);
+  FreeAndNil(FFileTargetNames);
   FreeAndNil(FFilesToDelete);
   FreeAndNil(FDisplayItems);
   FreeAndNil(FNewDirectories);
@@ -2237,15 +2382,17 @@ begin
     if DirectoryExists(ItemPath) then
     begin
       // Dropped a folder: recursively add directory tree into FCurrentPath
-      TargetName := SanitizeDOSName(ExtractFileName(ExcludeTrailingPathDelimiter(ItemPath)), True);
+      TargetName := GenerateUniqueDOSName(ExtractFileName(ExcludeTrailingPathDelimiter(ItemPath)), True, FCurrentPath);
       if TargetName <> '' then
         ScanDirectoryRecursive(ItemPath, FCurrentPath + TargetName + '\');
     end
     else if FileExists(ItemPath) then
     begin
       // Dropped a file: stage into FCurrentPath
+      TargetName := GenerateUniqueDOSName(ExtractFileName(ItemPath), False, FCurrentPath);
       FFilePaths.Add(ItemPath);
       FFileDestDirs.Add(FCurrentPath);
+      FFileTargetNames.Add(TargetName);
     end;
   end;
 
@@ -2642,7 +2789,10 @@ begin
       begin
         HostFile := FFilePaths[I];
         FillChar(Info, SizeOf(Info), 0);
-        Info.CleanName := UpperCase(ExtractFileName(HostFile));
+        if (I < FFileTargetNames.Count) and (FFileTargetNames[I] <> '') then
+          Info.CleanName := FFileTargetNames[I]
+        else
+          Info.CleanName := UpperCase(ExtractFileName(HostFile));
         Info.DisplayName := Info.CleanName + ' *A*';
         Info.IsDir := False;
         Info.IsStagedAdd := True;
@@ -3255,7 +3405,7 @@ end;
     ASourceFile - Source file stream
     ADestPath   - Destination directory path within the image
  ------------------------------------------------------------------}
-procedure TForm1.WriteFileToImage(const AImageFile: TFileStream; const AFileName: string; const ASourceFile: TFileStream; const ADestPath: string);
+procedure TForm1.WriteFileToImage(const AImageFile: TFileStream; const AFileName: string; const ASourceFile: TFileStream; const ADestPath: string; const ATargetName: string = '');
 var
   DirEntryPos, DirCluster: Int64;
   FileClusters: TStringList;
@@ -3282,7 +3432,10 @@ begin
     Exit;
   end;
 
-  Sanitized := SanitizeDOSName(ExtractFileName(AFileName), False);
+  if ATargetName <> '' then
+    Sanitized := ATargetName
+  else
+    Sanitized := SanitizeDOSName(ExtractFileName(AFileName), False);
 
   // Check if a file with this sanitized 8.3 name already exists in the destination
   DirEntryPos := FindFileInDirectory(AImageFile, DirCluster, Sanitized);
@@ -5719,8 +5872,13 @@ end;
 procedure TForm1.ListViewFilesMouseMove(Sender: TObject; Shift: TShiftState; X, Y: Integer);
 var
   Item: TListItem;
-  Idx: Integer;
-  TempHostPath: string;
+  Idx, J, ExtractFileCount: Integer;
+  ExtractByteCount: Int64;
+  TempHostPath, FolderCleanName, TempDirBase, TargetPrefix, RelPath, OutSubFile: string;
+  ArchItem: TArchiveItem;
+  OutFs: TFileStream;
+  ImgStream: TFileStream;
+  DirCluster: Int64;
 begin
   if (ssLeft in Shift) and FDragPending and not FDragActive then
   begin
@@ -5735,17 +5893,68 @@ begin
       Idx := Item.Index;
       if (Idx < 0) or (Idx > High(FDiskItems)) then Exit;
 
-      if FDiskItems[Idx].IsDir or (FDiskItems[Idx].CleanName = '..') then Exit;
+      if (FDiskItems[Idx].CleanName = '..') or (FDiskItems[Idx].CleanName = '..\') then Exit;
 
-      if FInArchiveMode then
+      if FDiskItems[Idx].IsDir then
       begin
-        if not FArchiveVault.ExtractEntryToTempFile(FArchiveInnerPath + FDiskItems[Idx].CleanName, TempHostPath) then
-          Exit;
+        // Dragging out an entire directory: extract tree to temporary host folder
+        FolderCleanName := StringReplace(FDiskItems[Idx].CleanName, '\', '', [rfReplaceAll]);
+        TempDirBase := IncludeTrailingPathDelimiter(GetTempDir) + 'stimage_drag_' + FormatDateTime('hhnnsszzz', Now) + PathDelim;
+        TempHostPath := TempDirBase + FolderCleanName;
+        ForceDirectories(TempHostPath);
+
+        if FInArchiveMode then
+        begin
+          // Extract directory subtree from archive
+          TargetPrefix := FArchiveInnerPath + FolderCleanName + '/';
+          for J := 0 to FArchiveVault.ItemCount - 1 do
+          begin
+            ArchItem := FArchiveVault.GetItem(J);
+            if StartsText(TargetPrefix, ArchItem.FullPath) and not ArchItem.IsDir then
+            begin
+              RelPath := Copy(ArchItem.FullPath, Length(TargetPrefix) + 1, Length(ArchItem.FullPath));
+              RelPath := StringReplace(RelPath, '/', PathDelim, [rfReplaceAll]);
+              OutSubFile := TempHostPath + PathDelim + RelPath;
+              ForceDirectories(ExtractFilePath(OutSubFile));
+              OutFs := TFileStream.Create(OutSubFile, fmCreate);
+              try
+                FArchiveVault.ExtractEntryToStream(ArchItem.FullPath, OutFs);
+              finally
+                OutFs.Free;
+              end;
+            end;
+          end;
+        end
+        else
+        begin
+          // Extract directory subtree from Atari ST disk image
+          if (FImagePath <> '') and FileExists(FImagePath) then
+          begin
+            ImgStream := TFileStream.Create(FImagePath, fmOpenRead or fmShareDenyNone);
+            try
+              DirCluster := FDiskItems[Idx].StartCluster;
+              ExtractFileCount := 0;
+              ExtractByteCount := 0;
+              ExtractDiskDirectory(ImgStream, DirCluster, TempHostPath, ExtractFileCount, ExtractByteCount);
+            finally
+              ImgStream.Free;
+            end;
+          end;
+        end;
       end
       else
-        TempHostPath := ExtractFileToTemp(FDiskItems[Idx].DisplayName);
+      begin
+        // Dragging out a single file
+        if FInArchiveMode then
+        begin
+          if not FArchiveVault.ExtractEntryToTempFile(FArchiveInnerPath + FDiskItems[Idx].CleanName, TempHostPath) then
+            Exit;
+        end
+        else
+          TempHostPath := ExtractFileToTemp(FDiskItems[Idx].DisplayName);
+      end;
 
-      if (TempHostPath <> '') and FileExists(TempHostPath) then
+      if (TempHostPath <> '') and (FileExists(TempHostPath) or DirectoryExists(TempHostPath)) then
       begin
         FDragActive := True;
         FDragSourcePath := ExpandFileName(TempHostPath);
@@ -6686,6 +6895,24 @@ begin
     Exit;
   end;
 
+  if Key = VK_F5 then
+  begin
+    Key := 0;
+    if FInArchiveMode then
+    begin
+      UpdateArchiveFileListDisplay;
+      UpdateStatusBar;
+    end
+    else if (FImagePath <> '') and FileExists(FImagePath) then
+    begin
+      ReadSTImage(FImagePath, FCurrentPath);
+      UpdateFileListDisplay;
+      UpdateFreeSpaceDisplay;
+      UpdateStatusBar;
+    end;
+    Exit;
+  end;
+
   if Key = VK_F3 then
   begin
     ButtonViewFileClick(nil);
@@ -6781,6 +7008,24 @@ end;
  ------------------------------------------------------------------}
 procedure TForm1.ListViewFilesKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
 begin
+  if Key = VK_F5 then
+  begin
+    Key := 0;
+    if FInArchiveMode then
+    begin
+      UpdateArchiveFileListDisplay;
+      UpdateStatusBar;
+    end
+    else if (FImagePath <> '') and FileExists(FImagePath) then
+    begin
+      ReadSTImage(FImagePath, FCurrentPath);
+      UpdateFileListDisplay;
+      UpdateFreeSpaceDisplay;
+      UpdateStatusBar;
+    end;
+    Exit;
+  end;
+
   if (Key = VK_F) and (ssCtrl in Shift) then
   begin
     Key := 0;
